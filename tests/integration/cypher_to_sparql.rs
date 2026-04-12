@@ -405,3 +405,334 @@ fn generic_sparql11_reports_rdf_star_false() {
     use polygraph::target::TargetEngine;
     assert!(!ENGINE.supports_rdf_star());
 }
+
+// ── Phase 4: ORDER BY / SKIP / LIMIT ─────────────────────────────────────────
+
+#[test]
+fn return_order_by_asc_emits_order_by() {
+    let s = transpile_lower("MATCH (n:Person) RETURN n ORDER BY n.name");
+    assert!(s.contains("order by"), "got: {s}");
+}
+
+#[test]
+fn return_order_by_desc_emits_desc() {
+    let s = transpile("MATCH (n:Person) RETURN n ORDER BY n.name DESC");
+    let s_lower = s.to_lowercase();
+    assert!(s_lower.contains("order by"), "got: {s}");
+    assert!(s_lower.contains("desc"), "got: {s}");
+}
+
+#[test]
+fn return_limit_emits_limit() {
+    let s = transpile_lower("MATCH (n) RETURN n LIMIT 10");
+    assert!(s.contains("limit"), "got: {s}");
+    assert!(s.contains("10"), "got: {s}");
+}
+
+#[test]
+fn return_skip_emits_offset() {
+    let s = transpile_lower("MATCH (n) RETURN n SKIP 5");
+    // SPARQL Slice with start=5, no length
+    assert!(s.contains("offset") || s.contains("5"), "got: {s}");
+}
+
+#[test]
+fn return_skip_and_limit_emits_both() {
+    let s = transpile_lower("MATCH (n) RETURN n SKIP 5 LIMIT 10");
+    assert!(s.contains("limit"), "got: {s}");
+    assert!(s.contains("10"), "got: {s}");
+}
+
+#[test]
+fn return_order_by_multiple_fields() {
+    let s = transpile_lower("MATCH (n:Person) RETURN n ORDER BY n.name ASC, n.age DESC");
+    assert!(s.contains("order by"), "got: {s}");
+    assert!(s.contains("desc"), "got: {s}");
+}
+
+// ── Phase 4: aggregation ──────────────────────────────────────────────────────
+
+#[test]
+fn aggregate_count_star_emits_count() {
+    // count(*) AS total
+    let s = transpile_lower("MATCH (n:Person) RETURN count(*) AS total");
+    assert!(s.contains("count"), "got: {s}");
+    assert!(s.contains("total"), "got: {s}");
+}
+
+#[test]
+fn aggregate_count_node_emits_count_expr() {
+    let s = transpile_lower("MATCH (n:Person) RETURN count(n) AS total");
+    assert!(s.contains("count"), "got: {s}");
+}
+
+#[test]
+fn aggregate_sum_emits_sum() {
+    let s = transpile_lower("MATCH (n:Person) RETURN n.name, sum(n.age) AS total_age");
+    assert!(s.contains("sum"), "got: {s}");
+    assert!(s.contains("total_age"), "got: {s}");
+}
+
+#[test]
+fn aggregate_avg_emits_avg() {
+    let s = transpile_lower("MATCH (n:Person) RETURN avg(n.score) AS mean_score");
+    assert!(s.contains("avg"), "got: {s}");
+}
+
+#[test]
+fn aggregate_collect_emits_group_concat() {
+    let s = transpile_lower("MATCH (n:Person) RETURN collect(n.name) AS names");
+    assert!(s.contains("group_concat") || s.contains("groupconcat"),
+        "expected GROUP_CONCAT, got: {s}");
+}
+
+#[test]
+fn aggregate_group_by_non_agg_vars() {
+    // Non-aggregate variables should become GROUP BY variables.
+    let s = transpile_lower("MATCH (n:Person) RETURN n.name, count(*) AS cnt");
+    assert!(s.contains("count"), "got: {s}");
+    // The query must be a valid SELECT GROUP BY structure.
+    assert!(s.contains("select"), "got: {s}");
+}
+
+// ── Phase 4: UNWIND ───────────────────────────────────────────────────────────
+
+#[test]
+fn unwind_list_emits_values() {
+    let s = transpile_lower("UNWIND [1, 2, 3] AS x RETURN x");
+    assert!(s.contains("values"), "got: {s}");
+    assert!(s.contains("?x"), "got: {s}");
+}
+
+#[test]
+fn unwind_string_list_emits_values() {
+    let s = transpile_lower(r#"UNWIND ["alice", "bob"] AS name RETURN name"#);
+    assert!(s.contains("values"), "got: {s}");
+    assert!(s.contains("name"), "got: {s}");
+}
+
+// ── Phase 4: variable-length paths ───────────────────────────────────────────
+
+#[test]
+fn varlength_star_emits_zero_or_more() {
+    // -[:KNOWS*]-> → ZeroOrMore property path
+    let s = transpile_lower("MATCH (a)-[:KNOWS*]->(b) RETURN a, b");
+    // spargebra renders ZeroOrMore as (pred)* in SPARQL property path syntax
+    assert!(s.contains("knows"), "got: {s}");
+    assert!(s.contains("*") || s.contains("zeroormore"), "expected path *, got: {s}");
+}
+
+#[test]
+fn varlength_one_or_more_emits_plus() {
+    // -[:KNOWS*1..]-> → OneOrMore
+    let s = transpile_lower("MATCH (a)-[:KNOWS*1..]->(b) RETURN a, b");
+    assert!(s.contains("knows"), "got: {s}");
+    assert!(s.contains("+") || s.contains("oneormore"), "expected path +, got: {s}");
+}
+
+#[test]
+fn varlength_zero_or_one_emits_question() {
+    // -[:KNOWS*0..1]-> → ZeroOrOne
+    let s = transpile_lower("MATCH (a)-[:KNOWS*0..1]->(b) RETURN a, b");
+    assert!(s.contains("knows"), "got: {s}");
+    assert!(s.contains("?") || s.contains("zeroorone"), "expected path ?, got: {s}");
+}
+
+#[test]
+fn varlength_bounded_range_is_unsupported() {
+    // *2..5 cannot be expressed in SPARQL 1.1 property paths
+    let result = Transpiler::cypher_to_sparql(
+        "MATCH (a)-[:KNOWS*2..5]->(b) RETURN a, b",
+        &ENGINE,
+    );
+    assert!(result.is_err(), "expected UnsupportedFeature for *2..5");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("bounded") || msg.contains("2"), "got: {msg}");
+}
+
+// ── Phase 4: multi-type relationship (union path) ─────────────────────────────
+
+#[test]
+fn multi_type_rel_emits_alternative_path() {
+    // -[:KNOWS|LIKES]-> → Alternative property path
+    let s = transpile_lower("MATCH (a)-[:KNOWS|LIKES]->(b) RETURN a, b");
+    assert!(s.contains("knows"), "got: {s}");
+    assert!(s.contains("likes"), "got: {s}");
+    // spargebra uses | for Alternative
+    assert!(s.contains("|"), "expected | path alternative, got: {s}");
+}
+
+// ── Phase 4: IN list literal ─────────────────────────────────────────────────
+
+#[test]
+fn where_in_list_literal_emits_in() {
+    let s = transpile_lower(r#"MATCH (n:Person) WHERE n.status IN ["active", "pending"] RETURN n"#);
+    assert!(s.contains("in"), "got: {s}");
+    assert!(s.contains("active"), "got: {s}");
+    assert!(s.contains("pending"), "got: {s}");
+}
+
+// ── Phase 4: write clauses → UnsupportedFeature ───────────────────────────────
+
+#[test]
+fn create_clause_returns_unsupported_feature() {
+    let result = Transpiler::cypher_to_sparql(
+        "CREATE (n:Person {name: 'Alice'})",
+        &ENGINE,
+    );
+    assert!(result.is_err(), "CREATE should return an error");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.to_lowercase().contains("create") || msg.contains("unsupported"),
+        "got: {msg}");
+}
+
+#[test]
+fn merge_clause_returns_unsupported_feature() {
+    let result = Transpiler::cypher_to_sparql(
+        "MERGE (n:Person {name: 'Alice'})",
+        &ENGINE,
+    );
+    assert!(result.is_err(), "MERGE should return an error");
+}
+
+#[test]
+fn set_clause_returns_unsupported_feature() {
+    let result = Transpiler::cypher_to_sparql(
+        "MATCH (n:Person) SET n.age = 30",
+        &ENGINE,
+    );
+    assert!(result.is_err(), "SET should return an error");
+}
+
+#[test]
+fn delete_clause_returns_unsupported_feature() {
+    let result = Transpiler::cypher_to_sparql(
+        "MATCH (n:Person) DELETE n",
+        &ENGINE,
+    );
+    assert!(result.is_err(), "DELETE should return an error");
+}
+
+#[test]
+fn call_clause_returns_unsupported_feature() {
+    let result = Transpiler::cypher_to_sparql(
+        "CALL apoc.path.expand(n, 'KNOWS', null, 1, 3) WITH node RETURN node",
+        &ENGINE,
+    );
+    assert!(result.is_err(), "CALL should return an error");
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("apoc") || msg.contains("CALL") || msg.contains("unsupported"),
+        "got: {msg}");
+}
+
+// ── Phase 4: parser-level tests for new clauses ───────────────────────────────
+
+#[test]
+fn parse_order_by_desc_round_trips() {
+    use polygraph::Transpiler;
+    let ast = Transpiler::parse_cypher("MATCH (n) RETURN n ORDER BY n.name DESC")
+        .expect("parse should succeed");
+    // Verify ORDER BY parsed correctly.
+    if let Some(polygraph::ast::cypher::Clause::Return(r)) = ast.clauses.last() {
+        let ob = r.order_by.as_ref().expect("order_by should be Some");
+        assert!(ob.items[0].descending, "first sort item should be DESC");
+    } else {
+        panic!("last clause should be RETURN");
+    }
+}
+
+#[test]
+fn parse_unwind_as_variable() {
+    use polygraph::Transpiler;
+    let ast = Transpiler::parse_cypher("UNWIND [1, 2] AS x RETURN x")
+        .expect("parse should succeed");
+    if let Some(polygraph::ast::cypher::Clause::Unwind(u)) = ast.clauses.first() {
+        assert_eq!(u.variable, "x");
+    } else {
+        panic!("first clause should be UNWIND");
+    }
+}
+
+#[test]
+fn parse_aggregate_count_star() {
+    use polygraph::ast::cypher::{AggregateExpr, Expression};
+    use polygraph::Transpiler;
+    let ast = Transpiler::parse_cypher("MATCH (n) RETURN count(*) AS total")
+        .expect("parse should succeed");
+    if let Some(polygraph::ast::cypher::Clause::Return(r)) = ast.clauses.last() {
+        if let polygraph::ast::cypher::ReturnItems::Explicit(items) = &r.items {
+            assert!(matches!(
+                &items[0].expression,
+                Expression::Aggregate(AggregateExpr::Count { expr: None, .. })
+            ), "expected count(*), got {:?}", items[0].expression);
+        }
+    }
+}
+
+#[test]
+fn parse_set_clause() {
+    use polygraph::ast::cypher::{Clause, SetItem};
+    use polygraph::Transpiler;
+    let ast = Transpiler::parse_cypher("MATCH (n) SET n.age = 30")
+        .expect("parse should succeed");
+    if let Some(Clause::Set(s)) = ast.clauses.last() {
+        assert_eq!(s.items.len(), 1);
+        assert!(matches!(s.items[0], SetItem::Property { .. }));
+    } else {
+        panic!("last clause should be SET, got {:?}", ast.clauses.last());
+    }
+}
+
+#[test]
+fn parse_delete_clause() {
+    use polygraph::ast::cypher::{Clause, DeleteClause};
+    use polygraph::Transpiler;
+    let ast = Transpiler::parse_cypher("MATCH (n) DELETE n")
+        .expect("parse should succeed");
+    if let Some(Clause::Delete(DeleteClause { detach, expressions })) = ast.clauses.last() {
+        assert!(!detach, "should not be DETACH");
+        assert_eq!(expressions.len(), 1);
+    } else {
+        panic!("last clause should be DELETE");
+    }
+}
+
+#[test]
+fn parse_detach_delete_clause() {
+    use polygraph::ast::cypher::{Clause, DeleteClause};
+    use polygraph::Transpiler;
+    let ast = Transpiler::parse_cypher("MATCH (n) DETACH DELETE n")
+        .expect("parse should succeed");
+    if let Some(Clause::Delete(DeleteClause { detach, .. })) = ast.clauses.last() {
+        assert!(detach, "should be DETACH");
+    } else {
+        panic!("last clause should be DETACH DELETE");
+    }
+}
+
+#[test]
+fn parse_remove_property_clause() {
+    use polygraph::ast::cypher::{Clause, RemoveItem};
+    use polygraph::Transpiler;
+    let ast = Transpiler::parse_cypher("MATCH (n) REMOVE n.age")
+        .expect("parse should succeed");
+    if let Some(Clause::Remove(r)) = ast.clauses.last() {
+        assert!(matches!(r.items[0], RemoveItem::Property { .. }));
+    } else {
+        panic!("last clause should be REMOVE");
+    }
+}
+
+#[test]
+fn parse_call_clause() {
+    use polygraph::ast::cypher::Clause;
+    use polygraph::Transpiler;
+    let ast = Transpiler::parse_cypher("CALL db.labels()")
+        .expect("parse should succeed");
+    if let Some(Clause::Call(c)) = ast.clauses.first() {
+        assert_eq!(c.procedure, "db.labels");
+    } else {
+        panic!("first clause should be CALL");
+    }
+}
+

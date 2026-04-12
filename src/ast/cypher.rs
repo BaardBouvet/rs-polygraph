@@ -1,7 +1,8 @@
-/// openCypher AST node types for Phase 1.
+/// openCypher AST node types (Phase 1 + Phase 4).
 ///
-/// Covers the core read-query constructs: `MATCH`, `OPTIONAL MATCH`,
-/// `WHERE`, `RETURN`, and `WITH`.
+/// Covers: `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`,
+/// `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `CREATE`, `MERGE`, `SET`,
+/// `DELETE`, `DETACH DELETE`, `REMOVE`, and `CALL` procedure stubs.
 
 // ── Primitive aliases ────────────────────────────────────────────────────────
 
@@ -28,6 +29,13 @@ pub enum Clause {
     Match(MatchClause),
     With(WithClause),
     Return(ReturnClause),
+    Unwind(UnwindClause),
+    Create(CreateClause),
+    Merge(MergeClause),
+    Set(SetClause),
+    Delete(DeleteClause),
+    Remove(RemoveClause),
+    Call(CallClause),
 }
 
 /// A `MATCH` or `OPTIONAL MATCH` clause, with an optional inline `WHERE`.
@@ -49,14 +57,104 @@ pub struct WhereClause {
 pub struct ReturnClause {
     pub distinct: bool,
     pub items: ReturnItems,
+    pub order_by: Option<OrderByClause>,
+    pub skip: Option<Expression>,
+    pub limit: Option<Expression>,
 }
 
-/// A `WITH` clause (projection + optional `WHERE`).
+/// A `WITH` clause (projection + optional `WHERE`, ORDER BY, SKIP, LIMIT).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WithClause {
     pub distinct: bool,
     pub items: ReturnItems,
     pub where_: Option<WhereClause>,
+    pub order_by: Option<OrderByClause>,
+    pub skip: Option<Expression>,
+    pub limit: Option<Expression>,
+}
+
+// ── Phase 4 clauses ──────────────────────────────────────────────────────────
+
+/// An `UNWIND` clause: `UNWIND expr AS var`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnwindClause {
+    pub expression: Expression,
+    pub variable: Ident,
+}
+
+/// A `CREATE` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateClause {
+    pub pattern: PatternList,
+}
+
+/// A `MERGE` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeClause {
+    pub pattern: Pattern,
+}
+
+/// A `SET` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetClause {
+    pub items: Vec<SetItem>,
+}
+
+/// A single assignment in a `SET` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetItem {
+    /// `n.prop = expr`
+    Property { variable: Ident, key: Ident, value: Expression },
+    /// `n += { map }`
+    MergeMap { variable: Ident, map: MapLiteral },
+    /// `n = expr`
+    NodeReplace { variable: Ident, value: Expression },
+}
+
+/// A `DELETE` or `DETACH DELETE` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteClause {
+    pub detach: bool,
+    pub expressions: Vec<Expression>,
+}
+
+/// A `REMOVE` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoveClause {
+    pub items: Vec<RemoveItem>,
+}
+
+/// A single item in a `REMOVE` clause.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemoveItem {
+    /// `n.prop`
+    Property { variable: Ident, key: Ident },
+    /// `n:Label`
+    Label { variable: Ident, labels: Vec<Label> },
+}
+
+/// A `CALL` procedure invocation stub.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallClause {
+    /// Qualified procedure name, e.g. `apoc.path.expand`.
+    pub procedure: String,
+    pub args: Vec<Expression>,
+    pub yields: Vec<Ident>,
+}
+
+// ── ORDER BY ─────────────────────────────────────────────────────────────────
+
+/// An `ORDER BY` clause attached to `RETURN` or `WITH`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderByClause {
+    pub items: Vec<SortItem>,
+}
+
+/// A single sort expression.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SortItem {
+    pub expression: Expression,
+    pub descending: bool,
 }
 
 // ── Return / projection items ────────────────────────────────────────────────
@@ -160,6 +258,8 @@ pub enum Expression {
     Literal(Literal),
     List(Vec<Expression>),
     Map(MapLiteral),
+    /// Aggregate function call: `count(n)`, `sum(n.score)`, etc.
+    Aggregate(AggregateExpr),
 }
 
 /// Binary comparison operators.
@@ -191,6 +291,25 @@ pub enum Literal {
 
 /// A map literal: `{key: expr, …}`.
 pub type MapLiteral = Vec<(Ident, Expression)>;
+
+// ── Aggregate expressions ─────────────────────────────────────────────────────
+
+/// An aggregate function call expression.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateExpr {
+    /// `count(*)` or `count([DISTINCT] expr)`
+    Count { distinct: bool, expr: Option<Box<Expression>> },
+    /// `sum([DISTINCT] expr)`
+    Sum { distinct: bool, expr: Box<Expression> },
+    /// `avg([DISTINCT] expr)`
+    Avg { distinct: bool, expr: Box<Expression> },
+    /// `min([DISTINCT] expr)`
+    Min { distinct: bool, expr: Box<Expression> },
+    /// `max([DISTINCT] expr)`
+    Max { distinct: bool, expr: Box<Expression> },
+    /// `collect([DISTINCT] expr)` → maps to SPARQL GROUP_CONCAT
+    Collect { distinct: bool, expr: Box<Expression> },
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -304,6 +423,9 @@ mod tests {
             distinct: false,
             items: ReturnItems::All,
             where_: None,
+            order_by: None,
+            skip: None,
+            limit: None,
         };
         assert!(!wc.distinct);
         assert!(wc.where_.is_none());
@@ -338,6 +460,108 @@ mod tests {
         let rq = RangeQuantifier { lower: Some(1), upper: None };
         assert_eq!(rq.lower, Some(1));
         assert!(rq.upper.is_none());
+    }
+
+    // ── Phase 4 AST tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn return_clause_with_order_limit() {
+        let r = ReturnClause {
+            distinct: false,
+            items: ReturnItems::All,
+            order_by: Some(OrderByClause {
+                items: vec![SortItem {
+                    expression: Expression::Variable("n".to_string()),
+                    descending: true,
+                }],
+            }),
+            skip: Some(Expression::Literal(Literal::Integer(10))),
+            limit: Some(Expression::Literal(Literal::Integer(5))),
+        };
+        assert!(r.order_by.is_some());
+        assert!(r.skip.is_some());
+        assert!(r.limit.is_some());
+    }
+
+    #[test]
+    fn unwind_clause_fields() {
+        let u = UnwindClause {
+            expression: Expression::Variable("list".to_string()),
+            variable: "item".to_string(),
+        };
+        assert_eq!(u.variable, "item");
+    }
+
+    #[test]
+    fn create_clause_holds_pattern_list() {
+        let c = CreateClause { pattern: PatternList(vec![]) };
+        assert!(c.pattern.0.is_empty());
+    }
+
+    #[test]
+    fn set_item_property_variant() {
+        let s = SetItem::Property {
+            variable: "n".to_string(),
+            key: "name".to_string(),
+            value: Expression::Literal(Literal::String("Alice".to_string())),
+        };
+        assert!(matches!(s, SetItem::Property { .. }));
+    }
+
+    #[test]
+    fn delete_clause_detach_flag() {
+        let d = DeleteClause {
+            detach: true,
+            expressions: vec![Expression::Variable("n".to_string())],
+        };
+        assert!(d.detach);
+        assert_eq!(d.expressions.len(), 1);
+    }
+
+    #[test]
+    fn remove_clause_property_item() {
+        let r = RemoveClause {
+            items: vec![RemoveItem::Property {
+                variable: "n".to_string(),
+                key: "age".to_string(),
+            }],
+        };
+        assert_eq!(r.items.len(), 1);
+    }
+
+    #[test]
+    fn call_clause_fields() {
+        let c = CallClause {
+            procedure: "apoc.path.expand".to_string(),
+            args: vec![],
+            yields: vec!["node".to_string()],
+        };
+        assert_eq!(c.procedure, "apoc.path.expand");
+        assert_eq!(c.yields.len(), 1);
+    }
+
+    #[test]
+    fn aggregate_count_star() {
+        let a = AggregateExpr::Count { distinct: false, expr: None };
+        assert!(matches!(a, AggregateExpr::Count { expr: None, .. }));
+    }
+
+    #[test]
+    fn aggregate_sum_distinct() {
+        let a = AggregateExpr::Sum {
+            distinct: true,
+            expr: Box::new(Expression::Variable("n".to_string())),
+        };
+        assert!(matches!(a, AggregateExpr::Sum { distinct: true, .. }));
+    }
+
+    #[test]
+    fn aggregate_collect() {
+        let a = AggregateExpr::Collect {
+            distinct: false,
+            expr: Box::new(Expression::Variable("n".to_string())),
+        };
+        assert!(matches!(a, AggregateExpr::Collect { .. }));
     }
 
     #[test]

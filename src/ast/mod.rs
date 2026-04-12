@@ -2,7 +2,9 @@ pub mod cypher;
 pub mod gql;
 
 pub use cypher::{
-    Clause, CompOp, CypherQuery, Direction, Expression, Ident, Label, Literal, MapLiteral,
-    MatchClause, NodePattern, Pattern, PatternElement, PatternList, RangeQuantifier,
-    RelType, RelationshipPattern, ReturnClause, ReturnItem, ReturnItems, WhereClause, WithClause,
+    AggregateExpr, CallClause, Clause, CompOp, CreateClause, CypherQuery, DeleteClause,
+    Direction, Expression, Ident, Label, Literal, MapLiteral, MatchClause, MergeClause,
+    NodePattern, OrderByClause, Pattern, PatternElement, PatternList, RangeQuantifier,
+    RelType, RelationshipPattern, RemoveClause, RemoveItem, ReturnClause, ReturnItem,
+    ReturnItems, SetClause, SetItem, SortItem, UnwindClause, WhereClause, WithClause,
 };

@@ -3,9 +3,11 @@ use pest::Parser;
 use pest_derive::Parser;
 
 use crate::ast::cypher::{
-    Clause, CompOp, CypherQuery, Direction, Expression, Ident, Literal, MapLiteral, MatchClause,
-    NodePattern, Pattern, PatternElement, PatternList, RangeQuantifier, RelationshipPattern,
-    ReturnClause, ReturnItem, ReturnItems, WhereClause, WithClause,
+    AggregateExpr, CallClause, Clause, CompOp, CreateClause, CypherQuery, DeleteClause,
+    Direction, Expression, Ident, Label, Literal, MapLiteral, MatchClause, MergeClause,
+    NodePattern, OrderByClause, Pattern, PatternElement, PatternList, RangeQuantifier,
+    RelationshipPattern, RemoveClause, RemoveItem, ReturnClause, ReturnItem, ReturnItems,
+    SetClause, SetItem, SortItem, UnwindClause, WhereClause, WithClause,
 };
 use crate::error::PolygraphError;
 
@@ -56,6 +58,13 @@ fn build_statement(pair: Pair<Rule>) -> Result<CypherQuery, PolygraphError> {
             Rule::match_clause => Clause::Match(build_match_clause(inner)?),
             Rule::with_clause => Clause::With(build_with_clause(inner)?),
             Rule::return_clause => Clause::Return(build_return_clause(inner)?),
+            Rule::unwind_clause => Clause::Unwind(build_unwind_clause(inner)?),
+            Rule::create_clause => Clause::Create(build_create_clause(inner)?),
+            Rule::merge_clause => Clause::Merge(build_merge_clause(inner)?),
+            Rule::set_clause => Clause::Set(build_set_clause(inner)?),
+            Rule::delete_clause => Clause::Delete(build_delete_clause(inner)?),
+            Rule::remove_clause => Clause::Remove(build_remove_clause(inner)?),
+            Rule::call_clause => Clause::Call(build_call_clause(inner)?),
             _ => unreachable!("unexpected clause rule: {:?}", inner.as_rule()),
         };
         clauses.push(clause);
@@ -97,20 +106,43 @@ fn build_where_clause(pair: Pair<Rule>) -> Result<WhereClause, PolygraphError> {
 }
 
 fn build_return_clause(pair: Pair<Rule>) -> Result<ReturnClause, PolygraphError> {
-    // return_clause = { kw_RETURN ~ return_body }
-    let body_pair = pair
-        .into_inner()
-        .find(|p| p.as_rule() == Rule::return_body)
-        .expect("grammar guarantees return_body");
-    let (distinct, items) = build_return_body(body_pair)?;
-    Ok(ReturnClause { distinct, items })
+    // return_clause = { kw_RETURN ~ return_body ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+    let mut body_pair = None;
+    let mut order_by = None;
+    let mut skip = None;
+    let mut limit = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::kw_RETURN => {}
+            Rule::return_body => body_pair = Some(inner),
+            Rule::order_by_clause => order_by = Some(build_order_by_clause(inner)?),
+            Rule::skip_clause => {
+                skip = Some(build_expression(
+                    inner.into_inner().find(|p| p.as_rule() == Rule::expression)
+                        .expect("skip_clause has expression"),
+                )?);
+            }
+            Rule::limit_clause => {
+                limit = Some(build_expression(
+                    inner.into_inner().find(|p| p.as_rule() == Rule::expression)
+                        .expect("limit_clause has expression"),
+                )?);
+            }
+            _ => {}
+        }
+    }
+    let (distinct, items) = build_return_body(body_pair.expect("grammar guarantees return_body"))?;
+    Ok(ReturnClause { distinct, items, order_by, skip, limit })
 }
 
 fn build_with_clause(pair: Pair<Rule>) -> Result<WithClause, PolygraphError> {
-    // with_clause = { kw_WITH ~ return_body ~ where_clause? }
+    // with_clause = { kw_WITH ~ return_body ~ where_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
     let mut distinct = false;
     let mut items = None;
     let mut where_ = None;
+    let mut order_by = None;
+    let mut skip = None;
+    let mut limit = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -121,6 +153,19 @@ fn build_with_clause(pair: Pair<Rule>) -> Result<WithClause, PolygraphError> {
                 items = Some(i);
             }
             Rule::where_clause => where_ = Some(build_where_clause(inner)?),
+            Rule::order_by_clause => order_by = Some(build_order_by_clause(inner)?),
+            Rule::skip_clause => {
+                skip = Some(build_expression(
+                    inner.into_inner().find(|p| p.as_rule() == Rule::expression)
+                        .expect("skip_clause has expression"),
+                )?);
+            }
+            Rule::limit_clause => {
+                limit = Some(build_expression(
+                    inner.into_inner().find(|p| p.as_rule() == Rule::expression)
+                        .expect("limit_clause has expression"),
+                )?);
+            }
             _ => {}
         }
     }
@@ -128,6 +173,9 @@ fn build_with_clause(pair: Pair<Rule>) -> Result<WithClause, PolygraphError> {
         distinct,
         items: items.expect("grammar guarantees return_body"),
         where_,
+        order_by,
+        skip,
+        limit,
     })
 }
 
@@ -359,10 +407,219 @@ fn build_range_literal(pair: Pair<Rule>) -> Result<RangeQuantifier, PolygraphErr
     }
 }
 
+// ── Phase 4 clause builders ───────────────────────────────────────────────────
+
+fn build_unwind_clause(pair: Pair<Rule>) -> Result<UnwindClause, PolygraphError> {
+    // unwind_clause = { kw_UNWIND ~ expression ~ kw_AS ~ variable }
+    let mut expr = None;
+    let mut var = None;
+    let mut saw_as = false;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::kw_UNWIND => {}
+            Rule::expression => expr = Some(build_expression(inner)?),
+            Rule::kw_AS => saw_as = true,
+            Rule::variable if saw_as => var = Some(ident_text(&inner)),
+            _ => {}
+        }
+    }
+    Ok(UnwindClause {
+        expression: expr.expect("unwind_clause has expression"),
+        variable: var.expect("unwind_clause has variable"),
+    })
+}
+
+fn build_create_clause(pair: Pair<Rule>) -> Result<CreateClause, PolygraphError> {
+    // create_clause = { kw_CREATE ~ pattern_list }
+    let pl_pair = pair
+        .into_inner()
+        .find(|p| p.as_rule() == Rule::pattern_list)
+        .expect("create_clause has pattern_list");
+    Ok(CreateClause { pattern: build_pattern_list(pl_pair)? })
+}
+
+fn build_merge_clause(pair: Pair<Rule>) -> Result<MergeClause, PolygraphError> {
+    // merge_clause = { kw_MERGE ~ pattern }
+    let pat_pair = pair
+        .into_inner()
+        .find(|p| p.as_rule() == Rule::pattern)
+        .expect("merge_clause has pattern");
+    Ok(MergeClause { pattern: build_pattern(pat_pair)? })
+}
+
+fn build_set_clause(pair: Pair<Rule>) -> Result<SetClause, PolygraphError> {
+    // set_clause = { kw_SET ~ set_item ~ ("," ~ set_item)* }
+    let items: Result<Vec<_>, _> = pair
+        .into_inner()
+        .filter(|p| p.as_rule() == Rule::set_item)
+        .map(build_set_item)
+        .collect();
+    Ok(SetClause { items: items? })
+}
+
+fn build_set_item(pair: Pair<Rule>) -> Result<SetItem, PolygraphError> {
+    // set_item = { prop_access_expr ~ "=" ~ expression
+    //            | variable ~ "+=" ~ map_literal
+    //            | variable ~ "=" ~ expression }
+    let mut children: Vec<_> = pair.into_inner().collect();
+    // Detect variant by first child rule
+    match children[0].as_rule() {
+        Rule::prop_access_expr => {
+            // prop_access_expr = { variable ~ "." ~ prop_name }
+            let mut acc_inner = children.remove(0).into_inner();
+            let variable = ident_text(&acc_inner.next().expect("prop_access_expr has variable"));
+            // skip "."
+            let key_pair = acc_inner.find(|p| p.as_rule() == Rule::prop_name)
+                .expect("prop_access_expr has prop_name");
+            let key = key_pair.as_str().trim_matches('`').to_string();
+            // children[0] is now the expression (after removing prop_access_expr)
+            let value = build_expression(
+                children.into_iter().find(|p| p.as_rule() == Rule::expression)
+                    .expect("set_item property has expression"),
+            )?;
+            Ok(SetItem::Property { variable, key, value })
+        }
+        Rule::variable => {
+            let var_name = ident_text(&children[0]);
+            // Is the second non-whitespace child "+=" or "=" ?
+            // Look for map_literal (merge) vs expression (replace)
+            let has_map = children.iter().any(|p| p.as_rule() == Rule::map_literal);
+            if has_map {
+                let map_pair = children.into_iter()
+                    .find(|p| p.as_rule() == Rule::map_literal)
+                    .expect("merge map has map_literal");
+                let map = build_map_literal(map_pair)?;
+                Ok(SetItem::MergeMap { variable: var_name, map })
+            } else {
+                let expr_pair = children.into_iter()
+                    .find(|p| p.as_rule() == Rule::expression)
+                    .expect("set_item replace has expression");
+                let value = build_expression(expr_pair)?;
+                Ok(SetItem::NodeReplace { variable: var_name, value })
+            }
+        }
+        _ => unreachable!("unexpected set_item first child: {:?}", children[0].as_rule()),
+    }
+}
+
+fn build_delete_clause(pair: Pair<Rule>) -> Result<DeleteClause, PolygraphError> {
+    // delete_clause = { detach_marker? ~ kw_DELETE ~ expression ~ ("," ~ expression)* }
+    let mut detach = false;
+    let mut exprs = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::detach_marker => detach = true,
+            Rule::kw_DELETE => {}
+            Rule::expression => exprs.push(build_expression(inner)?),
+            _ => {}
+        }
+    }
+    Ok(DeleteClause { detach, expressions: exprs })
+}
+
+fn build_remove_clause(pair: Pair<Rule>) -> Result<RemoveClause, PolygraphError> {
+    // remove_clause = { kw_REMOVE ~ remove_item ~ ("," ~ remove_item)* }
+    let items: Result<Vec<_>, _> = pair
+        .into_inner()
+        .filter(|p| p.as_rule() == Rule::remove_item)
+        .map(build_remove_item)
+        .collect();
+    Ok(RemoveClause { items: items? })
+}
+
+fn build_remove_item(pair: Pair<Rule>) -> Result<RemoveItem, PolygraphError> {
+    // remove_item = { prop_access_expr | variable ~ node_labels }
+    let mut children: Vec<_> = pair.into_inner().collect();
+    match children[0].as_rule() {
+        Rule::prop_access_expr => {
+            let mut acc_inner = children.remove(0).into_inner();
+            let variable = ident_text(&acc_inner.next().expect("prop_access_expr var"));
+            let key = acc_inner.find(|p| p.as_rule() == Rule::prop_name)
+                .expect("prop_access_expr key")
+                .as_str().trim_matches('`').to_string();
+            Ok(RemoveItem::Property { variable, key })
+        }
+        Rule::variable => {
+            let variable = ident_text(&children[0]);
+            let mut labels: Vec<Label> = Vec::new();
+            for child in children.iter().skip(1) {
+                if child.as_rule() == Rule::node_labels {
+                    for lbl in child.clone().into_inner() {
+                        if lbl.as_rule() == Rule::node_label {
+                            let name = lbl.into_inner().next()
+                                .expect("node_label ident")
+                                .as_str().trim_matches('`').to_string();
+                            labels.push(name);
+                        }
+                    }
+                }
+            }
+            Ok(RemoveItem::Label { variable, labels })
+        }
+        _ => unreachable!("unexpected remove_item: {:?}", children[0].as_rule()),
+    }
+}
+
+fn build_call_clause(pair: Pair<Rule>) -> Result<CallClause, PolygraphError> {
+    // call_clause = { kw_CALL ~ proc_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" ~ (kw_WITH_kw ~ yield_items)? }
+    let mut procedure = String::new();
+    let mut args = Vec::new();
+    let mut yields = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::kw_CALL => {}
+            Rule::proc_name => procedure = inner.as_str().to_string(),
+            Rule::expression => args.push(build_expression(inner)?),
+            Rule::kw_WITH_kw => {}
+            Rule::yield_items => {
+                for v in inner.into_inner() {
+                    if v.as_rule() == Rule::variable {
+                        yields.push(ident_text(&v));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(CallClause { procedure, args, yields })
+}
+
+// ── ORDER BY builder ──────────────────────────────────────────────────────────
+
+fn build_order_by_clause(pair: Pair<Rule>) -> Result<OrderByClause, PolygraphError> {
+    // order_by_clause = { kw_ORDER ~ kw_BY ~ sort_item ~ ("," ~ sort_item)* }
+    let items: Result<Vec<_>, _> = pair
+        .into_inner()
+        .filter(|p| p.as_rule() == Rule::sort_item)
+        .map(build_sort_item)
+        .collect();
+    Ok(OrderByClause { items: items? })
+}
+
+fn build_sort_item(pair: Pair<Rule>) -> Result<SortItem, PolygraphError> {
+    // sort_item = { expression ~ sort_direction? }
+    let mut expr = None;
+    let mut descending = false;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::expression => expr = Some(build_expression(inner)?),
+            Rule::sort_direction => {
+                // sort_direction = { kw_ASC | kw_DESC }
+                let dir = inner.into_inner().next().expect("sort_direction has child");
+                descending = dir.as_rule() == Rule::kw_DESC;
+            }
+            _ => {}
+        }
+    }
+    Ok(SortItem {
+        expression: expr.expect("sort_item has expression"),
+        descending,
+    })
+}
+
 // ── Map literal builder ───────────────────────────────────────────────────────
 
 fn build_map_literal(pair: Pair<Rule>) -> Result<MapLiteral, PolygraphError> {
-    // properties = { map_literal } OR directly map_literal
     // map_literal = { "{" ~ (map_entry ~ ("," ~ map_entry)*)? ~ "}" }
     let map_pair = if pair.as_rule() == Rule::properties {
         pair.into_inner()
@@ -647,6 +904,7 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
             Ok(Expression::Literal(Literal::Boolean(b)))
         }
         Rule::null_literal => Ok(Expression::Literal(Literal::Null)),
+        Rule::aggregate_expr => build_aggregate_expr(inner),
         Rule::list_literal => {
             let items: Result<Vec<_>, _> = inner
                 .into_inner()
@@ -666,6 +924,60 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn build_aggregate_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
+    // aggregate_expr = { count_expr | agg_call_expr }
+    let inner = pair.into_inner().next().expect("aggregate_expr has child");
+    match inner.as_rule() {
+        Rule::count_expr => {
+            // count_expr = { kw_COUNT ~ "(" ~ (count_star | (kw_DISTINCT? ~ expression)) ~ ")" }
+            let mut distinct = false;
+            let mut expr: Option<Box<Expression>> = None;
+            for child in inner.into_inner() {
+                match child.as_rule() {
+                    Rule::kw_COUNT => {}
+                    Rule::count_star => {} // expr stays None
+                    Rule::kw_DISTINCT => distinct = true,
+                    Rule::expression => expr = Some(Box::new(build_expression(child)?)),
+                    _ => {}
+                }
+            }
+            Ok(Expression::Aggregate(AggregateExpr::Count { distinct, expr }))
+        }
+        Rule::agg_call_expr => {
+            // agg_call_expr = { agg_func_name ~ "(" ~ kw_DISTINCT? ~ expression ~ ")" }
+            let mut func_name = String::new();
+            let mut distinct = false;
+            let mut expr: Option<Box<Expression>> = None;
+            for child in inner.into_inner() {
+                match child.as_rule() {
+                    Rule::agg_func_name => {
+                        func_name = child.as_str().to_ascii_lowercase();
+                    }
+                    Rule::kw_DISTINCT => distinct = true,
+                    Rule::expression => expr = Some(Box::new(build_expression(child)?)),
+                    _ => {}
+                }
+            }
+            let e = expr.expect("agg_call_expr has expression");
+            let agg = match func_name.as_str() {
+                "sum" => AggregateExpr::Sum { distinct, expr: e },
+                "avg" => AggregateExpr::Avg { distinct, expr: e },
+                "min" => AggregateExpr::Min { distinct, expr: e },
+                "max" => AggregateExpr::Max { distinct, expr: e },
+                "collect" => AggregateExpr::Collect { distinct, expr: e },
+                other => {
+                    return Err(PolygraphError::Parse {
+                        span: other.to_string(),
+                        message: format!("unknown aggregate function: {other}"),
+                    })
+                }
+            };
+            Ok(Expression::Aggregate(agg))
+        }
+        _ => unreachable!("unexpected aggregate_expr child: {:?}", inner.as_rule()),
+    }
+}
 
 /// Extract the text of a `variable` rule, handling backtick-escaped identifiers.
 fn ident_text(pair: &Pair<Rule>) -> Ident {

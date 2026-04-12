@@ -1,6 +1,9 @@
 // ============================================================
-// openCypher grammar — Phase 1 subset
-// Covers: MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH
+// openCypher grammar — Phase 4 (extended read + write subset)
+// Covers: MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH,
+//         ORDER BY, SKIP, LIMIT, UNWIND, aggregation,
+//         CREATE, MERGE, SET, DELETE, DETACH DELETE, REMOVE,
+//         CALL stubs, variable-length paths.
 // Case-insensitive keywords (^"KW" syntax).
 // ============================================================
 
@@ -12,7 +15,9 @@ COMMENT    = _{ "//" ~ (!NEWLINE ~ ANY)* ~ NEWLINE?
 // ----- Entry point ------------------------------------------
 query     = { SOI ~ statement ~ EOI }
 statement = { clause+ }
-clause    = { match_clause | with_clause | return_clause }
+clause    = { match_clause | unwind_clause | with_clause | return_clause
+            | create_clause | merge_clause | set_clause
+            | delete_clause | remove_clause | call_clause }
 
 // ----- Keywords (case-insensitive, word-boundary guarded) ---
 ident_char  = _{ ASCII_ALPHANUMERIC | "_" }
@@ -36,12 +41,37 @@ kw_IN       = @{ ^"IN"       ~ !ident_char }
 kw_CONTAINS = @{ ^"CONTAINS" ~ !ident_char }
 kw_STARTS   = @{ ^"STARTS"   ~ !ident_char }
 kw_ENDS     = @{ ^"ENDS"     ~ !ident_char }
+// Phase 4 keywords
+kw_ORDER    = @{ ^"ORDER"    ~ !ident_char }
+kw_BY       = @{ ^"BY"       ~ !ident_char }
+kw_ASC      = @{ ^"ASC"      ~ !ident_char }
+kw_DESC     = @{ ^"DESC"     ~ !ident_char }
+kw_SKIP     = @{ ^"SKIP"     ~ !ident_char }
+kw_LIMIT    = @{ ^"LIMIT"    ~ !ident_char }
+kw_UNWIND   = @{ ^"UNWIND"   ~ !ident_char }
+kw_CREATE   = @{ ^"CREATE"   ~ !ident_char }
+kw_MERGE    = @{ ^"MERGE"    ~ !ident_char }
+kw_SET      = @{ ^"SET"      ~ !ident_char }
+kw_DELETE   = @{ ^"DELETE"   ~ !ident_char }
+kw_DETACH   = @{ ^"DETACH"   ~ !ident_char }
+kw_REMOVE   = @{ ^"REMOVE"   ~ !ident_char }
+kw_CALL     = @{ ^"CALL"     ~ !ident_char }
+// Aggregate function keywords
+kw_COUNT    = @{ ^"count"    ~ !ident_char }
+kw_SUM      = @{ ^"sum"      ~ !ident_char }
+kw_AVG      = @{ ^"avg"      ~ !ident_char }
+kw_MIN      = @{ ^"min"      ~ !ident_char }
+kw_MAX      = @{ ^"max"      ~ !ident_char }
+kw_COLLECT  = @{ ^"collect"  ~ !ident_char }
+kw_WITH_kw  = @{ ^"WITH"     ~ !ident_char }
 
 // Silent aggregate used for negative lookahead in variable rule
 keyword = _{
     kw_MATCH | kw_OPTIONAL | kw_RETURN | kw_WHERE | kw_WITH | kw_AS |
     kw_DISTINCT | kw_AND | kw_OR | kw_XOR | kw_NOT | kw_NULL |
-    kw_TRUE | kw_FALSE | kw_IS | kw_IN | kw_CONTAINS | kw_STARTS | kw_ENDS
+    kw_TRUE | kw_FALSE | kw_IS | kw_IN | kw_CONTAINS | kw_STARTS | kw_ENDS |
+    kw_ORDER | kw_BY | kw_SKIP | kw_LIMIT | kw_UNWIND |
+    kw_CREATE | kw_MERGE | kw_SET | kw_DELETE | kw_DETACH | kw_REMOVE | kw_CALL
 }
 
 // ----- Identifiers & variables ------------------------------
@@ -54,8 +84,32 @@ variable = { !(keyword ~ !ident_char) ~ (ident_escaped | ident) }
 match_clause  = { optional_marker? ~ kw_MATCH ~ pattern_list ~ where_clause? }
 optional_marker = { kw_OPTIONAL }
 where_clause  = { kw_WHERE ~ expression }
-return_clause = { kw_RETURN ~ return_body }
-with_clause   = { kw_WITH ~ return_body ~ where_clause? }
+return_clause = { kw_RETURN ~ return_body ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+with_clause   = { kw_WITH ~ return_body ~ where_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+
+// Phase 4 clauses
+unwind_clause  = { kw_UNWIND ~ expression ~ kw_AS ~ variable }
+create_clause  = { kw_CREATE ~ pattern_list }
+merge_clause   = { kw_MERGE ~ pattern }
+set_clause     = { kw_SET ~ set_item ~ ("," ~ set_item)* }
+set_item       = { prop_access_expr ~ "=" ~ expression
+                 | variable ~ "+=" ~ map_literal
+                 | variable ~ "=" ~ expression }
+prop_access_expr = { variable ~ "." ~ prop_name }
+delete_clause  = { detach_marker? ~ kw_DELETE ~ expression ~ ("," ~ expression)* }
+detach_marker  = { kw_DETACH }
+remove_clause  = { kw_REMOVE ~ remove_item ~ ("," ~ remove_item)* }
+remove_item    = { prop_access_expr | variable ~ node_labels }
+call_clause    = { kw_CALL ~ proc_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" ~ (kw_WITH_kw ~ yield_items)? }
+proc_name      = @{ ident ~ ("." ~ ident)* }
+yield_items    = { variable ~ ("," ~ variable)* }
+
+// ORDER BY / SKIP / LIMIT
+order_by_clause = { kw_ORDER ~ kw_BY ~ sort_item ~ ("," ~ sort_item)* }
+sort_item       = { expression ~ sort_direction? }
+sort_direction  = { kw_ASC | kw_DESC }
+skip_clause     = { kw_SKIP ~ expression }
+limit_clause    = { kw_LIMIT ~ expression }
 
 // ----- Return / With body -----------------------------------
 return_body  = { distinct_marker? ~ return_items }
@@ -126,10 +180,20 @@ atom        = { float_literal
               | string_literal
               | boolean_literal
               | null_literal
+              | aggregate_expr
               | list_literal
               | map_literal
               | "(" ~ expression ~ ")"
               | variable }
+
+// ----- Aggregate expressions --------------------------------
+aggregate_expr   = { count_expr | agg_call_expr }
+// COUNT(*) or COUNT(DISTINCT? expr)
+count_expr       = { kw_COUNT ~ "(" ~ (count_star | (kw_DISTINCT? ~ expression)) ~ ")" }
+count_star       = { "*" }
+// sum/avg/min/max/collect(DISTINCT? expr)
+agg_call_expr    = { agg_func_name ~ "(" ~ kw_DISTINCT? ~ expression ~ ")" }
+agg_func_name    = { kw_SUM | kw_AVG | kw_MIN | kw_MAX | kw_COLLECT }
 
 // ----- Literals ---------------------------------------------
 boolean_literal = { kw_TRUE | kw_FALSE }

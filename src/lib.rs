@@ -2,8 +2,13 @@
 
 //! `polygraph` — transpile openCypher and ISO GQL queries to SPARQL 1.1.
 //!
-//! Phase 1 (parser) and Phase 2 (SPARQL translator) are complete.
-//! Phase 3 adds edge-property support via RDF-star or RDF reification.
+//! Phases 1–4 are complete:
+//! - Phase 1: openCypher parser + AST
+//! - Phase 2: SPARQL algebra translator (MATCH/WHERE/RETURN/WITH/OPTIONAL)
+//! - Phase 3: RDF-star and reification edge property encoding
+//! - Phase 4: ORDER BY/SKIP/LIMIT, aggregation, UNWIND, variable-length paths,
+//!   multi-type relationships, IN list literals, write clause stubs
+//!
 //! Use [`target::OxigraphAdapter`] for RDF-star engines or
 //! [`target::GenericSparql11`] for standard SPARQL 1.1.
 //!
