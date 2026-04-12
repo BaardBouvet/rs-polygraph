@@ -2,15 +2,10 @@
 
 //! `polygraph` — transpile openCypher and ISO GQL queries to SPARQL 1.1.
 //!
-//! # Phase 1 — openCypher Parser
-//!
-//! The current release implements the parser layer. Given an openCypher
-//! query string, [`parser::parse_cypher`] returns a typed [`ast::CypherQuery`]
-//! AST covering `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, and `WITH`.
-//!
-//! Full transpilation to SPARQL (Phase 2) and ISO GQL support (Phase 5) are
-//! not yet available; calling those paths returns
-//! [`PolygraphError::UnsupportedFeature`].
+//! Phase 1 (parser) and Phase 2 (SPARQL translator) are complete.
+//! Phase 3 adds edge-property support via RDF-star or RDF reification.
+//! Use [`target::OxigraphAdapter`] for RDF-star engines or
+//! [`target::GenericSparql11`] for standard SPARQL 1.1.
 //!
 //! # Example
 //!
@@ -67,7 +62,7 @@ impl Transpiler {
         engine: &dyn target::TargetEngine,
     ) -> Result<String, PolygraphError> {
         let ast = parser::parse_cypher(cypher)?;
-        let sparql = translator::cypher::translate(&ast, engine.base_iri())?;
+        let sparql = translator::cypher::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
         engine.finalize(sparql)
     }
 

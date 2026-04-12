@@ -23,7 +23,7 @@ path = "tests/integration/cypher_to_sparql.rs"
 [dependencies]
 pest = "2.7"
 pest_derive = "2.7"
-spargebra = "0.3"
+spargebra = { version = "0.3", features = ["rdf-star"] }
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
@@ -42,6 +42,9 @@ serde = ["dep:serde", "dep:serde_json"]
 name = "transpilation"
 harness = false
 path = "benches/transpilation.rs"
+
+[package.metadata]
+# oxigraph dev-dep re-enabled in Phase 6 (needs libclang / bindgen)
 
 [profile.release]
 opt-level = 3

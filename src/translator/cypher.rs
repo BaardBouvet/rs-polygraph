@@ -21,6 +21,8 @@ use spargebra::algebra::{Expression as SparExpr, GraphPattern};
 use spargebra::term::{Literal as SparLit, NamedNode, TermPattern, TriplePattern, Variable};
 use spargebra::Query;
 
+use crate::rdf_mapping;
+
 use crate::ast::cypher::{
     Clause, CompOp, CypherQuery, Expression, Literal, MatchClause, NodePattern, Pattern,
     PatternElement, PatternList, RelationshipPattern, ReturnClause, ReturnItem, ReturnItems,
@@ -39,15 +41,17 @@ const DEFAULT_BASE: &str = "http://polygraph.example/";
 
 /// Translates an openCypher [`CypherQuery`] AST into a SPARQL 1.1 query string.
 ///
-/// The `base_iri` parameter sets the namespace used for labels, relationship
-/// types and property names. Pass `None` to use the default
-/// `http://polygraph.example/`.
+/// * `base_iri` — namespace IRI for labels, relationship types and property
+///   names. Pass `None` to use `http://polygraph.example/`.
+/// * `rdf_star` — when `true`, emit SPARQL-star annotated triple patterns for
+///   relationship properties; when `false`, use standard RDF reification.
 pub fn translate(
     query: &CypherQuery,
     base_iri: Option<&str>,
+    rdf_star: bool,
 ) -> Result<String, PolygraphError> {
     let base = base_iri.unwrap_or(DEFAULT_BASE).to_string();
-    let mut state = TranslationState::new(base);
+    let mut state = TranslationState::new(base, rdf_star);
     let pattern = state.translate_query(query)?;
     let sparql_query = Query::Select {
         dataset: None,
@@ -59,14 +63,28 @@ pub fn translate(
 
 // ── Translation state ─────────────────────────────────────────────────────────
 
+/// Info stored per relationship variable for property access resolution.
+#[derive(Clone)]
+struct EdgeInfo {
+    src: TermPattern,
+    pred: NamedNode,
+    dst: TermPattern,
+    /// In reification mode: the fresh variable used as the reification node.
+    reif_var: Option<Variable>,
+}
+
 struct TranslationState {
     base_iri: String,
     counter: usize,
+    /// Use SPARQL-star annotated triples (true) or RDF reification (false).
+    rdf_star: bool,
+    /// Tracks relationship variables → edge info for `r.prop` resolution.
+    edge_map: std::collections::HashMap<String, EdgeInfo>,
 }
 
 impl TranslationState {
-    fn new(base_iri: String) -> Self {
-        Self { base_iri, counter: 0 }
+    fn new(base_iri: String, rdf_star: bool) -> Self {
+        Self { base_iri, counter: 0, rdf_star, edge_map: Default::default() }
     }
 
     /// Allocate a fresh SPARQL variable.
@@ -312,34 +330,69 @@ impl TranslationState {
         }
 
         // Emit one triple per rel-type (union semantics deferred to Phase 4).
-        // For Phase 2: use the first type.
+        // For Phase 2+: use the first type.
         let rel_type = &rel.rel_types[0];
         let pred = self.iri(rel_type);
 
         match rel.direction {
             Direction::Left => triples.push(TriplePattern {
                 subject: dst.clone(),
-                predicate: pred.into(),
+                predicate: pred.clone().into(),
                 object: src.clone(),
             }),
             _ => triples.push(TriplePattern {
                 subject: src.clone(),
-                predicate: pred.into(),
+                predicate: pred.clone().into(),
                 object: dst.clone(),
             }),
         }
 
+        // Register edge info for later `r.prop` resolution.
+        if let Some(ref var_name) = rel.variable {
+            let reif_var = if self.rdf_star {
+                None
+            } else {
+                Some(self.fresh_var(&format!("reif_{var_name}")))
+            };
+            self.edge_map.insert(
+                var_name.clone(),
+                EdgeInfo {
+                    src: src.clone(),
+                    pred: pred.clone(),
+                    dst: dst.clone(),
+                    reif_var,
+                },
+            );
+        }
+
         // Inline relationship properties.
-        if let Some(props) = &rel.properties {
-            // We need an explicit relationship node to attach properties to.
-            // Phase 2 emits a warning-style error for this edge case since
-            // edge properties require Phase 3 (RDF-star / reification).
+        if let Some(ref props) = rel.properties {
             if !props.is_empty() {
-                return Err(PolygraphError::UnsupportedFeature {
-                    feature:
-                        "relationship properties require Phase 3 (RDF-star / reification)"
-                            .to_string(),
-                });
+                // Build (prop_iri, term) pairs.
+                let mut prop_pairs: Vec<(NamedNode, TermPattern)> = Vec::new();
+                for (key, val_expr) in props {
+                    let obj = self.expr_to_ground_term(val_expr)?;
+                    prop_pairs.push((self.iri(key), obj));
+                }
+
+                if self.rdf_star {
+                    let extra = rdf_mapping::rdf_star::all_property_triples(
+                        src.clone(), pred.clone(), dst.clone(), &prop_pairs,
+                    );
+                    triples.extend(extra);
+                } else {
+                    // Use (or create) the reification variable.
+                    let reif_var = rel.variable.as_ref()
+                        .and_then(|v| self.edge_map.get(v))
+                        .and_then(|ei| ei.reif_var.clone())
+                        .unwrap_or_else(|| self.fresh_var("reif"));
+                    let extra = rdf_mapping::reification::all_triples(
+                        &reif_var,
+                        src.clone(), pred.clone(), dst.clone(),
+                        &prop_pairs,
+                    );
+                    triples.extend(extra);
+                }
             }
         }
 
@@ -401,17 +454,37 @@ impl TranslationState {
                 }
             }
             Expression::Property(base_expr, key) => {
-                // n.prop [AS alias] → add BGP `?n <base:prop> ?result_var`
+                // n.prop or r.prop [AS alias] → add BGP triple + projected var.
                 let base_var = self.extract_variable(base_expr)?;
+                let var_name = base_var.as_str().to_string();
                 let result_var = match &item.alias {
                     Some(alias) => Variable::new_unchecked(alias.clone()),
-                    None => self.fresh_var(&format!("{}_{}", base_var.as_str(), key)),
+                    None => self.fresh_var(&format!("{}_{}", var_name, key)),
                 };
-                triples.push(TriplePattern {
-                    subject: base_var.into(),
-                    predicate: self.iri(key).into(),
-                    object: result_var.clone().into(),
-                });
+                // Check whether base_var is a relationship variable.
+                if let Some(edge) = self.edge_map.get(&var_name).cloned() {
+                    let prop_iri = self.iri(key);
+                    if self.rdf_star {
+                        triples.push(rdf_mapping::rdf_star::annotated_triple(
+                            edge.src.clone(), edge.pred.clone(), edge.dst.clone(),
+                            prop_iri, result_var.clone().into(),
+                        ));
+                    } else {
+                        let reif_var = edge.reif_var.clone()
+                            .unwrap_or_else(|| self.fresh_var(&format!("reif_{var_name}")));
+                        triples.push(TriplePattern {
+                            subject: reif_var.into(),
+                            predicate: prop_iri.into(),
+                            object: result_var.clone().into(),
+                        });
+                    }
+                } else {
+                    triples.push(TriplePattern {
+                        subject: base_var.into(),
+                        predicate: self.iri(key).into(),
+                        object: result_var.clone().into(),
+                    });
+                }
                 Ok(result_var)
             }
             other => {
@@ -453,12 +526,35 @@ impl TranslationState {
             }
             Expression::Property(base_expr, key) => {
                 let base_var = self.extract_variable(base_expr)?;
-                let fresh = self.fresh_var(&format!("{}_{}", base_var.as_str(), key));
-                extra.push(TriplePattern {
-                    subject: base_var.into(),
-                    predicate: self.iri(key).into(),
-                    object: fresh.clone().into(),
-                });
+                let var_name = base_var.as_str().to_string();
+                let fresh = self.fresh_var(&format!("{}_{}", var_name, key));
+                // Check if `base_var` is a relationship variable (edge_map hit).
+                if let Some(edge) = self.edge_map.get(&var_name).cloned() {
+                    let prop_iri = self.iri(key);
+                    if self.rdf_star {
+                        extra.push(rdf_mapping::rdf_star::annotated_triple(
+                            edge.src.clone(),
+                            edge.pred.clone(),
+                            edge.dst.clone(),
+                            prop_iri,
+                            fresh.clone().into(),
+                        ));
+                    } else {
+                        let reif_var = edge.reif_var.clone()
+                            .unwrap_or_else(|| self.fresh_var(&format!("reif_{var_name}")));
+                        extra.push(TriplePattern {
+                            subject: reif_var.into(),
+                            predicate: prop_iri.into(),
+                            object: fresh.clone().into(),
+                        });
+                    }
+                } else {
+                    extra.push(TriplePattern {
+                        subject: base_var.into(),
+                        predicate: self.iri(key).into(),
+                        object: fresh.clone().into(),
+                    });
+                }
                 Ok(SparExpr::Variable(fresh))
             }
             Expression::Or(a, b) => {

@@ -1,5 +1,9 @@
 use crate::error::PolygraphError;
 
+pub mod oxigraph;
+
+pub use oxigraph::OxigraphAdapter;
+
 /// Describes the SPARQL capabilities of a target engine.
 ///
 /// Implementors are used by the translator to select the correct encoding

@@ -40,14 +40,14 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 
 **Goal**: Support edge properties with both RDF-star and standard reification modes.
 
-- [ ] Implement `rdf_mapping::rdf_star` encoder for edge property triples
-- [ ] Implement `rdf_mapping::reification` fallback
-- [ ] Implement `TargetEngine` trait with `supports_rdf_star()` capability flag
-- [ ] Implement `target::oxigraph::Oxigraph` adapter (RDF-star enabled)
-- [ ] Implement `target::GenericSparql11` adapter (reification fallback)
-- [ ] Tests for both encoding modes on edge properties
+- [x] Implement `rdf_mapping::rdf_star` encoder for edge property triples
+- [x] Implement `rdf_mapping::reification` fallback
+- [x] Implement `TargetEngine` trait with `supports_rdf_star()` capability flag
+- [x] Implement `target::oxigraph::OxigraphAdapter` (RDF-star enabled)
+- [x] Implement `target::GenericSparql11` adapter (reification fallback)
+- [x] Tests for both encoding modes on edge properties
 
-**Milestone**: Relationship properties transpile correctly for both RDF-star and legacy engines.
+**Milestone**: Relationship properties transpile correctly for both RDF-star and legacy engines. ✅
 
 ---
 

@@ -2,8 +2,10 @@
 ///
 /// Each test calls `Transpiler::cypher_to_sparql` and checks structural
 /// properties of the serialized SPARQL string.
-
-use polygraph::{Transpiler, target::GenericSparql11};
+use polygraph::{
+    target::{GenericSparql11, OxigraphAdapter},
+    Transpiler,
+};
 
 const ENGINE: GenericSparql11 = GenericSparql11;
 
@@ -14,6 +16,16 @@ fn transpile(cypher: &str) -> String {
 
 fn transpile_lower(cypher: &str) -> String {
     transpile(cypher).to_lowercase()
+}
+
+fn transpile_rdf_star(cypher: &str) -> String {
+    let engine = OxigraphAdapter::default();
+    Transpiler::cypher_to_sparql(cypher, &engine)
+        .unwrap_or_else(|e| panic!("rdf-star translation failed for {cypher:?}: {e}"))
+}
+
+fn transpile_reification(cypher: &str) -> String {
+    transpile(cypher)
 }
 
 // ── Basic MATCH … RETURN ─────────────────────────────────────────────────────
@@ -29,7 +41,10 @@ fn match_node_returns_select() {
 #[test]
 fn match_node_with_label_emits_rdf_type() {
     let s = transpile_lower("MATCH (n:Person) RETURN n");
-    assert!(s.contains("rdf-syntax-ns#type") || s.contains("rdf:type") || s.contains("a "), "got: {s}");
+    assert!(
+        s.contains("rdf-syntax-ns#type") || s.contains("rdf:type") || s.contains("a "),
+        "got: {s}"
+    );
     assert!(s.contains("person"), "got: {s}");
     assert!(s.contains("?n"), "got: {s}");
 }
@@ -124,7 +139,10 @@ fn where_and_emits_and_in_filter() {
 fn where_or_emits_or_in_filter() {
     let s = transpile_lower("MATCH (n) WHERE n.age > 18 OR n.admin = true RETURN n");
     assert!(s.contains("filter"), "got: {s}");
-    assert!(s.contains("||") || s.contains("or") || s.contains("||"), "got: {s}");
+    assert!(
+        s.contains("||") || s.contains("or") || s.contains("||"),
+        "got: {s}"
+    );
 }
 
 #[test]
@@ -173,9 +191,7 @@ fn where_contains() {
 
 #[test]
 fn optional_match_emits_optional() {
-    let s = transpile_lower(
-        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person) RETURN a, b",
-    );
+    let s = transpile_lower("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person) RETURN a, b");
     assert!(s.contains("optional"), "got: {s}");
     assert!(s.contains("knows"), "got: {s}");
 }
@@ -226,7 +242,10 @@ fn relationship_variable_in_return() {
 #[test]
 fn output_starts_with_select() {
     let s = transpile("MATCH (n:Person) RETURN n");
-    assert!(s.trim_start().to_lowercase().starts_with("select"), "got: {s}");
+    assert!(
+        s.trim_start().to_lowercase().starts_with("select"),
+        "got: {s}"
+    );
 }
 
 #[test]
@@ -241,4 +260,148 @@ fn case_insensitive_keywords_translate() {
     let s2 = transpile("MATCH (n:person) RETURN n");
     // Both should produce structurally equivalent output.
     assert_eq!(s1.to_lowercase(), s2.to_lowercase());
+}
+
+// ── Phase 3: edge properties — RDF-star mode ──────────────────────────────────
+
+#[test]
+fn rdf_star_inline_rel_prop_emits_annotated_triple() {
+    // <<?a <base:KNOWS> ?b>> <base:since> ?since
+    let s = transpile_rdf_star(
+        "MATCH (a)-[r:KNOWS {since: 2020}]->(b) RETURN a, b",
+    );
+    let l = s.to_lowercase();
+    assert!(l.contains("<<") && l.contains(">>"), "missing << >> in: {s}");
+    assert!(l.contains("since"), "missing 'since' in: {s}");
+    assert!(l.contains("knows"), "missing 'knows' in: {s}");
+}
+
+#[test]
+fn rdf_star_rel_prop_string_literal() {
+    let s = transpile_rdf_star(
+        r#"MATCH (a)-[r:LIKES {reason: "fun"}]->(b) RETURN a, b"#,
+    );
+    let l = s.to_lowercase();
+    assert!(l.contains("<<") && l.contains(">>"), "got: {s}");
+    assert!(l.contains("likes"), "got: {s}");
+    assert!(l.contains("reason"), "got: {s}");
+    assert!(l.contains("fun"), "got: {s}");
+}
+
+#[test]
+fn rdf_star_multiple_inline_rel_props() {
+    let s = transpile_rdf_star(
+        "MATCH (a)-[r:KNOWS {since: 2020, weight: 5}]->(b) RETURN a, b",
+    );
+    let l = s.to_lowercase();
+    assert!(l.contains("<<") && l.contains(">>"), "got: {s}");
+    assert!(l.contains("since"), "got: {s}");
+    assert!(l.contains("weight"), "got: {s}");
+}
+
+#[test]
+fn rdf_star_where_rel_prop_emits_annotated_triple_plus_filter() {
+    let s = transpile_rdf_star(
+        "MATCH (a)-[r:KNOWS]->(b) WHERE r.since > 2000 RETURN a, b",
+    );
+    let l = s.to_lowercase();
+    assert!(l.contains("<<") && l.contains(">>"), "got: {s}");
+    assert!(l.contains("filter"), "got: {s}");
+    assert!(l.contains("since"), "got: {s}");
+    assert!(l.contains("2000"), "got: {s}");
+}
+
+#[test]
+fn rdf_star_return_rel_prop() {
+    let s = transpile_rdf_star(
+        "MATCH (a)-[r:KNOWS]->(b) RETURN r.since",
+    );
+    let l = s.to_lowercase();
+    assert!(l.contains("<<") && l.contains(">>"), "got: {s}");
+    assert!(l.contains("since"), "got: {s}");
+}
+
+// ── Phase 3: edge properties — reification mode ───────────────────────────────
+
+#[test]
+fn reification_inline_rel_prop_emits_rdf_statement() {
+    let s = transpile_reification(
+        "MATCH (a)-[r:KNOWS {since: 2020}]->(b) RETURN a, b",
+    );
+    let l = s.to_lowercase();
+    // Must NOT contain << >> (that would be RDF-star)
+    assert!(!l.contains("<<"), "unexpected rdf-star syntax in: {s}");
+    // Must contain rdf reification IRIs
+    assert!(
+        l.contains("statement") || l.contains("rdf-syntax"),
+        "missing rdf:Statement in: {s}"
+    );
+    assert!(l.contains("since"), "missing 'since' in: {s}");
+    assert!(l.contains("knows"), "missing 'knows' in: {s}");
+}
+
+#[test]
+fn reification_multiple_inline_rel_props() {
+    let s = transpile_reification(
+        "MATCH (a)-[r:KNOWS {since: 2020, weight: 5}]->(b) RETURN a, b",
+    );
+    let l = s.to_lowercase();
+    assert!(!l.contains("<<"), "got: {s}");
+    assert!(l.contains("since"), "got: {s}");
+    assert!(l.contains("weight"), "got: {s}");
+}
+
+#[test]
+fn reification_where_rel_prop_access_adds_triple() {
+    let s = transpile_reification(
+        "MATCH (a)-[r:KNOWS]->(b) WHERE r.since > 2000 RETURN a, b",
+    );
+    let l = s.to_lowercase();
+    assert!(!l.contains("<<"), "got: {s}");
+    assert!(l.contains("filter"), "got: {s}");
+    assert!(l.contains("since"), "got: {s}");
+}
+
+#[test]
+fn reification_return_rel_prop() {
+    let s = transpile_reification(
+        "MATCH (a)-[r:KNOWS]->(b) RETURN r.since",
+    );
+    let l = s.to_lowercase();
+    assert!(!l.contains("<<"), "got: {s}");
+    assert!(l.contains("since"), "got: {s}");
+}
+
+// ── Phase 3: mode comparison ──────────────────────────────────────────────────
+
+#[test]
+fn rdf_star_and_reification_differ_structurally() {
+    let cypher = "MATCH (a)-[r:KNOWS {since: 2020}]->(b) RETURN a, b";
+    let star = transpile_rdf_star(cypher).to_lowercase();
+    let reif = transpile_reification(cypher).to_lowercase();
+    // RDF-star uses << >>, reification does not.
+    assert!(star.contains("<<"), "rdf-star missing << : {star}");
+    assert!(!reif.contains("<<"), "reification should not have << : {reif}");
+}
+
+#[test]
+fn rdf_star_no_rel_props_same_as_reification_for_simple_path() {
+    // Without edge properties, both modes should produce the same output.
+    let cypher = "MATCH (a)-[:KNOWS]->(b) RETURN a, b";
+    let star = transpile_rdf_star(cypher).to_lowercase();
+    let reif = transpile_reification(cypher).to_lowercase();
+    assert_eq!(star, reif, "modes should agree when no edge props");
+}
+
+#[test]
+fn oxigraph_adapter_reports_rdf_star_true() {
+    use polygraph::target::TargetEngine;
+    let engine = OxigraphAdapter::default();
+    assert!(engine.supports_rdf_star());
+}
+
+#[test]
+fn generic_sparql11_reports_rdf_star_false() {
+    use polygraph::target::TargetEngine;
+    assert!(!ENGINE.supports_rdf_star());
 }
