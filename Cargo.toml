@@ -20,6 +20,10 @@ harness = false
 name = "integration"
 path = "tests/integration/cypher_to_sparql.rs"
 
+[[test]]
+name = "gql_integration"
+path = "tests/integration/gql_to_sparql.rs"
+
 [dependencies]
 pest = "2.7"
 pest_derive = "2.7"

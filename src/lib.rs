@@ -73,13 +73,28 @@ impl Transpiler {
 
     /// Transpile an ISO GQL query to a SPARQL query string.
     ///
-    /// **Phase 5** — not yet implemented.
+    /// GQL-specific syntax (`IS Label`, `FILTER`, `NEXT`) is lowered to
+    /// Cypher-equivalent constructs during parsing, so translation reuses
+    /// the Cypher algebra translator.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use polygraph::{Transpiler, target::GenericSparql11};
+    ///
+    /// let engine = GenericSparql11;
+    /// let sparql = Transpiler::gql_to_sparql(
+    ///     "MATCH (n:Person) WHERE n.age > 30 RETURN n.name",
+    ///     &engine,
+    /// ).unwrap();
+    /// assert!(sparql.contains("SELECT"));
+    /// ```
     pub fn gql_to_sparql(
-        _gql: &str,
-        _engine: &dyn target::TargetEngine,
+        gql: &str,
+        engine: &dyn target::TargetEngine,
     ) -> Result<String, PolygraphError> {
-        Err(PolygraphError::UnsupportedFeature {
-            feature: "GQL-to-SPARQL transpilation (planned for Phase 5)".to_string(),
-        })
+        let ast = parser::parse_gql(gql)?;
+        let sparql = translator::gql::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
+        engine.finalize(sparql)
     }
 }

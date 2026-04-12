@@ -8,3 +8,4 @@ pub use cypher::{
     RelationshipPattern, RemoveClause, RemoveItem, ReturnClause, ReturnItem, ReturnItems,
     SetClause, SetItem, SortItem, UnwindClause, WhereClause, WithClause,
 };
+pub use gql::GqlQuery;

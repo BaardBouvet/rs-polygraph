@@ -71,18 +71,18 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 
 ---
 
-## Phase 5 — ISO GQL Parser & Translator
+## Phase 5 — ISO GQL Parser & Translator ✅
 
 **Goal**: Add ISO GQL (ISO/IEC 39075:2024) as a supported input language.
 
-- [ ] Write `grammars/gql.pest` for core GQL constructs
-- [ ] Define `GqlQuery` AST types in `ast/gql.rs`
-- [ ] Implement GQL parser in `parser/gql.rs`
-- [ ] Implement `AstVisitor` for GQL in `translator/gql.rs`, reusing shared mapping logic
-- [ ] `Transpiler::gql_to_sparql(q, engine)` public API
-- [ ] Integration tests mirroring Phase 2 tests for GQL equivalents
+- [x] Write `grammars/gql.pest` for core GQL constructs (MATCH, FILTER/WHERE, RETURN, NEXT, IS labels, multi-labels, ORDER BY, SKIP, LIMIT, aggregation, write clauses)
+- [x] Define `GqlQuery` AST types in `ast/gql.rs` (wraps `Vec<Clause>` for zero-duplication design)
+- [x] Implement GQL parser in `parser/gql.rs` with IS→`:Label` lowering, FILTER→WITH WHERE, NEXT→WITH *, IS edge types (19 unit tests)
+- [x] Implement `translator/gql.rs` delegating to Cypher translator via shared clause types
+- [x] `Transpiler::gql_to_sparql(q, engine)` public API wired up in `lib.rs`
+- [x] 34 integration tests in `tests/integration/gql_to_sparql.rs` covering IS labels, multi-labels, FILTER, WHERE, NEXT, rel IS TYPE, OPTIONAL MATCH, ORDER BY/SKIP/LIMIT, aggregation, RDF-star
 
-**Milestone**: Basic GQL `MATCH … RETURN` queries transpile to valid SPARQL.
+**Milestone**: Basic GQL `MATCH … RETURN` queries transpile to valid SPARQL. ✅ 199 tests passing.
 
 ---
 
