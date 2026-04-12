@@ -16,6 +16,10 @@ name = "tck"
 path = "tests/tck/main.rs"
 harness = false
 
+[[test]]
+name = "integration"
+path = "tests/integration/cypher_to_sparql.rs"
+
 [dependencies]
 pest = "2.7"
 pest_derive = "2.7"

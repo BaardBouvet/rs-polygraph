@@ -23,16 +23,16 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 
 **Goal**: Translate Phase 1's AST into valid SPARQL 1.1 algebra via `spargebra`.
 
-- [ ] Define `AstVisitor` trait in `translator/visitor.rs`
-- [ ] Implement node/label/property → RDF triple pattern mappings
-- [ ] Implement directed and undirected relationship → triple pattern mappings
-- [ ] Map `WHERE` predicates to `FILTER` expressions
-- [ ] Map `RETURN` projections to `SELECT` variables
-- [ ] Map `OPTIONAL MATCH` to `OPTIONAL { }` graph pattern
-- [ ] Map `WITH` to sub-select or `BIND`
-- [ ] Integration tests: given a Cypher string, assert the serialized SPARQL output
+- [x] Define `AstVisitor` trait in `translator/visitor.rs`
+- [x] Implement node/label/property → RDF triple pattern mappings
+- [x] Implement directed and undirected relationship → triple pattern mappings
+- [x] Map `WHERE` predicates to `FILTER` expressions
+- [x] Map `RETURN` projections to `SELECT` variables
+- [x] Map `OPTIONAL MATCH` to `OPTIONAL { }` graph pattern
+- [x] Map `WITH` to sub-select or `BIND`
+- [x] Integration tests: given a Cypher string, assert the serialized SPARQL output
 
-**Milestone**: `Transpiler::cypher_to_sparql(q, engine)` works for single-hop queries. Output validates against the SPARQL 1.1 grammar.
+**Milestone**: `Transpiler::cypher_to_sparql(q, engine)` works for single-hop queries. Output validates against the SPARQL 1.1 grammar. ✅
 
 ---
 

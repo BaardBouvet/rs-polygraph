@@ -46,14 +46,29 @@ impl Transpiler {
 
     /// Transpile an openCypher query to a SPARQL query string.
     ///
-    /// **Phase 2** — not yet implemented.
+    /// The `engine` is consulted for engine-specific capabilities (RDF-star,
+    /// federation). The optional `base_iri` on the engine is used as the
+    /// namespace for labels, relationship types and property names.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use polygraph::{Transpiler, target::GenericSparql11};
+    ///
+    /// let engine = GenericSparql11;
+    /// let sparql = Transpiler::cypher_to_sparql(
+    ///     "MATCH (n:Person) WHERE n.age > 30 RETURN n.name",
+    ///     &engine,
+    /// ).unwrap();
+    /// assert!(sparql.contains("SELECT"));
+    /// ```
     pub fn cypher_to_sparql(
-        _cypher: &str,
-        _engine: &dyn target::TargetEngine,
+        cypher: &str,
+        engine: &dyn target::TargetEngine,
     ) -> Result<String, PolygraphError> {
-        Err(PolygraphError::UnsupportedFeature {
-            feature: "Cypher-to-SPARQL transpilation (planned for Phase 2)".to_string(),
-        })
+        let ast = parser::parse_cypher(cypher)?;
+        let sparql = translator::cypher::translate(&ast, engine.base_iri())?;
+        engine.finalize(sparql)
     }
 
     /// Transpile an ISO GQL query to a SPARQL query string.

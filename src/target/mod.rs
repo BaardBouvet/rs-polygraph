@@ -12,6 +12,13 @@ pub trait TargetEngine {
     /// Returns `true` if the engine supports SPARQL 1.1 federation (`SERVICE`).
     fn supports_federation(&self) -> bool;
 
+    /// Base IRI used as the namespace for labels, relationship types and
+    /// property names.  Return `None` to use the default
+    /// `http://polygraph.example/`.
+    fn base_iri(&self) -> Option<&str> {
+        None
+    }
+
     /// Apply engine-specific finalization to a serialized SPARQL query string.
     ///
     /// The default implementation is a no-op. Override to add engine-specific
