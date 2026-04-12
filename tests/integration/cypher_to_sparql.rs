@@ -3,7 +3,7 @@
 /// Each test calls `Transpiler::cypher_to_sparql` and checks structural
 /// properties of the serialized SPARQL string.
 use polygraph::{
-    target::{GenericSparql11, OxigraphAdapter},
+    target::{GenericSparql11, RdfStar},
     Transpiler,
 };
 
@@ -19,7 +19,7 @@ fn transpile_lower(cypher: &str) -> String {
 }
 
 fn transpile_rdf_star(cypher: &str) -> String {
-    let engine = OxigraphAdapter::default();
+    let engine = RdfStar::default();
     Transpiler::cypher_to_sparql(cypher, &engine)
         .unwrap_or_else(|e| panic!("rdf-star translation failed for {cypher:?}: {e}"))
 }
@@ -394,9 +394,9 @@ fn rdf_star_no_rel_props_same_as_reification_for_simple_path() {
 }
 
 #[test]
-fn oxigraph_adapter_reports_rdf_star_true() {
+fn rdf_star_adapter_reports_rdf_star_true() {
     use polygraph::target::TargetEngine;
-    let engine = OxigraphAdapter::default();
+    let engine = RdfStar::default();
     assert!(engine.supports_rdf_star());
 }
 

@@ -1,6 +1,6 @@
 # Target Engine Analysis
 
-This document evaluates SPARQL engine targets worth supporting in `rs-polygraph` beyond the built-in Oxigraph adapter.
+This document evaluates SPARQL engine targets worth supporting in `rs-polygraph` beyond the built-in `GenericSparql11` and `RdfStar` adapters.
 
 The `TargetEngine` trait has three levers relevant to this analysis:
 
@@ -8,7 +8,9 @@ The `TargetEngine` trait has three levers relevant to this analysis:
 - `supports_federation() -> bool` — controls whether `SERVICE` calls are emitted
 - `finalize(query: String) -> Result<String, PolygraphError>` — dialect-specific post-processing
 
-All engines listed here are accessed over HTTP SPARQL endpoints; none are embeddable like Oxigraph. Adapter structs in `target/` are purely capability descriptors and dialect rewriters — no HTTP client code belongs in this crate. Endpoint communication belongs in a future `rs-polygraph-client` crate or integration tests.
+All engines listed here are accessed over HTTP SPARQL endpoints. Adapter structs in `target/` are purely capability descriptors and dialect rewriters — no HTTP client code belongs in this crate. Endpoint communication belongs in a future `rs-polygraph-client` crate or integration tests.
+
+Note: Oxigraph is used as the embedded SPARQL engine for the TCK test suite (`dev-dependency` only). It is not exposed in the public API.
 
 ---
 

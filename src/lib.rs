@@ -9,7 +9,7 @@
 //! - Phase 4: ORDER BY/SKIP/LIMIT, aggregation, UNWIND, variable-length paths,
 //!   multi-type relationships, IN list literals, write clause stubs
 //!
-//! Use [`target::OxigraphAdapter`] for RDF-star engines or
+//! Use [`target::RdfStar`] for engines that support SPARQL-star natively, or
 //! [`target::GenericSparql11`] for standard SPARQL 1.1.
 //!
 //! # Example

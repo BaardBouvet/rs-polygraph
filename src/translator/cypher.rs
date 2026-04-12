@@ -16,7 +16,6 @@
 /// | `OPTIONAL MATCH`          | `OPTIONAL { }` / `LeftJoin`             |
 /// | `WITH … WHERE`            | `FILTER` applied to current pattern     |
 /// | `RETURN DISTINCT`         | `DISTINCT` wrapper                      |
-
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression as SparExpr, GraphPattern, OrderExpression,
 };
@@ -89,7 +88,12 @@ struct TranslationState {
 
 impl TranslationState {
     fn new(base_iri: String, rdf_star: bool) -> Self {
-        Self { base_iri, counter: 0, rdf_star, edge_map: Default::default() }
+        Self {
+            base_iri,
+            counter: 0,
+            rdf_star,
+            edge_map: Default::default(),
+        }
     }
 
     /// Allocate a fresh SPARQL variable.
@@ -178,7 +182,9 @@ impl TranslationState {
                         self.translate_return_clause(r, &mut extra_triples)?;
 
                     if !return_triples.is_empty() {
-                        let extra = GraphPattern::Bgp { patterns: return_triples };
+                        let extra = GraphPattern::Bgp {
+                            patterns: return_triples,
+                        };
                         current = join_patterns(current, extra);
                     }
                     // Flush any triples added during return expression translation.
@@ -192,11 +198,14 @@ impl TranslationState {
                     // Apply aggregation (GROUP BY) if present.
                     if !aggregates.is_empty() {
                         // Group variables = all projected non-aggregate vars.
-                        let group_vars: Vec<Variable> = project_vars.as_ref()
-                            .map(|vs| vs.iter()
-                                .filter(|v| !aggregates.iter().any(|(av, _)| av == *v))
-                                .cloned()
-                                .collect())
+                        let group_vars: Vec<Variable> = project_vars
+                            .as_ref()
+                            .map(|vs| {
+                                vs.iter()
+                                    .filter(|v| !aggregates.iter().any(|(av, _)| av == *v))
+                                    .cloned()
+                                    .collect()
+                            })
                             .unwrap_or_default();
                         current = GraphPattern::Group {
                             inner: Box::new(current),
@@ -212,7 +221,9 @@ impl TranslationState {
                         };
                     }
                     if need_distinct {
-                        current = GraphPattern::Distinct { inner: Box::new(current) };
+                        current = GraphPattern::Distinct {
+                            inner: Box::new(current),
+                        };
                     }
                     // Apply ORDER BY / SKIP / LIMIT from RETURN clause.
                     current = self.apply_order_skip_limit(
@@ -291,7 +302,9 @@ impl TranslationState {
 
         // Final flush (in case no RETURN clause was present).
         if !extra_triples.is_empty() {
-            let extra = GraphPattern::Bgp { patterns: extra_triples };
+            let extra = GraphPattern::Bgp {
+                patterns: extra_triples,
+            };
             current = join_patterns(current, extra);
         }
         current = apply_filters(current, pending_filters.into_iter());
@@ -436,11 +449,14 @@ impl TranslationState {
 
         // Build base path expression (single type or Alternative for multiple).
         let base_ppe: PPE = if multi_type {
-            let types: Vec<PPE> = rel.rel_types
+            let types: Vec<PPE> = rel
+                .rel_types
                 .iter()
                 .map(|t| PPE::from(self.iri(t)))
                 .collect();
-            types.into_iter().reduce(|a, b| PPE::Alternative(Box::new(a), Box::new(b)))
+            types
+                .into_iter()
+                .reduce(|a, b| PPE::Alternative(Box::new(a), Box::new(b)))
                 .expect("at least 2 types")
         } else {
             PPE::from(self.iri(&rel.rel_types[0]))
@@ -498,7 +514,12 @@ impl TranslationState {
                 let pred = self.iri(&rel.rel_types[0]);
                 self.edge_map.insert(
                     var_name.clone(),
-                    EdgeInfo { src: src.clone(), pred, dst: dst.clone(), reif_var: None },
+                    EdgeInfo {
+                        src: src.clone(),
+                        pred,
+                        dst: dst.clone(),
+                        reif_var: None,
+                    },
                 );
             }
             Ok(())
@@ -507,11 +528,13 @@ impl TranslationState {
             let pred = self.iri(&rel.rel_types[0]);
             if multi_type {
                 // Multi-type without range: use property path Alternative.
-                let types: Vec<PPE> = rel.rel_types
+                let types: Vec<PPE> = rel
+                    .rel_types
                     .iter()
                     .map(|t| PPE::from(self.iri(t)))
                     .collect();
-                let path = types.into_iter()
+                let path = types
+                    .into_iter()
                     .reduce(|a, b| PPE::Alternative(Box::new(a), Box::new(b)))
                     .expect("multi_type has ≥2 types");
                 let (subj, obj) = match rel.direction {
@@ -526,7 +549,12 @@ impl TranslationState {
                 if let Some(ref var_name) = rel.variable {
                     self.edge_map.insert(
                         var_name.clone(),
-                        EdgeInfo { src: src.clone(), pred, dst: dst.clone(), reif_var: None },
+                        EdgeInfo {
+                            src: src.clone(),
+                            pred,
+                            dst: dst.clone(),
+                            reif_var: None,
+                        },
                     );
                 }
                 Ok(())
@@ -590,17 +618,24 @@ impl TranslationState {
 
                 if self.rdf_star {
                     let extra = rdf_mapping::rdf_star::all_property_triples(
-                        src.clone(), pred.clone(), dst.clone(), &prop_pairs,
+                        src.clone(),
+                        pred.clone(),
+                        dst.clone(),
+                        &prop_pairs,
                     );
                     triples.extend(extra);
                 } else {
-                    let reif_var = rel.variable.as_ref()
+                    let reif_var = rel
+                        .variable
+                        .as_ref()
                         .and_then(|v| self.edge_map.get(v))
                         .and_then(|ei| ei.reif_var.clone())
                         .unwrap_or_else(|| self.fresh_var("reif"));
                     let extra = rdf_mapping::reification::all_triples(
                         &reif_var,
-                        src.clone(), pred.clone(), dst.clone(),
+                        src.clone(),
+                        pred.clone(),
+                        dst.clone(),
                         &prop_pairs,
                     );
                     triples.extend(extra);
@@ -634,8 +669,7 @@ impl TranslationState {
                 let mut vars = Vec::new();
                 let mut aggregates: Vec<(Variable, AggregateExpression)> = Vec::new();
                 for item in items {
-                    let (var, agg_opt) =
-                        self.translate_return_item(item, &mut triples, extra)?;
+                    let (var, agg_opt) = self.translate_return_item(item, &mut triples, extra)?;
                     vars.push(var.clone());
                     if let Some(agg) = agg_opt {
                         aggregates.push((var, agg));
@@ -675,11 +709,16 @@ impl TranslationState {
                     let prop_iri = self.iri(key);
                     if self.rdf_star {
                         triples.push(rdf_mapping::rdf_star::annotated_triple(
-                            edge.src.clone(), edge.pred.clone(), edge.dst.clone(),
-                            prop_iri, result_var.clone().into(),
+                            edge.src.clone(),
+                            edge.pred.clone(),
+                            edge.dst.clone(),
+                            prop_iri,
+                            result_var.clone().into(),
                         ));
                     } else {
-                        let reif_var = edge.reif_var.clone()
+                        let reif_var = edge
+                            .reif_var
+                            .clone()
                             .unwrap_or_else(|| self.fresh_var(&format!("reif_{var_name}")));
                         triples.push(TriplePattern {
                             subject: reif_var.into(),
@@ -738,9 +777,7 @@ impl TranslationState {
             Expression::Variable(name) => {
                 Ok(SparExpr::Variable(Variable::new_unchecked(name.clone())))
             }
-            Expression::Literal(lit) => {
-                Ok(SparExpr::Literal(self.translate_literal(lit)?))
-            }
+            Expression::Literal(lit) => Ok(SparExpr::Literal(self.translate_literal(lit)?)),
             Expression::Property(base_expr, key) => {
                 let base_var = self.extract_variable(base_expr)?;
                 let var_name = base_var.as_str().to_string();
@@ -757,7 +794,9 @@ impl TranslationState {
                             fresh.clone().into(),
                         ));
                     } else {
-                        let reif_var = edge.reif_var.clone()
+                        let reif_var = edge
+                            .reif_var
+                            .clone()
                             .unwrap_or_else(|| self.fresh_var(&format!("reif_{var_name}")));
                         extra.push(TriplePattern {
                             subject: reif_var.into(),
@@ -832,8 +871,10 @@ impl TranslationState {
                 if matches!(op, CompOp::In) {
                     if let Expression::List(items) = rhs.as_ref() {
                         let l = self.translate_expr(lhs, extra)?;
-                        let members: Result<Vec<_>, _> =
-                            items.iter().map(|e| self.translate_expr(e, extra)).collect();
+                        let members: Result<Vec<_>, _> = items
+                            .iter()
+                            .map(|e| self.translate_expr(e, extra))
+                            .collect();
                         return Ok(SparExpr::In(Box::new(l), members?));
                     }
                 }
@@ -841,10 +882,9 @@ impl TranslationState {
                 let r = self.translate_expr(rhs, extra)?;
                 let result = match op {
                     CompOp::Eq => SparExpr::Equal(Box::new(l), Box::new(r)),
-                    CompOp::Ne => SparExpr::Not(Box::new(SparExpr::Equal(
-                        Box::new(l),
-                        Box::new(r),
-                    ))),
+                    CompOp::Ne => {
+                        SparExpr::Not(Box::new(SparExpr::Equal(Box::new(l), Box::new(r))))
+                    }
                     CompOp::Lt => SparExpr::Less(Box::new(l), Box::new(r)),
                     CompOp::Le => SparExpr::LessOrEqual(Box::new(l), Box::new(r)),
                     CompOp::Gt => SparExpr::Greater(Box::new(l), Box::new(r)),
@@ -859,56 +899,39 @@ impl TranslationState {
                         SparExpr::In(Box::new(l), vec![r])
                     }
                     CompOp::StartsWith => {
-                        SparExpr::FunctionCall(
-                            spargebra::algebra::Function::StrStarts,
-                            vec![l, r],
-                        )
+                        SparExpr::FunctionCall(spargebra::algebra::Function::StrStarts, vec![l, r])
                     }
                     CompOp::EndsWith => {
-                        SparExpr::FunctionCall(
-                            spargebra::algebra::Function::StrEnds,
-                            vec![l, r],
-                        )
+                        SparExpr::FunctionCall(spargebra::algebra::Function::StrEnds, vec![l, r])
                     }
                     CompOp::Contains => {
-                        SparExpr::FunctionCall(
-                            spargebra::algebra::Function::Contains,
-                            vec![l, r],
-                        )
+                        SparExpr::FunctionCall(spargebra::algebra::Function::Contains, vec![l, r])
                     }
                 };
                 Ok(result)
             }
-            Expression::Add(a, b) => {
-                Ok(SparExpr::Add(
-                    Box::new(self.translate_expr(a, extra)?),
-                    Box::new(self.translate_expr(b, extra)?),
-                ))
-            }
-            Expression::Subtract(a, b) => {
-                Ok(SparExpr::Subtract(
-                    Box::new(self.translate_expr(a, extra)?),
-                    Box::new(self.translate_expr(b, extra)?),
-                ))
-            }
-            Expression::Multiply(a, b) => {
-                Ok(SparExpr::Multiply(
-                    Box::new(self.translate_expr(a, extra)?),
-                    Box::new(self.translate_expr(b, extra)?),
-                ))
-            }
-            Expression::Divide(a, b) => {
-                Ok(SparExpr::Divide(
-                    Box::new(self.translate_expr(a, extra)?),
-                    Box::new(self.translate_expr(b, extra)?),
-                ))
-            }
+            Expression::Add(a, b) => Ok(SparExpr::Add(
+                Box::new(self.translate_expr(a, extra)?),
+                Box::new(self.translate_expr(b, extra)?),
+            )),
+            Expression::Subtract(a, b) => Ok(SparExpr::Subtract(
+                Box::new(self.translate_expr(a, extra)?),
+                Box::new(self.translate_expr(b, extra)?),
+            )),
+            Expression::Multiply(a, b) => Ok(SparExpr::Multiply(
+                Box::new(self.translate_expr(a, extra)?),
+                Box::new(self.translate_expr(b, extra)?),
+            )),
+            Expression::Divide(a, b) => Ok(SparExpr::Divide(
+                Box::new(self.translate_expr(a, extra)?),
+                Box::new(self.translate_expr(b, extra)?),
+            )),
             Expression::Modulo(_, _) => Err(PolygraphError::UnsupportedFeature {
                 feature: "modulo operator (Phase 4)".to_string(),
             }),
-            Expression::Negate(inner) => {
-                Ok(SparExpr::UnaryMinus(Box::new(self.translate_expr(inner, extra)?)))
-            }
+            Expression::Negate(inner) => Ok(SparExpr::UnaryMinus(Box::new(
+                self.translate_expr(inner, extra)?,
+            ))),
             Expression::Power(_, _) => Err(PolygraphError::UnsupportedFeature {
                 feature: "power operator (Phase 4)".to_string(),
             }),
@@ -916,14 +939,13 @@ impl TranslationState {
                 // Lists are handled inline for IN expressions (see Comparison arm above).
                 // A standalone list literal in filter context is not yet supported.
                 Err(PolygraphError::UnsupportedFeature {
-                    feature: "standalone list literal in filter expression (use IN [a,b,c])".to_string(),
+                    feature: "standalone list literal in filter expression (use IN [a,b,c])"
+                        .to_string(),
                 })
             }
-            Expression::Map(_) => {
-                Err(PolygraphError::UnsupportedFeature {
-                    feature: "map literal in filter expression context".to_string(),
-                })
-            }
+            Expression::Map(_) => Err(PolygraphError::UnsupportedFeature {
+                feature: "map literal in filter expression context".to_string(),
+            }),
             Expression::Aggregate(agg) => {
                 // Aggregates in expressions (e.g. HAVING) are not yet handled; they
                 // are handled at the RETURN level via translate_aggregate_expr.
@@ -947,12 +969,11 @@ impl TranslationState {
         match agg {
             AggregateExpr::Count { distinct, expr } => {
                 if expr.is_none() {
-                    Ok(AggregateExpression::CountSolutions { distinct: *distinct })
+                    Ok(AggregateExpression::CountSolutions {
+                        distinct: *distinct,
+                    })
                 } else {
-                    let e = self.translate_expr(
-                        expr.as_ref().unwrap(),
-                        extra,
-                    )?;
+                    let e = self.translate_expr(expr.as_ref().unwrap(), extra)?;
                     Ok(AggregateExpression::FunctionCall {
                         name: AggregateFunction::Count,
                         expr: e,
@@ -980,13 +1001,11 @@ impl TranslationState {
                 expr: self.translate_expr(expr, extra)?,
                 distinct: *distinct,
             }),
-            AggregateExpr::Collect { distinct, expr } => {
-                Ok(AggregateExpression::FunctionCall {
-                    name: AggregateFunction::GroupConcat { separator: None },
-                    expr: self.translate_expr(expr, extra)?,
-                    distinct: *distinct,
-                })
-            }
+            AggregateExpr::Collect { distinct, expr } => Ok(AggregateExpression::FunctionCall {
+                name: AggregateFunction::GroupConcat { separator: None },
+                expr: self.translate_expr(expr, extra)?,
+                distinct: *distinct,
+            }),
         }
     }
 
@@ -1127,9 +1146,7 @@ impl TranslationState {
                 let spar_lit = self.translate_literal(lit)?;
                 Ok(spar_lit.into())
             }
-            Expression::Variable(name) => {
-                Ok(Variable::new_unchecked(name.clone()).into())
-            }
+            Expression::Variable(name) => Ok(Variable::new_unchecked(name.clone()).into()),
             _ => Err(PolygraphError::UnsupportedFeature {
                 feature: "complex expression in inline property map (Phase 4)".to_string(),
             }),
@@ -1175,7 +1192,10 @@ fn join_patterns(left: GraphPattern, right: GraphPattern) -> GraphPattern {
             lp.extend(rp);
             GraphPattern::Bgp { patterns: lp }
         }
-        (l, r) => GraphPattern::Join { left: Box::new(l), right: Box::new(r) },
+        (l, r) => GraphPattern::Join {
+            left: Box::new(l),
+            right: Box::new(r),
+        },
     }
 }
 
@@ -1185,7 +1205,10 @@ fn apply_filters(
     filters: impl Iterator<Item = SparExpr>,
 ) -> GraphPattern {
     for expr in filters {
-        pattern = GraphPattern::Filter { expr, inner: Box::new(pattern) };
+        pattern = GraphPattern::Filter {
+            expr,
+            inner: Box::new(pattern),
+        };
     }
     pattern
 }
@@ -1194,10 +1217,13 @@ fn apply_filters(
 /// assuming it is a node.  Returns a fresh anonymous variable if the index
 /// is out of bounds (shouldn't happen for a well-formed pattern).
 fn node_var_at(elements: &[PatternElement], i: usize) -> TermPattern {
-    elements.get(i).and_then(|e| match e {
-        PatternElement::Node(n) => Some(node_term(n)),
-        _ => None,
-    }).unwrap_or_else(|| Variable::new_unchecked("__anon").into())
+    elements
+        .get(i)
+        .and_then(|e| match e {
+            PatternElement::Node(n) => Some(node_term(n)),
+            _ => None,
+        })
+        .unwrap_or_else(|| Variable::new_unchecked("__anon").into())
 }
 
 /// Build the SPARQL `TermPattern` for a node: `?var` if the node has a

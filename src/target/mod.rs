@@ -1,8 +1,8 @@
 use crate::error::PolygraphError;
 
-pub mod oxigraph;
+pub mod rdf_star;
 
-pub use oxigraph::OxigraphAdapter;
+pub use rdf_star::RdfStar;
 
 /// Describes the SPARQL capabilities of a target engine.
 ///

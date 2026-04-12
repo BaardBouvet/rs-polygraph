@@ -104,7 +104,11 @@ pub struct SetClause {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SetItem {
     /// `n.prop = expr`
-    Property { variable: Ident, key: Ident, value: Expression },
+    Property {
+        variable: Ident,
+        key: Ident,
+        value: Expression,
+    },
     /// `n += { map }`
     MergeMap { variable: Ident, map: MapLiteral },
     /// `n = expr`
@@ -298,17 +302,35 @@ pub type MapLiteral = Vec<(Ident, Expression)>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum AggregateExpr {
     /// `count(*)` or `count([DISTINCT] expr)`
-    Count { distinct: bool, expr: Option<Box<Expression>> },
+    Count {
+        distinct: bool,
+        expr: Option<Box<Expression>>,
+    },
     /// `sum([DISTINCT] expr)`
-    Sum { distinct: bool, expr: Box<Expression> },
+    Sum {
+        distinct: bool,
+        expr: Box<Expression>,
+    },
     /// `avg([DISTINCT] expr)`
-    Avg { distinct: bool, expr: Box<Expression> },
+    Avg {
+        distinct: bool,
+        expr: Box<Expression>,
+    },
     /// `min([DISTINCT] expr)`
-    Min { distinct: bool, expr: Box<Expression> },
+    Min {
+        distinct: bool,
+        expr: Box<Expression>,
+    },
     /// `max([DISTINCT] expr)`
-    Max { distinct: bool, expr: Box<Expression> },
+    Max {
+        distinct: bool,
+        expr: Box<Expression>,
+    },
     /// `collect([DISTINCT] expr)` → maps to SPARQL GROUP_CONCAT
-    Collect { distinct: bool, expr: Box<Expression> },
+    Collect {
+        distinct: bool,
+        expr: Box<Expression>,
+    },
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -387,7 +409,10 @@ mod tests {
             direction: Direction::Right,
             rel_types: vec!["KNOWS".to_string()],
             properties: None,
-            range: Some(RangeQuantifier { lower: Some(1), upper: Some(3) }),
+            range: Some(RangeQuantifier {
+                lower: Some(1),
+                upper: Some(3),
+            }),
         };
         assert_eq!(r.rel_types, vec!["KNOWS"]);
         assert_eq!(r.range.as_ref().unwrap().lower, Some(1));
@@ -457,7 +482,10 @@ mod tests {
 
     #[test]
     fn range_quantifier_unbounded_upper() {
-        let rq = RangeQuantifier { lower: Some(1), upper: None };
+        let rq = RangeQuantifier {
+            lower: Some(1),
+            upper: None,
+        };
         assert_eq!(rq.lower, Some(1));
         assert!(rq.upper.is_none());
     }
@@ -494,7 +522,9 @@ mod tests {
 
     #[test]
     fn create_clause_holds_pattern_list() {
-        let c = CreateClause { pattern: PatternList(vec![]) };
+        let c = CreateClause {
+            pattern: PatternList(vec![]),
+        };
         assert!(c.pattern.0.is_empty());
     }
 
@@ -542,7 +572,10 @@ mod tests {
 
     #[test]
     fn aggregate_count_star() {
-        let a = AggregateExpr::Count { distinct: false, expr: None };
+        let a = AggregateExpr::Count {
+            distinct: false,
+            expr: None,
+        };
         assert!(matches!(a, AggregateExpr::Count { expr: None, .. }));
     }
 

@@ -43,7 +43,7 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 - [x] Implement `rdf_mapping::rdf_star` encoder for edge property triples
 - [x] Implement `rdf_mapping::reification` fallback
 - [x] Implement `TargetEngine` trait with `supports_rdf_star()` capability flag
-- [x] Implement `target::oxigraph::OxigraphAdapter` (RDF-star enabled)
+- [x] Implement `target::rdf_star::RdfStar` generic adapter (RDF-star enabled; engine-agnostic)
 - [x] Implement `target::GenericSparql11` adapter (reification fallback)
 - [x] Tests for both encoding modes on edge properties
 
