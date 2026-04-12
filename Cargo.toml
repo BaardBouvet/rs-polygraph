@@ -1,0 +1,44 @@
+[package]
+name = "polygraph"
+version = "0.1.0"
+edition = "2021"
+authors = ["rs-polygraph contributors"]
+license = "MIT OR Apache-2.0"
+description = "A Rust library that transpiles openCypher and ISO GQL queries into SPARQL 1.1 algebra"
+repository = "https://github.com/oxigraph/rs-polygraph"
+
+[lib]
+name = "polygraph"
+path = "src/lib.rs"
+
+[[test]]
+name = "tck"
+path = "tests/tck/main.rs"
+harness = false
+
+[dependencies]
+pest = "2.7"
+pest_derive = "2.7"
+spargebra = "0.3"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+
+[dev-dependencies]
+# oxigraph = "0.3"  # Re-enable in Phase 3/6 when integration tests are added.
+#                   # Requires libclang on the build host (bindgen dependency).
+cucumber = "0.20"
+criterion = "0.5"
+
+[features]
+default = ["serde"]
+serde = ["dep:serde", "dep:serde_json"]
+
+[[bench]]
+name = "transpilation"
+harness = false
+path = "benches/transpilation.rs"
+
+[profile.release]
+opt-level = 3
+lto = true

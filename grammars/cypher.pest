@@ -1,0 +1,144 @@
+// ============================================================
+// openCypher grammar — Phase 1 subset
+// Covers: MATCH, OPTIONAL MATCH, WHERE, RETURN, WITH
+// Case-insensitive keywords (^"KW" syntax).
+// ============================================================
+
+// ----- Whitespace & comments (silent) -----------------------
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ "//" ~ (!NEWLINE ~ ANY)* ~ NEWLINE?
+              | "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+// ----- Entry point ------------------------------------------
+query     = { SOI ~ statement ~ EOI }
+statement = { clause+ }
+clause    = { match_clause | with_clause | return_clause }
+
+// ----- Keywords (case-insensitive, word-boundary guarded) ---
+ident_char  = _{ ASCII_ALPHANUMERIC | "_" }
+
+kw_MATCH    = @{ ^"MATCH"    ~ !ident_char }
+kw_OPTIONAL = @{ ^"OPTIONAL" ~ !ident_char }
+kw_RETURN   = @{ ^"RETURN"   ~ !ident_char }
+kw_WHERE    = @{ ^"WHERE"    ~ !ident_char }
+kw_WITH     = @{ ^"WITH"     ~ !ident_char }
+kw_AS       = @{ ^"AS"       ~ !ident_char }
+kw_DISTINCT = @{ ^"DISTINCT" ~ !ident_char }
+kw_AND      = @{ ^"AND"      ~ !ident_char }
+kw_OR       = @{ ^"OR"       ~ !ident_char }
+kw_XOR      = @{ ^"XOR"      ~ !ident_char }
+kw_NOT      = @{ ^"NOT"      ~ !ident_char }
+kw_NULL     = @{ ^"NULL"     ~ !ident_char }
+kw_TRUE     = @{ ^"TRUE"     ~ !ident_char }
+kw_FALSE    = @{ ^"FALSE"    ~ !ident_char }
+kw_IS       = @{ ^"IS"       ~ !ident_char }
+kw_IN       = @{ ^"IN"       ~ !ident_char }
+kw_CONTAINS = @{ ^"CONTAINS" ~ !ident_char }
+kw_STARTS   = @{ ^"STARTS"   ~ !ident_char }
+kw_ENDS     = @{ ^"ENDS"     ~ !ident_char }
+
+// Silent aggregate used for negative lookahead in variable rule
+keyword = _{
+    kw_MATCH | kw_OPTIONAL | kw_RETURN | kw_WHERE | kw_WITH | kw_AS |
+    kw_DISTINCT | kw_AND | kw_OR | kw_XOR | kw_NOT | kw_NULL |
+    kw_TRUE | kw_FALSE | kw_IS | kw_IN | kw_CONTAINS | kw_STARTS | kw_ENDS
+}
+
+// ----- Identifiers & variables ------------------------------
+ident    = @{ (ASCII_ALPHA | "_") ~ ident_char* }
+// Backtick-escaped identifier: `some identifier`
+ident_escaped = @{ "`" ~ (!"`" ~ ANY)+ ~ "`" }
+variable = { !(keyword ~ !ident_char) ~ (ident_escaped | ident) }
+
+// ----- Clauses ----------------------------------------------
+match_clause  = { optional_marker? ~ kw_MATCH ~ pattern_list ~ where_clause? }
+optional_marker = { kw_OPTIONAL }
+where_clause  = { kw_WHERE ~ expression }
+return_clause = { kw_RETURN ~ return_body }
+with_clause   = { kw_WITH ~ return_body ~ where_clause? }
+
+// ----- Return / With body -----------------------------------
+return_body  = { distinct_marker? ~ return_items }
+distinct_marker = { kw_DISTINCT }
+return_items = { star_projection | explicit_items }
+star_projection  = { "*" }
+explicit_items   = { return_item ~ ("," ~ return_item)* }
+return_item  = { expression ~ (kw_AS ~ variable)? }
+
+// ----- Pattern ----------------------------------------------
+pattern_list      = { pattern ~ ("," ~ pattern)* }
+pattern           = { (variable ~ "=")? ~ node_pattern_chain }
+node_pattern_chain = { node_pattern ~ chain_link* }
+chain_link        = { rel_pattern ~ node_pattern }
+
+// Node pattern: (var:Label1:Label2 {key: val})
+node_pattern = { "(" ~ variable? ~ node_labels? ~ properties? ~ ")" }
+node_labels  = { node_label+ }
+node_label   = { ":" ~ (ident_escaped | ident) }
+
+// Relationship pattern: <-[...]- | -[...]-> | -[...]-
+rel_pattern  = { left_arrow ~ rel_body ~ rel_dash
+               | rel_dash   ~ rel_body ~ right_arrow
+               | rel_dash   ~ rel_body ~ rel_dash }
+left_arrow   = { "<-" }
+right_arrow  = { "->" }
+rel_dash     = { "-" }
+
+// Contents of the relationship brackets (optional brackets altogether)
+rel_body           = { ("[" ~ variable? ~ rel_type_list? ~ range_literal? ~ properties? ~ "]")? }
+rel_type_list      = { ":" ~ rel_type_elem ~ ("|" ~ ":"? ~ rel_type_elem)* }
+rel_type_elem      = { ident_escaped | ident }
+range_literal      = { "*" ~ (integer_literal ~ (".." ~ integer_literal?)?)? }
+
+// ----- Properties (map literal inline) ----------------------
+properties = { map_literal }
+map_literal = { "{" ~ (map_entry ~ ("," ~ map_entry)*)? ~ "}" }
+map_entry   = { prop_name ~ ":" ~ expression }
+prop_name   = { ident_escaped | ident }
+
+// ----- Expressions (precedence, lowest to highest) ----------
+expression          = { or_expr }
+or_expr             = { xor_expr    ~ (kw_OR   ~ xor_expr)* }
+xor_expr            = { and_expr    ~ (kw_XOR  ~ and_expr)* }
+and_expr            = { not_expr    ~ (kw_AND  ~ not_expr)* }
+not_expr            = { kw_NOT ~ not_expr | comparison_expr }
+comparison_expr     = { add_sub_expr ~ comparison_suffix? }
+comparison_suffix   = { comp_op ~ add_sub_expr
+                      | kw_IS ~ kw_NOT ~ kw_NULL
+                      | kw_IS ~ kw_NULL
+                      | kw_IN ~ add_sub_expr
+                      | kw_STARTS ~ kw_WITH ~ add_sub_expr
+                      | kw_ENDS   ~ kw_WITH ~ add_sub_expr
+                      | kw_CONTAINS ~ add_sub_expr }
+comp_op             = { "=" | "<>" | "<=" | ">=" | "<" | ">" }
+add_sub_expr        = { mul_div_expr ~ (add_sub_op ~ mul_div_expr)* }
+add_sub_op          = { "+" | "-" }
+mul_div_expr        = { unary_expr ~ (mul_div_op ~ unary_expr)* }
+mul_div_op          = { "*" | "/" | "%" }
+unary_expr          = { unary_minus | power_expr }
+unary_minus         = { "-" ~ unary_expr }
+power_expr          = { prop_expr ~ ("^" ~ unary_expr)? }
+prop_expr           = { atom ~ property_lookup* }
+property_lookup     = { "." ~ prop_name }
+
+atom        = { float_literal
+              | integer_literal
+              | string_literal
+              | boolean_literal
+              | null_literal
+              | list_literal
+              | map_literal
+              | "(" ~ expression ~ ")"
+              | variable }
+
+// ----- Literals ---------------------------------------------
+boolean_literal = { kw_TRUE | kw_FALSE }
+null_literal    = { kw_NULL }
+integer_literal = @{ ASCII_DIGIT+ }
+float_literal   = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+
+                    ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)? }
+string_literal  = @{ "\"" ~ double_str_char* ~ "\""
+                   | "'"  ~ single_str_char* ~ "'"  }
+double_str_char = { !("\"" | "\\") ~ ANY | "\\" ~ ANY }
+single_str_char = { !("'"  | "\\") ~ ANY | "\\" ~ ANY }
+list_literal    = { "[" ~ (expression ~ ("," ~ expression)*)? ~ "]" }

@@ -8,14 +8,14 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 
 **Goal**: Parse a useful subset of openCypher into a typed AST.
 
-- [ ] Initialize Cargo workspace with module structure (`ast`, `parser`, `translator`, `target`, `rdf_mapping`, `error`)
-- [ ] Define `PolygraphError` with `thiserror`
-- [ ] Write `grammars/cypher.pest` covering core clauses: `MATCH`, `WHERE`, `RETURN`, `WITH`
-- [ ] Implement `pest`-based parser producing `CypherQuery` AST
-- [ ] Unit tests for all core AST node types
-- [ ] Parser round-trip tests for the covered subset
+- [x] Initialize Cargo workspace with module structure (`ast`, `parser`, `translator`, `target`, `rdf_mapping`, `error`)
+- [x] Define `PolygraphError` with `thiserror`
+- [x] Write `grammars/cypher.pest` covering core clauses: `MATCH`, `WHERE`, `RETURN`, `WITH`
+- [x] Implement `pest`-based parser producing `CypherQuery` AST
+- [x] Unit tests for all core AST node types
+- [x] Parser round-trip tests for the covered subset
 
-**Milestone**: `polygraph::parser::cypher::parse(query)` returns a typed AST for basic `MATCH … RETURN` queries.
+**Milestone**: `polygraph::parser::cypher::parse(query)` returns a typed AST for basic `MATCH … RETURN` queries. ✅
 
 ---
 
