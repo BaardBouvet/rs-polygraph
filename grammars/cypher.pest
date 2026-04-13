@@ -130,13 +130,15 @@ node_pattern = { "(" ~ variable? ~ node_labels? ~ properties? ~ ")" }
 node_labels  = { node_label+ }
 node_label   = { ":" ~ (ident_escaped | ident) }
 
-// Relationship pattern: <-[...]- | -[...]-> | -[...]-
-rel_pattern  = { left_arrow ~ rel_body ~ rel_dash
+// Relationship pattern: <-[...]- | -[...]-> | -[...]- | <-->
+rel_pattern  = { both_arrow
+               | left_arrow ~ rel_body ~ rel_dash
                | rel_dash   ~ rel_body ~ right_arrow
                | rel_dash   ~ rel_body ~ rel_dash }
 left_arrow   = { "<-" }
 right_arrow  = { "->" }
 rel_dash     = { "-" }
+both_arrow   = { "<-->" }
 
 // Contents of the relationship brackets (optional brackets altogether)
 rel_body           = { ("[" ~ variable? ~ rel_type_list? ~ range_literal? ~ properties? ~ "]")? }
@@ -181,10 +183,19 @@ atom        = { float_literal
               | boolean_literal
               | null_literal
               | aggregate_expr
+              | function_call
+              | label_check
               | list_literal
               | map_literal
               | "(" ~ expression ~ ")"
               | variable }
+
+// General function call (non-aggregate): type(r), abs(x), nodes(p), etc.
+// Must come after aggregate_expr so count/sum/avg/min/max/collect are not captured here.
+function_call = { (ident_escaped | ident) ~ "(" ~ (kw_DISTINCT? ~ expression ~ ("," ~ expression)*)? ~ ")" }
+
+// Label check expression: n:Label or n:A:B (in WHERE / expression context).
+label_check = { variable ~ node_labels }
 
 // ----- Aggregate expressions --------------------------------
 aggregate_expr   = { count_expr | agg_call_expr }

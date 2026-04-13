@@ -8,8 +8,7 @@ use crate::ast::cypher::{
     NodePattern, OrderByClause, Pattern, PatternElement, PatternList, RangeQuantifier,
     RelationshipPattern, RemoveClause, RemoveItem, ReturnClause, ReturnItem, ReturnItems,
     SetClause, SetItem, SortItem, UnwindClause, WhereClause, WithClause,
-};
-use crate::error::PolygraphError;
+};use crate::error::PolygraphError;
 
 // The #[grammar] path is relative to the Cargo.toml (crate root).
 #[derive(Parser)]
@@ -355,6 +354,9 @@ fn build_rel_pattern(pair: Pair<Rule>) -> Result<RelationshipPattern, PolygraphE
         match inner.as_rule() {
             Rule::left_arrow => has_left_arrow = true,
             Rule::right_arrow => has_right_arrow = true,
+            Rule::both_arrow => {
+                // <--> : undirected / any-direction — same semantics as --
+            }
             Rule::rel_dash => {}
             Rule::rel_body => {
                 for rb in inner.into_inner() {
@@ -905,6 +907,8 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
         }
         Rule::null_literal => Ok(Expression::Literal(Literal::Null)),
         Rule::aggregate_expr => build_aggregate_expr(inner),
+        Rule::function_call => build_function_call(inner),
+        Rule::label_check => build_label_check(inner),
         Rule::list_literal => {
             let items: Result<Vec<_>, _> = inner
                 .into_inner()
@@ -980,14 +984,55 @@ fn build_aggregate_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> 
 }
 
 /// Extract the text of a `variable` rule, handling backtick-escaped identifiers.
-fn ident_text(pair: &Pair<Rule>) -> Ident {
-    // variable = { !(keyword ~ !ident_char) ~ (ident_escaped | ident) }
+fn ident_text(pair: &Pair<Rule>) -> Ident {    // variable = { !(keyword ~ !ident_char) ~ (ident_escaped | ident) }
     let inner = pair
         .clone()
         .into_inner()
         .next()
         .expect("variable has an ident or ident_escaped child");
     inner.as_str().trim_matches('`').to_string()
+}
+
+fn build_function_call(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
+    // function_call = { (ident_escaped | ident) ~ "(" ~ (kw_DISTINCT? ~ expression ~ ("," ~ expression)*)? ~ ")" }
+    let mut children = pair.into_inner().peekable();
+    let name_pair = children.next().expect("function_call has name");
+    let name = name_pair.as_str().trim_matches('`').to_string();
+    let mut distinct = false;
+    let mut args = Vec::new();
+    for child in children {
+        match child.as_rule() {
+            Rule::kw_DISTINCT => distinct = true,
+            Rule::expression => args.push(build_expression(child)?),
+            _ => {}
+        }
+    }
+    Ok(Expression::FunctionCall { name, distinct, args })
+}
+
+fn build_label_check(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
+    // label_check = { variable ~ node_labels }
+    let mut children = pair.into_inner();
+    let var_pair = children.next().expect("label_check has variable");
+    let variable = ident_text(&var_pair);
+    let mut labels = Vec::new();
+    for child in children {
+        if child.as_rule() == Rule::node_labels {
+            for label_pair in child.into_inner() {
+                if label_pair.as_rule() == Rule::node_label {
+                    let name = label_pair
+                        .into_inner()
+                        .next()
+                        .expect("node_label has ident")
+                        .as_str()
+                        .trim_matches('`')
+                        .to_string();
+                    labels.push(name);
+                }
+            }
+        }
+    }
+    Ok(Expression::LabelCheck { variable, labels })
 }
 
 /// Unescape a Cypher string literal body (content between quotes).

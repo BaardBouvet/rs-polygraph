@@ -264,6 +264,17 @@ pub enum Expression {
     Map(MapLiteral),
     /// Aggregate function call: `count(n)`, `sum(n.score)`, etc.
     Aggregate(AggregateExpr),
+    /// General (non-aggregate) function call: `type(r)`, `abs(x)`, `nodes(p)`, etc.
+    FunctionCall {
+        name: String,
+        distinct: bool,
+        args: Vec<Expression>,
+    },
+    /// Label predicate in expression context: `n:Label` or `n:A:B`.
+    LabelCheck {
+        variable: Ident,
+        labels: Vec<Label>,
+    },
 }
 
 /// Binary comparison operators.
