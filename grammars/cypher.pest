@@ -187,8 +187,12 @@ atom        = { float_literal
               | label_check
               | list_literal
               | map_literal
+              | pattern_predicate
               | "(" ~ expression ~ ")"
               | variable }
+
+// Pattern predicate in expression context: (a)-[:T]->(b:Label) tests for path existence.
+pattern_predicate = { node_pattern ~ (rel_pattern ~ node_pattern)+ }
 
 // General function call (non-aggregate): type(r), abs(x), nodes(p), etc.
 // Must come after aggregate_expr so count/sum/avg/min/max/collect are not captured here.

@@ -909,6 +909,15 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
         Rule::aggregate_expr => build_aggregate_expr(inner),
         Rule::function_call => build_function_call(inner),
         Rule::label_check => build_label_check(inner),
+        Rule::pattern_predicate => {
+            // pattern_predicate = { node_pattern ~ (relationship_pattern ~ node_pattern)+ }
+            // Reuse chain builder — the rule produces the same child types.
+            let elements = build_node_pattern_chain(inner)?;
+            Ok(Expression::PatternPredicate(Pattern {
+                variable: None,
+                elements,
+            }))
+        }
         Rule::list_literal => {
             let items: Result<Vec<_>, _> = inner
                 .into_inner()

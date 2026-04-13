@@ -2711,6 +2711,17 @@ impl TranslationState {
                         .fold(first, |acc, e| SparExpr::And(Box::new(acc), Box::new(e))))
                 }
             }
+            Expression::PatternPredicate(pattern) => {
+                // Translate (a)-[:T]->(b:Label) to EXISTS { triple patterns }.
+                let mut inner_triples: Vec<TriplePattern> = Vec::new();
+                let mut inner_paths: Vec<GraphPattern> = Vec::new();
+                self.translate_pattern(pattern, &mut inner_triples, &mut inner_paths)?;
+                let bgp = GraphPattern::Bgp {
+                    patterns: inner_triples,
+                };
+                let combined = inner_paths.into_iter().fold(bgp, join_patterns);
+                Ok(SparExpr::Exists(Box::new(combined)))
+            }
             Expression::Aggregate(agg) => {
                 // Aggregates in expressions (e.g. HAVING) are not yet handled; they
                 // are handled at the RETURN level via translate_aggregate_expr.
@@ -3417,6 +3428,7 @@ fn expr_uses_nullable(expr: &Expression, nullable: &std::collections::HashSet<St
         }
         Expression::List(items) => items.iter().any(|i| expr_uses_nullable(i, nullable)),
         Expression::LabelCheck { variable, .. } => nullable.contains(variable),
+        Expression::PatternPredicate(_) => false,
         Expression::Aggregate(_) | Expression::Literal(_) | Expression::Map(_) => false,
     }
 }

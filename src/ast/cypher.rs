@@ -275,6 +275,9 @@ pub enum Expression {
         variable: Ident,
         labels: Vec<Label>,
     },
+    /// Pattern predicate in expression context: `(a)-[:T]->(b:Label)`.
+    /// Tests for path existence (translates to SPARQL EXISTS).
+    PatternPredicate(Pattern),
 }
 
 /// Binary comparison operators.
