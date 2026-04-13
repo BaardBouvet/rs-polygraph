@@ -41,7 +41,7 @@ struct TckEngine;
 
 impl TargetEngine for TckEngine {
     fn supports_rdf_star(&self) -> bool {
-        false
+        true
     }
     fn supports_federation(&self) -> bool {
         false
@@ -132,8 +132,8 @@ fn is_complex_tck_value(s: &str) -> bool {
         return true;
     }
     if s.starts_with('[') {
-        // List literal [1,2,3] is NOT complex; [:T] IS complex
-        return s.contains(':') || s.contains('|');
+        // List literal [1,2,3] is NOT complex; [:T] IS complex; [()] IS complex (node)
+        return s.contains(':') || s.contains('|') || s.contains('(');
     }
     false
 }
@@ -156,8 +156,27 @@ fn expr_to_sparql_lit(expr: &Expression) -> Option<String> {
         Expression::Literal(Literal::Null) => None,
         Expression::List(items) => {
             // RDF has no native list; store as a serialised string literal.
-            let parts: Vec<String> = items.iter().filter_map(expr_to_sparql_lit).collect();
+            // Use inner serializer that doesn't double-wrap quotes.
+            let parts: Vec<String> = items.iter().filter_map(list_elem_to_str).collect();
             Some(format!("\"[{}]\"", parts.join(", ")))
+        }
+        _ => None,
+    }
+}
+
+/// Serialize a list element for embedding inside a `"[...]"` string literal.
+/// Uses single quotes for strings to avoid nesting double-quote issues.
+fn list_elem_to_str(expr: &Expression) -> Option<String> {
+    match expr {
+        Expression::Literal(Literal::Integer(n)) => Some(n.to_string()),
+        Expression::Literal(Literal::Float(f)) => Some(f.to_string()),
+        Expression::Literal(Literal::String(s)) => Some(format!("'{}'", s)),
+        Expression::Literal(Literal::Boolean(b)) => {
+            Some(if *b { "true" } else { "false" }.to_owned())
+        }
+        Expression::List(inner) => {
+            let parts: Vec<String> = inner.iter().filter_map(list_elem_to_str).collect();
+            Some(format!("[{}]", parts.join(", ")))
         }
         _ => None,
     }
@@ -243,9 +262,18 @@ fn emit_create_pattern(
                     } else {
                         for rt in &rel.rel_types {
                             triples.push(format!("{s} <{BASE}{rt}> {o} ."));
+                            // Emit RDF-star annotated triples for relationship properties.
+                            if let Some(props) = &rel.properties {
+                                for (key, val_expr) in props {
+                                    if let Some(lit) = expr_to_sparql_lit(val_expr) {
+                                        triples.push(format!(
+                                            "<< {s} <{BASE}{rt}> {o} >> <{BASE}{key}> {lit} ."
+                                        ));
+                                    }
+                                }
+                            }
                         }
                     }
-                    // Relationship properties are skipped (would need rdf-star / reification).
                 }
             }
         }
@@ -256,16 +284,47 @@ fn emit_create_pattern(
 ///
 /// Returns `Ok("INSERT DATA {}")` when there is nothing to insert.
 fn create_to_insert_data(cypher: &str) -> Result<String, String> {
+    use polygraph::ast::cypher::Literal;
     let query = parse_cypher(cypher).map_err(|e| e.to_string())?;
     let mut triples: Vec<String> = Vec::new();
     let mut counter: usize = 0;
     let mut node_map: HashMap<String, String> = HashMap::new();
 
+    // Track UNWIND range(N, M) AS var for loop expansion in CREATE setup.
+    let mut loop_count: usize = 1;
+
     for clause in &query.clauses {
-        if let Clause::Create(c) = clause {
-            for pattern in &c.pattern.0 {
-                emit_create_pattern(pattern, &mut triples, &mut node_map, &mut counter);
+        match clause {
+            Clause::Unwind(u) => {
+                // Expand UNWIND range(start, end) AS var into loop_count iterations.
+                if let Expression::FunctionCall { name, args, .. } = &u.expression {
+                    if name.eq_ignore_ascii_case("range") && args.len() >= 2 {
+                        if let (
+                            Expression::Literal(Literal::Integer(start)),
+                            Expression::Literal(Literal::Integer(end)),
+                        ) = (&args[0], &args[1])
+                        {
+                            loop_count = (*end - *start + 1).max(0) as usize;
+                        }
+                    }
+                }
             }
+            Clause::Create(c) => {
+                for _iter in 0..loop_count {
+                    // For UNWIND+CREATE iterations, reset the named-variable map so
+                    // each loop iteration creates fresh nodes.  For plain CREATE (no
+                    // UNWIND), *preserve* the map so that variable references in
+                    // subsequent CREATE clauses resolve to the same blank nodes.
+                    if loop_count > 1 {
+                        node_map.clear();
+                    }
+                    for pattern in &c.pattern.0 {
+                        emit_create_pattern(pattern, &mut triples, &mut node_map, &mut counter);
+                    }
+                }
+                loop_count = 1; // reset after each CREATE
+            }
+            _ => {}
         }
     }
 
