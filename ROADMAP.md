@@ -95,23 +95,24 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 - [x] Spin up an embedded Oxigraph instance in tests for SPARQL execution
 - [x] Implement step definitions for TCK `Given`/`When`/`Then` patterns
 - [x] Track and document skipped/failing scenarios with issue references
-- [ ] Achieve ≥ 80% TCK pass rate (currently 78.2%)
+- [x] Achieve ≥ 80% TCK pass rate
+- [x] Achieve ≥ 90% TCK pass rate
+- [x] Achieve ≥ 95% TCK pass rate (currently 96.3%)
 
 **TCK compliance tracker** (updated each release):
 
 | Release | Pass | Fail | Total | % |
 |---------|------|------|-------|---|
 | 0.1.0   | 362  | 101  | 463   | 78.2% |
+| dev     | 446  | 17   | 463   | 96.3% |
 
-**Known gaps (101 failing scenarios):**
-- **RDF-star not enabled in TCK runner** — `TckEngine` uses `supports_rdf_star() = false` despite Oxigraph supporting SPARQL-star natively. Enabling RDF-star mode and emitting annotated triples for relationship properties in INSERT DATA is the single highest-ROI fix (see `plans/tck-100-plan.md` Phase 0)
-- Variable-length path syntax `[*..N]` / `[*..]` — grammar not yet extended
-- `range()` / `type()` / `length()` function calls in WHERE/UNWIND — no general `function_call` grammar rule
-- Bounded variable-length paths (`*N..M`) — need UNION-based unrolling
-- GROUP BY not emitted for mixed aggregate/non-aggregate RETURN
-- Three undetected semantic errors: `UndefinedVariable`, `AmbiguousAggregationExpression` (compound), `InvalidArgumentType` (path prop pre-scan)
-- UNWIND of variable references / `collect()` results — SPARQL 1.1 limitation
-- Complex result shapes (node/rel/path objects) compared by row count only
+**Remaining 17 failures** — see [plans/tck-27-remaining.md](plans/tck-27-remaining.md):
+- Variable-length relationship variables (`last(r)`, `count(r)`, `[rs*]`): 5 scenarios
+- Variable-length path property/direction issues: 4 scenarios
+- MERGE / DELETE (SPARQL Update not implemented): 2 scenarios
+- SPARQL property path limitations (distinct endpoints, parallel edges): 2 scenarios
+- Complex expression gaps (`nodes(p)`, `head(collect({map})).prop`, list concat): 3 scenarios
+- Pattern predicate in WHERE with complex AND/OR: 1 scenario
 
 **Milestone**: Published compliance report. ≥ 80% pass rate.
 
