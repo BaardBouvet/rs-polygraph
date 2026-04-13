@@ -142,7 +142,7 @@ rel_dash     = { "-" }
 rel_body           = { ("[" ~ variable? ~ rel_type_list? ~ range_literal? ~ properties? ~ "]")? }
 rel_type_list      = { ":" ~ rel_type_elem ~ ("|" ~ ":"? ~ rel_type_elem)* }
 rel_type_elem      = { ident_escaped | ident }
-range_literal      = { "*" ~ (integer_literal ~ (".." ~ integer_literal?)?)? }
+range_literal      = { "*" ~ ((".." ~ integer_literal?) | (integer_literal ~ (".." ~ integer_literal?)?))? }
 
 // ----- Properties (map literal inline) ----------------------
 properties = { map_literal }

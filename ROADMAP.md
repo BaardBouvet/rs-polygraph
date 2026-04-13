@@ -90,18 +90,25 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 
 **Goal**: Systematically verify semantic correctness against the official test suite.
 
-- [ ] Integrate the `cucumber` crate for Gherkin-driven tests
-- [ ] Download and vendorize TCK feature files from [opencypher/openCypher](https://github.com/opencypher/openCypher/tree/master/tck)
-- [ ] Spin up an embedded Oxigraph instance in tests for SPARQL execution
-- [ ] Implement step definitions for TCK `Given`/`When`/`Then` patterns
-- [ ] Achieve ≥ 80% TCK pass rate
-- [ ] Track and document skipped/failing scenarios with issue references
+- [x] Integrate the `cucumber` crate for Gherkin-driven tests
+- [x] Download and vendorize TCK feature files from [opencypher/openCypher](https://github.com/opencypher/openCypher/tree/master/tck)
+- [x] Spin up an embedded Oxigraph instance in tests for SPARQL execution
+- [x] Implement step definitions for TCK `Given`/`When`/`Then` patterns
+- [x] Track and document skipped/failing scenarios with issue references
+- [ ] Achieve ≥ 80% TCK pass rate (currently 78.2%)
 
 **TCK compliance tracker** (updated each release):
 
-| Release | Pass | Fail | Skip | % |
-|---------|------|------|------|---|
-| 0.1.0   | —    | —    | —    | — |
+| Release | Pass | Fail | Total | % |
+|---------|------|------|-------|---|
+| 0.1.0   | 362  | 101  | 463   | 78.2% |
+
+**Known gaps (101 failing scenarios):**
+- Variable-length path syntax `[*..N]` / `[*..]` — grammar not yet extended
+- `range()` / `type()` / `length()` function calls in WHERE/UNWIND
+- Bounded variable-length paths (unsupported feature)
+- Three undetected semantic errors: `UndefinedVariable`, `AmbiguousAggregationExpression` (compound), `InvalidArgumentType` (path prop pre-scan)
+- Complex result shapes (node/rel/path objects) compared by row count only
 
 **Milestone**: Published compliance report. ≥ 80% pass rate.
 

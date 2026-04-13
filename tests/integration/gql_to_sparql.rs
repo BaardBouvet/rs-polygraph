@@ -102,8 +102,14 @@ fn filter_and_where_equivalent_output() {
     let s_filter = transpile_lower("MATCH (n:Person) FILTER n.age > 30 RETURN n");
     let s_where = transpile_lower("MATCH (n:Person) WHERE n.age > 30 RETURN n");
     // Both should contain the predicate components.
-    assert!(s_filter.contains("30") && s_filter.contains("age"), "got: {s_filter}");
-    assert!(s_where.contains("30") && s_where.contains("age"), "got: {s_where}");
+    assert!(
+        s_filter.contains("30") && s_filter.contains("age"),
+        "got: {s_filter}"
+    );
+    assert!(
+        s_where.contains("30") && s_where.contains("age"),
+        "got: {s_where}"
+    );
 }
 
 #[test]
@@ -212,9 +218,7 @@ fn rel_undirected() {
 
 #[test]
 fn optional_match_emits_optional() {
-    let s = transpile_lower(
-        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person) RETURN a, b",
-    );
+    let s = transpile_lower("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person) RETURN a, b");
     assert!(s.contains("optional"), "got: {s}");
     assert!(s.contains("knows"), "got: {s}");
 }
@@ -285,9 +289,8 @@ fn next_creates_scope_boundary() {
 
 #[test]
 fn match_rel_and_is_labels_combined() {
-    let s = transpile_lower(
-        "MATCH (a IS Person)-[r IS KNOWS]->(b IS Person) RETURN a.name, b.name",
-    );
+    let s =
+        transpile_lower("MATCH (a IS Person)-[r IS KNOWS]->(b IS Person) RETURN a.name, b.name");
     assert!(s.contains("person"), "got: {s}");
     assert!(s.contains("knows"), "got: {s}");
     assert!(s.contains("name"), "got: {s}");

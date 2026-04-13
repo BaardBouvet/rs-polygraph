@@ -54,6 +54,7 @@ pub fn translate(
     base_iri: Option<&str>,
     rdf_star: bool,
 ) -> Result<String, PolygraphError> {
+    validate_semantics(query)?;
     let base = base_iri.unwrap_or(DEFAULT_BASE).to_string();
     let mut state = TranslationState::new(base, rdf_star);
     let pattern = state.translate_query(query)?;
@@ -63,6 +64,346 @@ pub fn translate(
         base_iri: None,
     };
     Ok(sparql_query.to_string())
+}
+
+/// Returns `true` if `expr` contains any aggregate sub-expression at any depth.
+fn expr_contains_aggregate(expr: &Expression) -> bool {
+    match expr {
+        Expression::Aggregate(_) => true,
+        Expression::Or(a, b)
+        | Expression::Xor(a, b)
+        | Expression::And(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b)
+        | Expression::Modulo(a, b)
+        | Expression::Power(a, b)
+        | Expression::Comparison(a, _, b) => {
+            expr_contains_aggregate(a) || expr_contains_aggregate(b)
+        }
+        Expression::Not(e)
+        | Expression::Negate(e)
+        | Expression::IsNull(e)
+        | Expression::IsNotNull(e)
+        | Expression::Property(e, _) => expr_contains_aggregate(e),
+        Expression::List(items) => items.iter().any(expr_contains_aggregate),
+        Expression::Map(pairs) => pairs.iter().any(|(_, v)| expr_contains_aggregate(v)),
+        _ => false,
+    }
+}
+
+/// Returns `true` if `expr` contains a free variable or property reference
+/// **outside** of any aggregate boundary (i.e., not inside an `Aggregate(...)` arg).
+fn expr_has_free_var_outside_agg(expr: &Expression) -> bool {
+    match expr {
+        Expression::Variable(_) => true,
+        Expression::Property(e, _) => expr_has_free_var_outside_agg(e),
+        // Stop recursing into aggregate arguments — those are "consumed" by the agg.
+        Expression::Aggregate(_) => false,
+        Expression::Or(a, b)
+        | Expression::Xor(a, b)
+        | Expression::And(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b)
+        | Expression::Modulo(a, b)
+        | Expression::Power(a, b)
+        | Expression::Comparison(a, _, b) => {
+            expr_has_free_var_outside_agg(a) || expr_has_free_var_outside_agg(b)
+        }
+        Expression::Not(e)
+        | Expression::Negate(e)
+        | Expression::IsNull(e)
+        | Expression::IsNotNull(e) => expr_has_free_var_outside_agg(e),
+        _ => false,
+    }
+}
+
+/// Returns `true` if `agg_expr` has any aggregate in its arguments (nested aggregation).
+fn agg_has_nested_aggregate(agg: &AggregateExpr) -> bool {
+    use crate::ast::cypher::AggregateExpr;
+    match agg {
+        AggregateExpr::Count { expr: Some(e), .. } => expr_contains_aggregate(e),
+        AggregateExpr::Count { expr: None, .. } => false,
+        AggregateExpr::Sum { expr: e, .. }
+        | AggregateExpr::Avg { expr: e, .. }
+        | AggregateExpr::Min { expr: e, .. }
+        | AggregateExpr::Max { expr: e, .. }
+        | AggregateExpr::Collect { expr: e, .. } => expr_contains_aggregate(e),
+    }
+}
+
+/// Semantic analysis pass: catches `VariableTypeConflict` and `VariableAlreadyBound`
+/// before translation so openCypher constraints are enforced.
+fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        Node,
+        Rel,
+        Path,
+        /// Scalar primitive or empty list or map — cannot be node/rel/path
+        Scalar,
+        /// Non-empty list of only variable expressions — e.g. `[r1, r2]`.
+        /// Invalid as a node but valid as a relationship in `[rs*]` expansions.
+        VarList,
+    }
+
+    let mut kinds: std::collections::HashMap<String, Kind> = std::collections::HashMap::new();
+    let mut seen_match = false;
+
+    for clause in &query.clauses {
+        match clause {
+            Clause::With(w) => {
+                if let crate::ast::cypher::ReturnItems::Explicit(items) = &w.items {
+                    for item in items {
+                        let name = item.alias.clone().or_else(|| {
+                            if let Expression::Variable(v) = &item.expression {
+                                Some(v.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(var) = name {
+                            let binding_kind = match &item.expression {
+                                // Primitive scalars → definitely not node/rel/path
+                                Expression::Literal(Literal::Integer(_))
+                                | Expression::Literal(Literal::Float(_))
+                                | Expression::Literal(Literal::String(_))
+                                | Expression::Literal(Literal::Boolean(_)) => Some(Kind::Scalar),
+                                // Maps → not node/rel/path
+                                Expression::Map(_) => Some(Kind::Scalar),
+                                Expression::List(elems) if elems.is_empty() => {
+                                    // Empty list cannot be a node/rel/path
+                                    Some(Kind::Scalar)
+                                }
+                                Expression::List(elems) => {
+                                    let all_vars =
+                                        elems.iter().all(|e| matches!(e, Expression::Variable(_)));
+                                    if all_vars {
+                                        // [r1, r2] — may be used as rel list in [rs*]
+                                        Some(Kind::VarList)
+                                    } else {
+                                        // [1, 2] or mixed → scalar
+                                        Some(Kind::Scalar)
+                                    }
+                                }
+                                _ => None,
+                            };
+                            if let Some(k) = binding_kind {
+                                kinds.insert(var, k);
+                            }
+                        }
+                    }
+                }
+            }
+            Clause::Return(r) => {
+                // NoVariablesInScope: RETURN * with no bound graph variables from MATCH.
+                // Only fire when there was at least one MATCH clause (tracked by seen_match).
+                if matches!(&r.items, ReturnItems::All) && seen_match {
+                    let has_graph_var = kinds
+                        .values()
+                        .any(|k| matches!(k, Kind::Node | Kind::Rel | Kind::Path));
+                    if !has_graph_var {
+                        return Err(PolygraphError::Translation {
+                            message: "NoVariablesInScope: RETURN * with no variables in scope"
+                                .to_string(),
+                        });
+                    }
+                }
+
+                // AmbiguousAggregation and NestedAggregation.
+                if let ReturnItems::Explicit(items) = &r.items {
+                    // Collect the set of non-aggregate return expressions for grouping check.
+                    let non_agg_items: Vec<&Expression> = items
+                        .iter()
+                        .filter(|i| !matches!(&i.expression, Expression::Aggregate(_)))
+                        .filter(|i| !expr_contains_aggregate(&i.expression))
+                        .map(|i| &i.expression)
+                        .collect();
+
+                    for item in items {
+                        if let Expression::Aggregate(agg) = &item.expression {
+                            // NestedAggregation: aggregate inside aggregate arg.
+                            if agg_has_nested_aggregate(agg) {
+                                return Err(PolygraphError::Translation {
+                                    message: "NestedAggregation: aggregate inside \
+                                              aggregate argument"
+                                        .to_string(),
+                                });
+                            }
+                        } else if !matches!(&item.expression, Expression::Aggregate(_))
+                            && expr_contains_aggregate(&item.expression)
+                            && expr_has_free_var_outside_agg(&item.expression)
+                        {
+                            // AmbiguousAggregationExpression:
+                            // expression is NOT a pure aggregate but contains an aggregate
+                            // AND has free variables outside aggregates.
+                            // ONLY flag if the free variables are NOT separately returned
+                            // as a non-aggregate GROUP BY item.
+                            // Simple check: if there are OTHER non-aggregate items in RETURN,
+                            // and the free var outside aggregate appears in those items,
+                            // it's a valid grouping key → not ambiguous.
+                            // If no other non-agg items OR the var is not covered → ambiguous.
+                            let _ = &non_agg_items;
+                            // To keep it conservative (avoid false positives), only flag
+                            // as ambiguous when there are NO other non-aggregate return items.
+                            if non_agg_items.is_empty() {
+                                return Err(PolygraphError::Translation {
+                                    message: "AmbiguousAggregationExpression: mix of aggregate \
+                                              and non-aggregate in RETURN expression"
+                                        .to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            Clause::Match(m) => {
+                seen_match = true;
+
+                // Pre-register path variables so WHERE checks can detect path.prop access.
+                for pattern in &m.pattern.0 {
+                    if let Some(pv) = &pattern.variable {
+                        if kinds.contains_key(pv.as_str()) {
+                            return Err(PolygraphError::Translation {
+                                message: format!("VariableAlreadyBound: '{pv}' is already bound"),
+                            });
+                        }
+                        kinds.insert(pv.clone(), Kind::Path);
+                    }
+                }
+
+                // InvalidAggregation: aggregate in WHERE.
+                if let Some(wc) = &m.where_ {
+                    if expr_contains_aggregate(&wc.expression) {
+                        return Err(PolygraphError::Translation {
+                            message: "InvalidAggregation: aggregate function in WHERE clause"
+                                .to_string(),
+                        });
+                    }
+                }
+
+                // InvalidArgumentType: property access on a path variable.
+                if let Some(wc) = &m.where_ {
+                    fn check_path_prop(
+                        expr: &Expression,
+                        kinds: &std::collections::HashMap<String, Kind>,
+                    ) -> bool {
+                        match expr {
+                            Expression::Property(base, _) => {
+                                if let Expression::Variable(v) = base.as_ref() {
+                                    if matches!(kinds.get(v.as_str()), Some(Kind::Path)) {
+                                        return true;
+                                    }
+                                }
+                                check_path_prop(base, kinds)
+                            }
+                            Expression::Or(a, b)
+                            | Expression::And(a, b)
+                            | Expression::Comparison(a, _, b) => {
+                                check_path_prop(a, kinds) || check_path_prop(b, kinds)
+                            }
+                            Expression::Not(e)
+                            | Expression::IsNull(e)
+                            | Expression::IsNotNull(e) => check_path_prop(e, kinds),
+                            _ => false,
+                        }
+                    }
+                    if check_path_prop(&wc.expression, &kinds) {
+                        return Err(PolygraphError::Translation {
+                            message: "InvalidArgumentType: property access on a path variable"
+                                .to_string(),
+                        });
+                    }
+                }
+
+                // Check RelationshipUniquenessViolation: same rel var twice in one pattern.
+                for pattern in &m.pattern.0 {
+                    let mut rel_vars_in_pattern: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    for elem in &pattern.elements {
+                        if let PatternElement::Relationship(r) = elem {
+                            if let Some(v) = &r.variable {
+                                if !rel_vars_in_pattern.insert(v.clone()) {
+                                    return Err(PolygraphError::Translation {
+                                        message: format!(
+                                            "RelationshipUniquenessViolation: \
+                                             '{v}' used more than once in the same pattern"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for pattern in &m.pattern.0 {
+                    // Path variables are already registered from the pre-scan above.
+
+                    for elem in &pattern.elements {
+                        match elem {
+                            PatternElement::Node(n) => {
+                                if let Some(v) = &n.variable {
+                                    match kinds.get(v.as_str()) {
+                                        Some(Kind::Rel) | Some(Kind::Path) => {
+                                            return Err(PolygraphError::Translation {
+                                                message: format!(
+                                                    "VariableTypeConflict: '{v}' used as both \
+                                                     relationship/path and node"
+                                                ),
+                                            });
+                                        }
+                                        Some(Kind::Scalar) | Some(Kind::VarList) => {
+                                            return Err(PolygraphError::Translation {
+                                                message: format!(
+                                                    "VariableTypeConflict: '{v}' is a \
+                                                     non-node value used as a node"
+                                                ),
+                                            });
+                                        }
+                                        _ => {
+                                            kinds.insert(v.clone(), Kind::Node);
+                                        }
+                                    }
+                                }
+                            }
+                            PatternElement::Relationship(r) => {
+                                if let Some(v) = &r.variable {
+                                    match kinds.get(v.as_str()) {
+                                        Some(Kind::Node) | Some(Kind::Path) => {
+                                            return Err(PolygraphError::Translation {
+                                                message: format!(
+                                                    "VariableTypeConflict: '{v}' used as both \
+                                                     node/path and relationship"
+                                                ),
+                                            });
+                                        }
+                                        Some(Kind::Scalar) => {
+                                            return Err(PolygraphError::Translation {
+                                                message: format!(
+                                                    "VariableTypeConflict: '{v}' is a scalar \
+                                                     used as a relationship"
+                                                ),
+                                            });
+                                        }
+                                        // VarList ([r1, r2]) is allowed as rel in [rs*]
+                                        _ => {
+                                            kinds.insert(v.clone(), Kind::Rel);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 // ── Translation state ─────────────────────────────────────────────────────────
@@ -178,14 +519,19 @@ impl TranslationState {
                     // Flush pending filters.
                     current = apply_filters(current, pending_filters.drain(..));
 
-                    let (return_triples, project_vars, need_distinct, aggregates) =
+                    let (return_triples, project_vars, need_distinct, aggregates, extends) =
                         self.translate_return_clause(r, &mut extra_triples)?;
 
                     if !return_triples.is_empty() {
-                        let extra = GraphPattern::Bgp {
-                            patterns: return_triples,
-                        };
-                        current = join_patterns(current, extra);
+                        // Property-access triples in RETURN must be OPTIONAL so that
+                        // missing properties project as null rather than filtering rows.
+                        for tp in return_triples {
+                            current = GraphPattern::LeftJoin {
+                                left: Box::new(current),
+                                right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
+                                expression: None,
+                            };
+                        }
                     }
                     // Flush any triples added during return expression translation.
                     if !extra_triples.is_empty() {
@@ -193,6 +539,15 @@ impl TranslationState {
                             patterns: extra_triples.drain(..).collect(),
                         };
                         current = join_patterns(current, extra);
+                    }
+
+                    // Apply Extend bindings (expressions bound to variables).
+                    for (var, expr) in extends {
+                        current = GraphPattern::Extend {
+                            inner: Box::new(current),
+                            variable: var,
+                            expression: expr,
+                        };
                     }
 
                     // Apply aggregation (GROUP BY) if present.
@@ -396,6 +751,11 @@ impl TranslationState {
         }
 
         // Inline properties: `?n <base:prop> <literal>`
+        let has_props = node
+            .properties
+            .as_ref()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false);
         if let Some(props) = &node.properties {
             for (key, val_expr) in props {
                 let obj = self.expr_to_ground_term(val_expr)?;
@@ -405,6 +765,18 @@ impl TranslationState {
                     object: obj,
                 });
             }
+        }
+
+        // Unconstrained node (no labels, no properties): emit a node-existence
+        // sentinel so the variable is bound to real graph nodes rather than
+        // returning 1 empty row from an empty BGP.
+        // Convention: every graph node has exactly one `<base:__node> <base:__node>` triple.
+        if node.labels.is_empty() && !has_props {
+            triples.push(TriplePattern {
+                subject: node_var.clone(),
+                predicate: self.iri("__node").into(),
+                object: self.iri("__node").into(),
+            });
         }
 
         Ok(())
@@ -659,23 +1031,28 @@ impl TranslationState {
             Option<Vec<Variable>>,
             bool,
             Vec<(Variable, AggregateExpression)>,
+            Vec<(Variable, SparExpr)>, // extend bindings (expr AS alias)
         ),
         PolygraphError,
     > {
         match &ret.items {
-            ReturnItems::All => Ok((vec![], None, ret.distinct, vec![])),
+            ReturnItems::All => Ok((vec![], None, ret.distinct, vec![], vec![])),
             ReturnItems::Explicit(items) => {
                 let mut triples = Vec::new();
                 let mut vars = Vec::new();
                 let mut aggregates: Vec<(Variable, AggregateExpression)> = Vec::new();
+                let mut extends: Vec<(Variable, SparExpr)> = Vec::new();
                 for item in items {
-                    let (var, agg_opt) = self.translate_return_item(item, &mut triples, extra)?;
+                    let (var, agg_opt, ext_opt) =
+                        self.translate_return_item(item, &mut triples, extra)?;
                     vars.push(var.clone());
                     if let Some(agg) = agg_opt {
                         aggregates.push((var, agg));
+                    } else if let Some(ext_expr) = ext_opt {
+                        extends.push((var, ext_expr));
                     }
                 }
-                Ok((triples, Some(vars), ret.distinct, aggregates))
+                Ok((triples, Some(vars), ret.distinct, aggregates, extends))
             }
         }
     }
@@ -685,15 +1062,15 @@ impl TranslationState {
         item: &ReturnItem,
         triples: &mut Vec<TriplePattern>,
         extra: &mut Vec<TriplePattern>,
-    ) -> Result<(Variable, Option<AggregateExpression>), PolygraphError> {
+    ) -> Result<(Variable, Option<AggregateExpression>, Option<SparExpr>), PolygraphError> {
         match &item.expression {
             Expression::Variable(name) => {
                 let var = Variable::new_unchecked(name.clone());
                 if let Some(alias) = &item.alias {
                     let _ = var;
-                    Ok((Variable::new_unchecked(alias.clone()), None))
+                    Ok((Variable::new_unchecked(alias.clone()), None, None))
                 } else {
-                    Ok((var, None))
+                    Ok((var, None, None))
                 }
             }
             Expression::Property(base_expr, key) => {
@@ -733,7 +1110,7 @@ impl TranslationState {
                         object: result_var.clone().into(),
                     });
                 }
-                Ok((result_var, None))
+                Ok((result_var, None, None))
             }
             Expression::Aggregate(agg_expr) => {
                 // Aggregate in RETURN → create result var + AggregateExpression.
@@ -742,22 +1119,24 @@ impl TranslationState {
                     None => self.fresh_var("agg"),
                 };
                 let sparql_agg = self.translate_aggregate_expr(agg_expr, extra)?;
-                Ok((result_var, Some(sparql_agg)))
+                Ok((result_var, Some(sparql_agg), None))
             }
             other => {
                 // General expression: try to translate as SPARQL expression,
-                // emit an Extend binding.
+                // and bind it via Extend.
                 let result_var = match &item.alias {
                     Some(alias) => Variable::new_unchecked(alias.clone()),
                     None => self.fresh_var("ret"),
                 };
-                let _sparql_expr = self.translate_expr(other, extra)?;
-                Err(PolygraphError::UnsupportedFeature {
-                    feature: format!(
-                        "complex return expression (Phase 4+): {}",
-                        result_var.as_str()
-                    ),
-                })
+                match self.translate_expr(other, extra) {
+                    Ok(sparql_expr) => Ok((result_var, None, Some(sparql_expr))),
+                    Err(_) => Err(PolygraphError::UnsupportedFeature {
+                        feature: format!(
+                            "complex return expression (Phase 4+): {}",
+                            result_var.as_str()
+                        ),
+                    }),
+                }
             }
         }
     }

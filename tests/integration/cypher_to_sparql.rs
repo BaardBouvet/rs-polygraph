@@ -735,4 +735,3 @@ fn parse_call_clause() {
         panic!("first clause should be CALL");
     }
 }
-
