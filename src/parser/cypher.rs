@@ -910,9 +910,20 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
         Rule::function_call => build_function_call(inner),
         Rule::label_check => build_label_check(inner),
         Rule::pattern_predicate => {
-            // pattern_predicate = { node_pattern ~ (relationship_pattern ~ node_pattern)+ }
-            // Reuse chain builder — the rule produces the same child types.
-            let elements = build_node_pattern_chain(inner)?;
+            // pattern_predicate = { node_pattern ~ (rel_pattern ~ node_pattern)+ }
+            // Build elements directly since this rule doesn't use chain_link wrapping.
+            let mut elements = Vec::new();
+            for child in inner.into_inner() {
+                match child.as_rule() {
+                    Rule::node_pattern => {
+                        elements.push(PatternElement::Node(build_node_pattern(child)?));
+                    }
+                    Rule::rel_pattern => {
+                        elements.push(PatternElement::Relationship(build_rel_pattern(child)?));
+                    }
+                    _ => {}
+                }
+            }
             Ok(Expression::PatternPredicate(Pattern {
                 variable: None,
                 elements,

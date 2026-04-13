@@ -559,6 +559,9 @@ struct TranslationState {
     /// Named path variables → hop count (for fixed-length paths).
     /// Used to resolve `length(p)` at compile time.
     path_hops: std::collections::HashMap<String, u64>,
+    /// Named path variables → ordered list of node SPARQL variables.
+    /// Used to resolve `nodes(p)` at compile time.
+    path_node_vars: std::collections::HashMap<String, Vec<Variable>>,
 }
 
 impl TranslationState {
@@ -573,6 +576,7 @@ impl TranslationState {
             nullable_vars: Default::default(),
             with_list_vars: Default::default(),
             path_hops: Default::default(),
+            path_node_vars: Default::default(),
         }
     }
 
@@ -1302,7 +1306,7 @@ impl TranslationState {
         // We need to pair each Relationship with its surrounding nodes.
         let elements = &pattern.elements;
 
-        // Track named path hop counts for length(p) resolution.
+        // Track named path hop counts and node vars for length(p) / nodes(p) resolution.
         if let Some(ref path_var) = pattern.variable {
             let hops = elements
                 .iter()
@@ -1327,6 +1331,23 @@ impl TranslationState {
                 _ => Variable::new_unchecked("__unused_rel_slot").into(),
             })
             .collect();
+
+        // Store node variables for path if named.
+        if let Some(ref path_var) = pattern.variable {
+            let nvars: Vec<Variable> = elements
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, e)| {
+                    if matches!(e, PatternElement::Node(_)) {
+                        if let TermPattern::Variable(v) = &node_terms[idx] {
+                            return Some(v.clone());
+                        }
+                    }
+                    None
+                })
+                .collect();
+            self.path_node_vars.insert(path_var.clone(), nvars);
+        }
 
         let mut i = 0;
         while i < elements.len() {
@@ -1542,6 +1563,23 @@ impl TranslationState {
         // Apply range quantifier if present.
         let ppe: Option<PPE> = if has_range {
             let range = rel.range.as_ref().unwrap();
+
+            // Special case: varlen with property constraints → bounded unrolling with
+            // RDF-star per-hop annotation filters.
+            if rel.properties.is_some() && self.rdf_star && !rel.rel_types.is_empty() {
+                let lower = range.lower.unwrap_or(1).max(1);
+                let upper = range.upper.unwrap_or(lower + 10);
+                self.emit_bounded_path_union_with_props(
+                    rel,
+                    src,
+                    dst,
+                    lower,
+                    upper,
+                    path_patterns,
+                )?;
+                return Ok(());
+            }
+
             let q = match (range.lower, range.upper) {
                 // * (bare star) = 1 or more hops in openCypher
                 (None, None) => PPE::OneOrMore(Box::new(base_ppe)),
@@ -1569,31 +1607,42 @@ impl TranslationState {
                     let upper = match hi {
                         Some(u) => u,
                         None => {
-                            // *N.. (lower only): treat as OneOrMore (or ZeroOrMore if lower==0)
-                            let q = if lower <= 1 {
-                                if lower == 0 {
+                            // *N.. (lower only): compose path for minimum bound.
+                            if lower <= 1 {
+                                let q = if lower == 0 {
                                     PPE::ZeroOrMore(Box::new(base_ppe))
                                 } else {
                                     PPE::OneOrMore(Box::new(base_ppe))
-                                }
-                            } else {
-                                // *N.. with N>1: use OneOrMore as approximation
-                                PPE::OneOrMore(Box::new(base_ppe))
-                            };
-                            let (subj, obj) = match rel.direction {
-                                Direction::Left => (dst.clone(), src.clone()),
-                                _ => (src.clone(), dst.clone()),
-                            };
-                            let path = if rel.direction == Direction::Left {
-                                PPE::Reverse(Box::new(q))
-                            } else {
-                                q
-                            };
-                            path_patterns.push(GraphPattern::Path {
-                                subject: subj,
-                                path,
-                                object: obj,
-                            });
+                                };
+                                let (subj, obj) = match rel.direction {
+                                    Direction::Left => (dst.clone(), src.clone()),
+                                    _ => (src.clone(), dst.clone()),
+                                };
+                                let path = if rel.direction == Direction::Left {
+                                    PPE::Reverse(Box::new(q))
+                                } else {
+                                    q
+                                };
+                                path_patterns.push(GraphPattern::Path {
+                                    subject: subj,
+                                    path,
+                                    object: obj,
+                                });
+                                return Ok(());
+                            }
+                            // *N.. with N>1: bounded unrolling from N to N+5
+                            // SPARQL property paths can't enforce min-hop constraints.
+                            let cap = lower + 5;
+                            self.emit_bounded_path_union(
+                                rel,
+                                src,
+                                dst,
+                                &base_ppe,
+                                lower,
+                                cap,
+                                triples,
+                                path_patterns,
+                            )?;
                             return Ok(());
                         }
                     };
@@ -1654,13 +1703,22 @@ impl TranslationState {
                     };
                 }
             }
-            path_patterns.push(path_gp);
             // Register edge variable in edge_map (no inline properties on path patterns).
+            // For varlen paths, bind a marker variable so count(r) works.
             if let Some(ref var_name) = rel.variable {
                 let pred = if rel.rel_types.is_empty() {
                     NamedNode::new_unchecked("urn:polygraph:untyped")
                 } else {
                     self.iri(&rel.rel_types[0])
+                };
+                let marker = self.fresh_var(&format!("{}_bound", var_name));
+                path_gp = GraphPattern::Extend {
+                    inner: Box::new(path_gp),
+                    variable: marker.clone(),
+                    expression: SparExpr::Literal(SparLit::new_typed_literal(
+                        "true",
+                        NamedNode::new_unchecked(XSD_BOOLEAN),
+                    )),
                 };
                 self.edge_map.insert(
                     var_name.clone(),
@@ -1670,10 +1728,11 @@ impl TranslationState {
                         pred_var: None,
                         dst: dst.clone(),
                         reif_var: None,
-                        null_check_var: None,
+                        null_check_var: Some(marker),
                     },
                 );
             }
+            path_patterns.push(path_gp);
             Ok(())
         } else {
             // No range quantifier: single or multi-type, treat as plain triple.
@@ -2083,6 +2142,94 @@ impl TranslationState {
         }
 
         // Combine with UNION.
+        let combined = union_patterns
+            .into_iter()
+            .reduce(|a, b| GraphPattern::Union {
+                left: Box::new(a),
+                right: Box::new(b),
+            })
+            .unwrap_or_else(empty_bgp);
+        path_patterns.push(combined);
+        Ok(())
+    }
+
+    /// Emit bounded path union with RDF-star per-hop property annotation filters.
+    ///
+    /// Each hop in the chain includes the base typed triple AND an annotation
+    /// triple for each property constraint (e.g., `<< s <T> o >> <year> 1988 .`).
+    fn emit_bounded_path_union_with_props(
+        &mut self,
+        rel: &RelationshipPattern,
+        src: &TermPattern,
+        dst: &TermPattern,
+        lower: u64,
+        upper: u64,
+        path_patterns: &mut Vec<GraphPattern>,
+    ) -> Result<(), PolygraphError> {
+        use crate::ast::cypher::Direction;
+
+        let type_iri = self.iri(&rel.rel_types[0]);
+        let (effective_src, effective_dst) = match rel.direction {
+            Direction::Left => (dst.clone(), src.clone()),
+            _ => (src.clone(), dst.clone()),
+        };
+
+        let props = rel.properties.as_ref().unwrap();
+        let mut union_patterns: Vec<GraphPattern> = Vec::new();
+
+        for hop_count in lower..=upper {
+            let mut parts: Vec<GraphPattern> = Vec::new();
+            let mut prev = effective_src.clone();
+
+            for hop in 0..hop_count {
+                let next: TermPattern = if hop == hop_count - 1 {
+                    effective_dst.clone()
+                } else {
+                    self.fresh_var(&format!("mid{}", hop)).into()
+                };
+
+                // Base edge triple: ?prev <T> ?next
+                let edge_triple = TriplePattern {
+                    subject: prev.clone(),
+                    predicate: type_iri.clone().into(),
+                    object: next.clone(),
+                };
+                let mut hop_triples = vec![edge_triple.clone()];
+
+                // RDF-star annotation triples for property constraints:
+                // << ?prev <T> ?next >> <prop> value .
+                for (key, val_expr) in props {
+                    if let Expression::Literal(lit) = val_expr {
+                        if let Ok(sparql_lit) = self.translate_literal(lit) {
+                            let anno_triple = TriplePattern {
+                                subject: spargebra::term::TermPattern::Triple(Box::new(
+                                    spargebra::term::TriplePattern {
+                                        subject: prev.clone(),
+                                        predicate: type_iri.clone().into(),
+                                        object: next.clone(),
+                                    },
+                                )),
+                                predicate: self.iri(key).into(),
+                                object: spargebra::term::TermPattern::Literal(sparql_lit),
+                            };
+                            hop_triples.push(anno_triple);
+                        }
+                    }
+                }
+
+                parts.push(GraphPattern::Bgp {
+                    patterns: hop_triples,
+                });
+                prev = next;
+            }
+
+            let chain = parts
+                .into_iter()
+                .reduce(|a, b| join_patterns(a, b))
+                .unwrap_or_else(empty_bgp);
+            union_patterns.push(chain);
+        }
+
         let combined = union_patterns
             .into_iter()
             .reduce(|a, b| GraphPattern::Union {
@@ -2535,10 +2682,63 @@ impl TranslationState {
                 };
                 Ok(result)
             }
-            Expression::Add(a, b) => Ok(SparExpr::Add(
-                Box::new(self.translate_expr(a, extra)?),
-                Box::new(self.translate_expr(b, extra)?),
-            )),
+            Expression::Add(a, b) => {
+                // Check if both operands are property accesses — may be list concatenation.
+                // Use runtime type check: IF(STRSTARTS(?a, "["), concat_lists, numeric_add)
+                let is_list_candidate =
+                    matches!(a.as_ref(), Expression::Property(..))
+                        && matches!(b.as_ref(), Expression::Property(..));
+                let la = self.translate_expr(a, extra)?;
+                let lb = self.translate_expr(b, extra)?;
+                if is_list_candidate {
+                    // List concat: CONCAT(SUBSTR(?a, 1, STRLEN(?a)-1), ", ", SUBSTR(?b, 2))
+                    use spargebra::algebra::Function;
+                    let one = SparExpr::Literal(SparLit::new_typed_literal(
+                        "1",
+                        NamedNode::new_unchecked(XSD_INTEGER),
+                    ));
+                    let two = SparExpr::Literal(SparLit::new_typed_literal(
+                        "2",
+                        NamedNode::new_unchecked(XSD_INTEGER),
+                    ));
+                    let strlen_a = SparExpr::FunctionCall(
+                        Function::StrLen,
+                        vec![la.clone()],
+                    );
+                    let len_minus_1 = SparExpr::Subtract(
+                        Box::new(strlen_a),
+                        Box::new(one.clone()),
+                    );
+                    let head = SparExpr::FunctionCall(
+                        Function::SubStr,
+                        vec![la.clone(), one, len_minus_1],
+                    );
+                    let tail = SparExpr::FunctionCall(
+                        Function::SubStr,
+                        vec![lb.clone(), two],
+                    );
+                    let sep = SparExpr::Literal(SparLit::new_simple_literal(", "));
+                    let concat = SparExpr::FunctionCall(
+                        Function::Concat,
+                        vec![head, sep, tail],
+                    );
+                    // Runtime check: IF(STRSTARTS(STR(?a), "["), concat, ?a + ?b)
+                    let str_a = SparExpr::FunctionCall(Function::Str, vec![la.clone()]);
+                    let bracket = SparExpr::Literal(SparLit::new_simple_literal("["));
+                    let is_list = SparExpr::FunctionCall(
+                        Function::StrStarts,
+                        vec![str_a, bracket],
+                    );
+                    let numeric_add = SparExpr::Add(Box::new(la), Box::new(lb));
+                    Ok(SparExpr::If(
+                        Box::new(is_list),
+                        Box::new(concat),
+                        Box::new(numeric_add),
+                    ))
+                } else {
+                    Ok(SparExpr::Add(Box::new(la), Box::new(lb)))
+                }
+            }
             Expression::Subtract(a, b) => Ok(SparExpr::Subtract(
                 Box::new(self.translate_expr(a, extra)?),
                 Box::new(self.translate_expr(b, extra)?),
@@ -2976,7 +3176,31 @@ impl TranslationState {
                     })
                 }
             }
-            "keys" | "labels" | "nodes" | "relationships" | "range" | "reverse" | "split"
+            "nodes" => {
+                // nodes(p) → list of node IRIs along named path p.
+                if let Some(Expression::Variable(path_name)) = args.first() {
+                    if let Some(node_vars) = self.path_node_vars.get(path_name.as_str()).cloned() {
+                        // Build CONCAT("[", STR(?n0), ", ", STR(?n1), ..., "]")
+                        let mut parts: Vec<SparExpr> = Vec::new();
+                        parts.push(SparExpr::Literal(SparLit::new_simple_literal("[")));
+                        for (idx, v) in node_vars.iter().enumerate() {
+                            if idx > 0 {
+                                parts.push(SparExpr::Literal(SparLit::new_simple_literal(", ")));
+                            }
+                            parts.push(SparExpr::FunctionCall(
+                                Function::Str,
+                                vec![SparExpr::Variable(v.clone())],
+                            ));
+                        }
+                        parts.push(SparExpr::Literal(SparLit::new_simple_literal("]")));
+                        return Ok(SparExpr::FunctionCall(Function::Concat, parts));
+                    }
+                }
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: "nodes() requires a named path argument".to_string(),
+                })
+            }
+            "keys" | "labels" | "relationships" | "range" | "reverse" | "split"
             | "trim" | "ltrim" | "rtrim" | "left" | "right" => {
                 Err(PolygraphError::UnsupportedFeature {
                     feature: format!("function call: {name}()"),
