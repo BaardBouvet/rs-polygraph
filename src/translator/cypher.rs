@@ -556,6 +556,9 @@ struct TranslationState {
     /// Variables assigned a literal-list value by a WITH clause.
     /// Used so that `UNWIND list_var AS x` can be expanded at compile time.
     with_list_vars: std::collections::HashMap<String, crate::ast::cypher::Expression>,
+    /// Named path variables → hop count (for fixed-length paths).
+    /// Used to resolve `length(p)` at compile time.
+    path_hops: std::collections::HashMap<String, u64>,
 }
 
 impl TranslationState {
@@ -569,6 +572,7 @@ impl TranslationState {
             iso_hops: Vec::new(),
             nullable_vars: Default::default(),
             with_list_vars: Default::default(),
+            path_hops: Default::default(),
         }
     }
 
@@ -1297,6 +1301,15 @@ impl TranslationState {
         // Walk the element list: [Node, Rel, Node, Rel, Node, …]
         // We need to pair each Relationship with its surrounding nodes.
         let elements = &pattern.elements;
+
+        // Track named path hop counts for length(p) resolution.
+        if let Some(ref path_var) = pattern.variable {
+            let hops = elements
+                .iter()
+                .filter(|e| matches!(e, PatternElement::Relationship(_)))
+                .count() as u64;
+            self.path_hops.insert(path_var.clone(), hops);
+        }
 
         // Pre-compute a stable TermPattern for every node element.  Anonymous nodes
         // (no variable) get a fresh SPARQL variable so the same term is reused for
@@ -2840,7 +2853,16 @@ impl TranslationState {
                 Ok(SparExpr::FunctionCall(Function::LCase, vec![arg]))
             }
             "strlen" | "length" if args.len() == 1 => {
-                // length(string) maps to STRLEN. length(path) is complex — skip for paths.
+                // Check if the argument is a named path variable → emit constant hop count.
+                if let Expression::Variable(v) = &args[0] {
+                    if let Some(&hops) = self.path_hops.get(v.as_str()) {
+                        return Ok(SparExpr::Literal(SparLit::new_typed_literal(
+                            hops.to_string(),
+                            NamedNode::new_unchecked(XSD_INTEGER),
+                        )));
+                    }
+                }
+                // length(string) maps to STRLEN.
                 let arg = self.translate_expr(&args[0], extra)?;
                 Ok(SparExpr::FunctionCall(Function::StrLen, vec![arg]))
             }
