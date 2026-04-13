@@ -104,15 +104,17 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 | Release | Pass | Fail | Total | % |
 |---------|------|------|-------|---|
 | 0.1.0   | 362  | 101  | 463   | 78.2% |
-| dev     | 446  | 17   | 463   | 96.3% |
+| dev     | 451  | 12   | 463   | 97.4% |
 
-**Remaining 17 failures** — see [plans/tck-27-remaining.md](plans/tck-27-remaining.md):
-- Variable-length relationship variables (`last(r)`, `count(r)`, `[rs*]`): 5 scenarios
-- Variable-length path property/direction issues: 4 scenarios
-- MERGE / DELETE (SPARQL Update not implemented): 2 scenarios
-- SPARQL property path limitations (distinct endpoints, parallel edges): 2 scenarios
-- Complex expression gaps (`nodes(p)`, `head(collect({map})).prop`, list concat): 3 scenarios
-- Pattern predicate in WHERE with complex AND/OR: 1 scenario
+**Remaining 12 failures** — see [plans/tck-18-final.md](plans/tck-18-final.md):
+- Variable-length relationship list syntax (`last(r)`, `[rs*]`): 3 scenarios (P5, infeasible)
+- Bound relationship reuse in cross-MATCH varlen: 1 scenario (P3, hard)
+- Undirected typed varlen with parallel edges: 1 scenario (infeasible, RDF dedup)
+- Relationship identity comparison (`r <> r2`): 1 scenario (P2)
+- Untyped `[*]` path multiplicity: 1 scenario (P4)
+- MERGE / DELETE (SPARQL Update not implemented): 2 scenarios (P6)
+- `head(collect({map})).prop` map aggregation peephole: 1 scenario (P3)
+- Match5 Gherkin parse error (Background section): 1 parse error
 
 **Milestone**: Published compliance report. ≥ 80% pass rate.
 
