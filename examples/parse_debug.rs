@@ -16,7 +16,7 @@ fn main() {
     ];
     for (name, q) in queries {
         match Transpiler::cypher_to_sparql(q, &TckEngine) {
-            Ok(sparql) => println!("=== {name} ===\n{sparql}\n"),
+            Ok(output) => println!("=== {name} ===\n{}\n", output.sparql),
             Err(e) => println!("=== {name} ERROR: {e}\n"),
         }
     }

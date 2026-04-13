@@ -17,7 +17,7 @@ fn main() {
     store.update("INSERT DATA { _:n0 <http://tck.example.org/__node> <http://tck.example.org/__node> . }").unwrap();
     
     let q = "MATCH p = (n)-->(b)\nRETURN aVg(    n.aGe     )";
-    let sparql = Transpiler::cypher_to_sparql(q, &TckEngine).unwrap();
+    let sparql = Transpiler::cypher_to_sparql(q, &TckEngine).unwrap().sparql;
     println!("SPARQL: {}", sparql);
     
     match store.query(&sparql).unwrap() {

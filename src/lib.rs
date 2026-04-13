@@ -48,7 +48,10 @@ impl Transpiler {
         parser::parse_cypher(cypher)
     }
 
-    /// Transpile an openCypher query to a SPARQL query string.
+    /// Transpile an openCypher query to SPARQL.
+    ///
+    /// Returns a [`TranspileOutput`] containing the SPARQL string and a
+    /// projection schema for result mapping.
     ///
     /// The `engine` is consulted for engine-specific capabilities (RDF-star,
     /// federation). The optional `base_iri` on the engine is used as the
@@ -60,23 +63,13 @@ impl Transpiler {
     /// use polygraph::{Transpiler, target::GenericSparql11};
     ///
     /// let engine = GenericSparql11;
-    /// let sparql = Transpiler::cypher_to_sparql(
+    /// let output = Transpiler::cypher_to_sparql(
     ///     "MATCH (n:Person) WHERE n.age > 30 RETURN n.name",
     ///     &engine,
     /// ).unwrap();
-    /// assert!(sparql.contains("SELECT"));
+    /// assert!(output.sparql.contains("SELECT"));
     /// ```
     pub fn cypher_to_sparql(
-        cypher: &str,
-        engine: &dyn target::TargetEngine,
-    ) -> Result<String, PolygraphError> {
-        let output = Self::cypher_to_sparql_mapped(cypher, engine)?;
-        Ok(output.sparql)
-    }
-
-    /// Transpile an openCypher query and return a [`TranspileOutput`] containing
-    /// both the SPARQL string and a projection schema for result mapping.
-    pub fn cypher_to_sparql_mapped(
         cypher: &str,
         engine: &dyn target::TargetEngine,
     ) -> Result<TranspileOutput, PolygraphError> {
@@ -89,7 +82,10 @@ impl Transpiler {
         })
     }
 
-    /// Transpile an ISO GQL query to a SPARQL query string.
+    /// Transpile an ISO GQL query to SPARQL.
+    ///
+    /// Returns a [`TranspileOutput`] containing the SPARQL string and a
+    /// projection schema for result mapping.
     ///
     /// GQL-specific syntax (`IS Label`, `FILTER`, `NEXT`) is lowered to
     /// Cypher-equivalent constructs during parsing, so translation reuses
@@ -101,23 +97,13 @@ impl Transpiler {
     /// use polygraph::{Transpiler, target::GenericSparql11};
     ///
     /// let engine = GenericSparql11;
-    /// let sparql = Transpiler::gql_to_sparql(
+    /// let output = Transpiler::gql_to_sparql(
     ///     "MATCH (n:Person) WHERE n.age > 30 RETURN n.name",
     ///     &engine,
     /// ).unwrap();
-    /// assert!(sparql.contains("SELECT"));
+    /// assert!(output.sparql.contains("SELECT"));
     /// ```
     pub fn gql_to_sparql(
-        gql: &str,
-        engine: &dyn target::TargetEngine,
-    ) -> Result<String, PolygraphError> {
-        let output = Self::gql_to_sparql_mapped(gql, engine)?;
-        Ok(output.sparql)
-    }
-
-    /// Transpile an ISO GQL query and return a [`TranspileOutput`] containing
-    /// both the SPARQL string and a projection schema for result mapping.
-    pub fn gql_to_sparql_mapped(
         gql: &str,
         engine: &dyn target::TargetEngine,
     ) -> Result<TranspileOutput, PolygraphError> {

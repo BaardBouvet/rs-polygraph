@@ -407,7 +407,7 @@ async fn executing_query(world: &mut TckWorld, step: &Step) {
             world.query_error = Some(e.to_string());
             return;
         }
-        Ok(s) => s,
+        Ok(output) => output.sparql,
     };
 
     let store = world

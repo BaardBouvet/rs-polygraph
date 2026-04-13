@@ -8,7 +8,7 @@ impl TargetEngine for TckEngine {
 fn main() {
     let q = "MATCH (a)\nRETURN a.id IS NOT NULL AS a, a IS NOT NULL AS b";
     match Transpiler::cypher_to_sparql(q, &TckEngine) {
-        Ok(sparql) => println!("SPARQL: {}\nLen: {}", sparql, sparql.len()),
+        Ok(output) => println!("SPARQL: {}\nLen: {}", output.sparql, output.sparql.len()),
         Err(e) => println!("ERROR: {e}"),
     }
 }

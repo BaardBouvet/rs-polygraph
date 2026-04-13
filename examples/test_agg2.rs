@@ -19,7 +19,7 @@ fn main() {
     let sparql = Transpiler::cypher_to_sparql(
         "MATCH (n)-[r]->(x) WHERE type(r) = 'KNOWS' OR type(r) = 'HATES' RETURN r",
         &engine
-    ).unwrap();
+    ).unwrap().sparql;
     println!("Query SPARQL: {sparql}");
     
     // Manually insert the data  

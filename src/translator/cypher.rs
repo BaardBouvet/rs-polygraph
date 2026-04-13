@@ -545,6 +545,10 @@ struct EdgeInfo {
     /// A marker variable bound when the edge is in scope (for IS NULL checks on
     /// typed relationships).  For untyped, `pred_var` already serves this role.
     null_check_var: Option<Variable>,
+    /// Synthetic edge-identity variable for relationship comparisons (r = r2).
+    /// BIND'd to a canonical CONCAT(STR(s), "|", STR(p), "|", STR(o)) of the
+    /// actual stored triple, so it is direction-invariant for undirected matches.
+    eid_var: Option<Variable>,
 }
 
 /// One triple "slot" tracking a stored-triple (subject, predicate, object) for isomorphism.
@@ -1438,15 +1442,6 @@ impl TranslationState {
         Ok(())
     }
 
-    fn translate_node_pattern(
-        &mut self,
-        node: &NodePattern,
-        triples: &mut Vec<TriplePattern>,
-    ) -> Result<(), PolygraphError> {
-        let term = node_term(node);
-        self.translate_node_pattern_with_term(node, &term, triples)
-    }
-
     fn translate_node_pattern_with_term(
         &mut self,
         node: &NodePattern,
@@ -1521,35 +1516,86 @@ impl TranslationState {
                 None => self.fresh_var("rel"),
             };
             let pred_term: spargebra::term::NamedNodePattern = pred_var.clone().into();
+
+            // Build RDF-star annotation triples for inline relationship properties
+            // (e.g. [r {name: 'r1'}]).  For untyped relationships the predicate is
+            // a variable, so we construct << ?s ?pred ?o >> <prop> val manually.
+            let prop_anno = if self.rdf_star {
+                if let Some(ref props) = rel.properties {
+                    let mut pairs = Vec::new();
+                    for (key, val_expr) in props {
+                        let obj = self.expr_to_ground_term(val_expr)?;
+                        pairs.push((self.iri(key), obj));
+                    }
+                    pairs
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            // Helper: build annotation triple patterns << s pred_var o >> prop val
+            // for a given (subject, object) direction.
+            let anno_triples = |s: &TermPattern, o: &TermPattern| -> Vec<TriplePattern> {
+                if prop_anno.is_empty() {
+                    return Vec::new();
+                }
+                let inner = TriplePattern {
+                    subject: s.clone(),
+                    predicate: pred_term.clone(),
+                    object: o.clone(),
+                };
+                let edge_subj = TermPattern::Triple(Box::new(inner));
+                prop_anno
+                    .iter()
+                    .map(|(prop_iri, prop_val)| TriplePattern {
+                        subject: edge_subj.clone(),
+                        predicate: prop_iri.clone().into(),
+                        object: prop_val.clone(),
+                    })
+                    .collect()
+            };
+
             match rel.direction {
-                Direction::Left => triples.push(TriplePattern {
-                    subject: dst.clone(),
-                    predicate: pred_term,
-                    object: src.clone(),
-                }),
-                Direction::Right => triples.push(TriplePattern {
-                    subject: src.clone(),
-                    predicate: pred_term,
-                    object: dst.clone(),
-                }),
+                Direction::Left => {
+                    triples.push(TriplePattern {
+                        subject: dst.clone(),
+                        predicate: pred_term.clone(),
+                        object: src.clone(),
+                    });
+                    triples.extend(anno_triples(dst, src));
+                }
+                Direction::Right => {
+                    triples.push(TriplePattern {
+                        subject: src.clone(),
+                        predicate: pred_term.clone(),
+                        object: dst.clone(),
+                    });
+                    triples.extend(anno_triples(src, dst));
+                }
                 Direction::Both => {
                     // Undirected: UNION of both directions.
                     // Use the SAME pred_term for both branches so that the predicate
                     // variable is bound in both branches of the UNION (required for
                     // correct top-level relationship-isomorphism FILTERs).
+                    let mut fwd_patterns = vec![TriplePattern {
+                        subject: src.clone(),
+                        predicate: pred_term.clone(),
+                        object: dst.clone(),
+                    }];
+                    fwd_patterns.extend(anno_triples(src, dst));
                     let fwd = GraphPattern::Bgp {
-                        patterns: vec![TriplePattern {
-                            subject: src.clone(),
-                            predicate: pred_term.clone(),
-                            object: dst.clone(),
-                        }],
+                        patterns: fwd_patterns,
                     };
+                    let mut bwd_patterns = vec![TriplePattern {
+                        subject: dst.clone(),
+                        predicate: pred_term.clone(),
+                        object: src.clone(),
+                    }];
+                    bwd_patterns.extend(anno_triples(dst, src));
                     let bwd_triple = GraphPattern::Bgp {
-                        patterns: vec![TriplePattern {
-                            subject: dst.clone(),
-                            predicate: pred_term.clone(),
-                            object: src.clone(),
-                        }],
+                        patterns: bwd_patterns,
                     };
                     // Prevent duplicate for self-loops.
                     let filter_expr =
@@ -1569,6 +1615,33 @@ impl TranslationState {
                     } else {
                         bwd_triple
                     };
+                    // If the relationship has a name, BIND a synthetic edge-identity
+                    // variable in each UNION branch.  The canonical form uses the actual
+                    // stored-triple component order (subject, predicate, object) so that
+                    // forward and reverse matches of the same triple yield the same ID.
+                    let (fwd, bwd) = if rel.variable.is_some() {
+                        let eid = Variable::new_unchecked(format!(
+                            "__eid_{}",
+                            rel.variable.as_ref().unwrap()
+                        ));
+                        let pred_expr =
+                            SparExpr::Variable(pred_var.clone());
+                        let fwd_eid = build_edge_id_expr(src, pred_expr.clone(), dst);
+                        let bwd_eid = build_edge_id_expr(dst, pred_expr, src);
+                        let fwd = GraphPattern::Extend {
+                            inner: Box::new(fwd),
+                            variable: eid.clone(),
+                            expression: fwd_eid,
+                        };
+                        let bwd = GraphPattern::Extend {
+                            inner: Box::new(bwd),
+                            variable: eid,
+                            expression: bwd_eid,
+                        };
+                        (fwd, bwd)
+                    } else {
+                        (fwd, bwd)
+                    };
                     path_patterns.push(GraphPattern::Union {
                         left: Box::new(fwd),
                         right: Box::new(bwd),
@@ -1577,6 +1650,7 @@ impl TranslationState {
             }
             // Register in edge_map so type(r) and r.prop can resolve.
             if let Some(ref var_name) = rel.variable {
+                let eid = Variable::new_unchecked(format!("__eid_{}", var_name));
                 self.edge_map.insert(
                     var_name.clone(),
                     EdgeInfo {
@@ -1586,6 +1660,7 @@ impl TranslationState {
                         dst: dst.clone(),
                         reif_var: None,
                         null_check_var: None,
+                        eid_var: Some(eid),
                     },
                 );
             }
@@ -1610,10 +1685,7 @@ impl TranslationState {
         let base_ppe: PPE = if rel.rel_types.is_empty() {
             // Untyped variable-length: match any predicate except internal markers.
             // Exclude rdf:type and __node to avoid traversing property/label triples.
-            PPE::NegatedPropertySet(vec![
-                NamedNode::new_unchecked(RDF_TYPE),
-                self.iri("__node"),
-            ])
+            PPE::NegatedPropertySet(vec![NamedNode::new_unchecked(RDF_TYPE), self.iri("__node")])
         } else if multi_type {
             let types: Vec<PPE> = rel
                 .rel_types
@@ -1797,6 +1869,7 @@ impl TranslationState {
                         dst: dst.clone(),
                         reif_var: None,
                         null_check_var: Some(marker),
+                        eid_var: None,
                     },
                 );
             }
@@ -1835,6 +1908,7 @@ impl TranslationState {
                             dst: dst.clone(),
                             reif_var: None,
                             null_check_var: None,
+                            eid_var: None,
                         },
                     );
                 }
@@ -1904,6 +1978,30 @@ impl TranslationState {
                 } else {
                     bwd_triple
                 };
+                // If the relationship has a name, BIND a synthetic edge-identity
+                // variable in each UNION branch (canonical stored-triple order).
+                let (fwd, bwd) = if rel.variable.is_some() {
+                    let eid = Variable::new_unchecked(format!(
+                        "__eid_{}",
+                        rel.variable.as_ref().unwrap()
+                    ));
+                    let pred_expr = SparExpr::Literal(SparLit::new_simple_literal(pred.as_str()));
+                    let fwd_eid = build_edge_id_expr(src, pred_expr.clone(), dst);
+                    let bwd_eid = build_edge_id_expr(dst, pred_expr, src);
+                    let fwd = GraphPattern::Extend {
+                        inner: Box::new(fwd),
+                        variable: eid.clone(),
+                        expression: fwd_eid,
+                    };
+                    let bwd = GraphPattern::Extend {
+                        inner: Box::new(bwd),
+                        variable: eid,
+                        expression: bwd_eid,
+                    };
+                    (fwd, bwd)
+                } else {
+                    (fwd, bwd)
+                };
                 path_patterns.push(GraphPattern::Union {
                     left: Box::new(fwd),
                     right: Box::new(bwd),
@@ -1946,6 +2044,27 @@ impl TranslationState {
                     NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#anyURI"),
                 )),
             });
+            // Build eid_var for typed relationships (undirected get it from
+            // the BIND above; directed get a simple BIND too).
+            let eid = if matches!(rel.direction, Direction::Both) {
+                // Already BIND'd in each UNION branch above.
+                Some(Variable::new_unchecked(format!("__eid_{var_name}")))
+            } else {
+                // Directed typed: BIND edge identity based on known direction.
+                let eid = Variable::new_unchecked(format!("__eid_{var_name}"));
+                let pred_expr =
+                    SparExpr::Literal(SparLit::new_simple_literal(pred.as_str()));
+                let (actual_s, actual_o) = match rel.direction {
+                    Direction::Left => (dst, src),
+                    _ => (src, dst),
+                };
+                path_patterns.push(GraphPattern::Extend {
+                    inner: Box::new(empty_bgp()),
+                    variable: eid.clone(),
+                    expression: build_edge_id_expr(actual_s, pred_expr, actual_o),
+                });
+                Some(eid)
+            };
             self.edge_map.insert(
                 var_name.clone(),
                 EdgeInfo {
@@ -1955,6 +2074,7 @@ impl TranslationState {
                     dst: dst.clone(),
                     reif_var,
                     null_check_var: Some(marker),
+                    eid_var: eid,
                 },
             );
         }
@@ -2137,10 +2257,7 @@ impl TranslationState {
                                     Box::new(term_to_sparexpr(&hop_objs[i])),
                                     Box::new(term_to_sparexpr(&hop_objs[j])),
                                 );
-                                let same = SparExpr::And(
-                                    Box::new(si_eq_sj),
-                                    Box::new(oi_eq_oj),
-                                );
+                                let same = SparExpr::And(Box::new(si_eq_sj), Box::new(oi_eq_oj));
                                 arm = GraphPattern::Filter {
                                     expr: SparExpr::Not(Box::new(same)),
                                     inner: Box::new(arm),
@@ -2724,6 +2841,34 @@ impl TranslationState {
                 Ok(SparExpr::Bound(var))
             }
             Expression::Comparison(lhs, op, rhs) => {
+                // Special case: relationship identity comparison (r = r2 or r <> r2).
+                // When both sides are relationship variables with eid_var, compare
+                // the synthetic edge-identity variables instead of the raw pattern vars.
+                if matches!(op, CompOp::Eq | CompOp::Ne) {
+                    if let (Expression::Variable(lname), Expression::Variable(rname)) =
+                        (lhs.as_ref(), rhs.as_ref())
+                    {
+                        let l_eid = self
+                            .edge_map
+                            .get(lname.as_str())
+                            .and_then(|e| e.eid_var.clone());
+                        let r_eid = self
+                            .edge_map
+                            .get(rname.as_str())
+                            .and_then(|e| e.eid_var.clone());
+                        if let (Some(le), Some(re)) = (l_eid, r_eid) {
+                            let eq = SparExpr::Equal(
+                                Box::new(SparExpr::Variable(le)),
+                                Box::new(SparExpr::Variable(re)),
+                            );
+                            return Ok(if matches!(op, CompOp::Ne) {
+                                SparExpr::Not(Box::new(eq))
+                            } else {
+                                eq
+                            });
+                        }
+                    }
+                }
                 // Special case: IN with a list literal rhs → SparExpr::In(lhs, [items...])
                 if matches!(op, CompOp::In) {
                     if let Expression::List(items) = rhs.as_ref() {
@@ -2770,9 +2915,8 @@ impl TranslationState {
             Expression::Add(a, b) => {
                 // Check if both operands are property accesses — may be list concatenation.
                 // Use runtime type check: IF(STRSTARTS(?a, "["), concat_lists, numeric_add)
-                let is_list_candidate =
-                    matches!(a.as_ref(), Expression::Property(..))
-                        && matches!(b.as_ref(), Expression::Property(..));
+                let is_list_candidate = matches!(a.as_ref(), Expression::Property(..))
+                    && matches!(b.as_ref(), Expression::Property(..));
                 let la = self.translate_expr(a, extra)?;
                 let lb = self.translate_expr(b, extra)?;
                 if is_list_candidate {
@@ -2786,34 +2930,19 @@ impl TranslationState {
                         "2",
                         NamedNode::new_unchecked(XSD_INTEGER),
                     ));
-                    let strlen_a = SparExpr::FunctionCall(
-                        Function::StrLen,
-                        vec![la.clone()],
-                    );
-                    let len_minus_1 = SparExpr::Subtract(
-                        Box::new(strlen_a),
-                        Box::new(one.clone()),
-                    );
+                    let strlen_a = SparExpr::FunctionCall(Function::StrLen, vec![la.clone()]);
+                    let len_minus_1 = SparExpr::Subtract(Box::new(strlen_a), Box::new(one.clone()));
                     let head = SparExpr::FunctionCall(
                         Function::SubStr,
                         vec![la.clone(), one, len_minus_1],
                     );
-                    let tail = SparExpr::FunctionCall(
-                        Function::SubStr,
-                        vec![lb.clone(), two],
-                    );
+                    let tail = SparExpr::FunctionCall(Function::SubStr, vec![lb.clone(), two]);
                     let sep = SparExpr::Literal(SparLit::new_simple_literal(", "));
-                    let concat = SparExpr::FunctionCall(
-                        Function::Concat,
-                        vec![head, sep, tail],
-                    );
+                    let concat = SparExpr::FunctionCall(Function::Concat, vec![head, sep, tail]);
                     // Runtime check: IF(STRSTARTS(STR(?a), "["), concat, ?a + ?b)
                     let str_a = SparExpr::FunctionCall(Function::Str, vec![la.clone()]);
                     let bracket = SparExpr::Literal(SparLit::new_simple_literal("["));
-                    let is_list = SparExpr::FunctionCall(
-                        Function::StrStarts,
-                        vec![str_a, bracket],
-                    );
+                    let is_list = SparExpr::FunctionCall(Function::StrStarts, vec![str_a, bracket]);
                     let numeric_add = SparExpr::Add(Box::new(la), Box::new(lb));
                     Ok(SparExpr::If(
                         Box::new(is_list),
@@ -3285,12 +3414,10 @@ impl TranslationState {
                     feature: "nodes() requires a named path argument".to_string(),
                 })
             }
-            "keys" | "labels" | "relationships" | "range" | "reverse" | "split"
-            | "trim" | "ltrim" | "rtrim" | "left" | "right" => {
-                Err(PolygraphError::UnsupportedFeature {
-                    feature: format!("function call: {name}()"),
-                })
-            }
+            "keys" | "labels" | "relationships" | "range" | "reverse" | "split" | "trim"
+            | "ltrim" | "rtrim" | "left" | "right" => Err(PolygraphError::UnsupportedFeature {
+                feature: format!("function call: {name}()"),
+            }),
             _ => Err(PolygraphError::UnsupportedFeature {
                 feature: format!("function call: {name}()"),
             }),
@@ -3803,32 +3930,6 @@ fn apply_filters(
     pattern
 }
 
-/// Get the SPARQL `TermPattern` for the n-th element in a pattern chain,
-/// assuming it is a node.  Returns a fresh anonymous variable if the index
-/// is out of bounds (shouldn't happen for a well-formed pattern).
-fn node_var_at(elements: &[PatternElement], i: usize) -> TermPattern {
-    elements
-        .get(i)
-        .and_then(|e| match e {
-            PatternElement::Node(n) => Some(node_term(n)),
-            _ => None,
-        })
-        .unwrap_or_else(|| Variable::new_unchecked("__anon").into())
-}
-
-/// Build the SPARQL `TermPattern` for a node: `?var` if the node has a
-/// variable, otherwise a blank node using the node's label as a hint, or a
-/// truly anonymous blank node.
-fn node_term(node: &NodePattern) -> TermPattern {
-    match &node.variable {
-        Some(v) => Variable::new_unchecked(v.clone()).into(),
-        None => {
-            use spargebra::term::BlankNode;
-            BlankNode::default().into()
-        }
-    }
-}
-
 /// Convert a `TermPattern` to a `SparExpr` for use in FILTER comparisons.
 fn term_to_sparexpr(tp: &TermPattern) -> SparExpr {
     match tp {
@@ -3838,6 +3939,25 @@ fn term_to_sparexpr(tp: &TermPattern) -> SparExpr {
         TermPattern::BlankNode(b) => SparExpr::Literal(SparLit::new_simple_literal(b.as_str())),
         TermPattern::Triple(_) => SparExpr::Literal(SparLit::new_simple_literal("__triple__")),
     }
+}
+
+/// Build a CONCAT(STR(s), "|", STR(p), "|", STR(o)) expression that serves as
+/// a canonical edge identity.  The caller must pass the terms in the actual
+/// stored-triple order (subject, predicate, object) so that forward and reverse
+/// UNION branches of an undirected match produce identical IDs.
+fn build_edge_id_expr(s: &TermPattern, p_expr: SparExpr, o: &TermPattern) -> SparExpr {
+    use spargebra::algebra::Function;
+    let sep = SparExpr::Literal(SparLit::new_simple_literal("|"));
+    SparExpr::FunctionCall(
+        Function::Concat,
+        vec![
+            SparExpr::FunctionCall(Function::Str, vec![term_to_sparexpr(s)]),
+            sep.clone(),
+            SparExpr::FunctionCall(Function::Str, vec![p_expr]),
+            sep,
+            SparExpr::FunctionCall(Function::Str, vec![term_to_sparexpr(o)]),
+        ],
+    )
 }
 
 /// Convert a `NamedNodePattern` to a `SparExpr` for use in FILTER comparisons.

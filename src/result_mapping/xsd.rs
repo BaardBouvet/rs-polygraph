@@ -32,18 +32,14 @@ pub fn rdf_term_to_cypher(term: &RdfTerm, base_iri: &str) -> CypherValue {
             datatype,
             language: _,
         } => match datatype.as_deref() {
-            Some(XSD_INTEGER) | Some(XSD_LONG) | Some(XSD_INT) | Some(XSD_SHORT) => {
-                value
-                    .parse::<i64>()
-                    .map(CypherValue::Integer)
-                    .unwrap_or_else(|_| CypherValue::String(value.clone()))
-            }
-            Some(XSD_DOUBLE) | Some(XSD_FLOAT) | Some(XSD_DECIMAL) => {
-                value
-                    .parse::<f64>()
-                    .map(CypherValue::Float)
-                    .unwrap_or_else(|_| CypherValue::String(value.clone()))
-            }
+            Some(XSD_INTEGER) | Some(XSD_LONG) | Some(XSD_INT) | Some(XSD_SHORT) => value
+                .parse::<i64>()
+                .map(CypherValue::Integer)
+                .unwrap_or_else(|_| CypherValue::String(value.clone())),
+            Some(XSD_DOUBLE) | Some(XSD_FLOAT) | Some(XSD_DECIMAL) => value
+                .parse::<f64>()
+                .map(CypherValue::Float)
+                .unwrap_or_else(|_| CypherValue::String(value.clone())),
             Some(XSD_BOOLEAN) => match value.as_str() {
                 "true" | "1" => CypherValue::Boolean(true),
                 "false" | "0" => CypherValue::Boolean(false),

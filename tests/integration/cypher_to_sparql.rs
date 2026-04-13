@@ -12,6 +12,7 @@ const ENGINE: GenericSparql11 = GenericSparql11;
 fn transpile(cypher: &str) -> String {
     Transpiler::cypher_to_sparql(cypher, &ENGINE)
         .unwrap_or_else(|e| panic!("translation failed for {cypher:?}: {e}"))
+        .sparql
 }
 
 fn transpile_lower(cypher: &str) -> String {
@@ -22,6 +23,7 @@ fn transpile_rdf_star(cypher: &str) -> String {
     let engine = RdfStar::default();
     Transpiler::cypher_to_sparql(cypher, &engine)
         .unwrap_or_else(|e| panic!("rdf-star translation failed for {cypher:?}: {e}"))
+        .sparql
 }
 
 fn transpile_reification(cypher: &str) -> String {

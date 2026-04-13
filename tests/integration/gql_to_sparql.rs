@@ -15,6 +15,7 @@ const ENGINE: GenericSparql11 = GenericSparql11;
 fn transpile(gql: &str) -> String {
     Transpiler::gql_to_sparql(gql, &ENGINE)
         .unwrap_or_else(|e| panic!("GQL translation failed for {gql:?}: {e}"))
+        .sparql
 }
 
 fn transpile_lower(gql: &str) -> String {
@@ -25,6 +26,7 @@ fn transpile_rdf_star(gql: &str) -> String {
     let engine = RdfStar::default();
     Transpiler::gql_to_sparql(gql, &engine)
         .unwrap_or_else(|e| panic!("GQL rdf-star translation failed for {gql:?}: {e}"))
+        .sparql
 }
 
 // ── Basic MATCH … RETURN ─────────────────────────────────────────────────────

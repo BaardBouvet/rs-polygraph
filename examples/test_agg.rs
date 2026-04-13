@@ -8,7 +8,7 @@ fn main() {
     store.update(insert).unwrap();
     
     let engine = GenericSparql11;
-    let sparql = Transpiler::cypher_to_sparql("MATCH (n) RETURN count(n) / 60 / 60 AS count", &engine).unwrap();
+    let sparql = Transpiler::cypher_to_sparql("MATCH (n) RETURN count(n) / 60 / 60 AS count", &engine).unwrap().sparql;
     println!("SPARQL: {sparql}");
     
     match store.query(&sparql) {

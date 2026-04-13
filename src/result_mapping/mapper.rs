@@ -38,12 +38,10 @@ fn map_column(
     base_iri: &str,
 ) -> Result<CypherValue, PolygraphError> {
     match &col.kind {
-        ColumnKind::Scalar { var } => {
-            match solution.bindings.get(var.as_str()) {
-                Some(Some(term)) => Ok(rdf_term_to_cypher(term, base_iri)),
-                Some(None) | None => Ok(CypherValue::Null),
-            }
-        }
+        ColumnKind::Scalar { var } => match solution.bindings.get(var.as_str()) {
+            Some(Some(term)) => Ok(rdf_term_to_cypher(term, base_iri)),
+            Some(None) | None => Ok(CypherValue::Null),
+        },
         ColumnKind::Node { iri_var } => {
             // Phase R1-R2: return node IRI as a string placeholder.
             // Phase R3 will hydrate labels and properties.
@@ -157,10 +155,7 @@ mod tests {
         ];
         let rows = map_results(&solutions, &schema).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(
-            rows[0]["name"],
-            CypherValue::String("Alice".into())
-        );
+        assert_eq!(rows[0]["name"], CypherValue::String("Alice".into()));
         assert_eq!(rows[0]["age"], CypherValue::Integer(30));
         assert_eq!(rows[1]["name"], CypherValue::String("Bob".into()));
         assert_eq!(rows[1]["age"], CypherValue::Null);
