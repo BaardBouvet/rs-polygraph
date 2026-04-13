@@ -104,10 +104,13 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 | 0.1.0   | 362  | 101  | 463   | 78.2% |
 
 **Known gaps (101 failing scenarios):**
+- **RDF-star not enabled in TCK runner** — `TckEngine` uses `supports_rdf_star() = false` despite Oxigraph supporting SPARQL-star natively. Enabling RDF-star mode and emitting annotated triples for relationship properties in INSERT DATA is the single highest-ROI fix (see `plans/tck-100-plan.md` Phase 0)
 - Variable-length path syntax `[*..N]` / `[*..]` — grammar not yet extended
-- `range()` / `type()` / `length()` function calls in WHERE/UNWIND
-- Bounded variable-length paths (unsupported feature)
+- `range()` / `type()` / `length()` function calls in WHERE/UNWIND — no general `function_call` grammar rule
+- Bounded variable-length paths (`*N..M`) — need UNION-based unrolling
+- GROUP BY not emitted for mixed aggregate/non-aggregate RETURN
 - Three undetected semantic errors: `UndefinedVariable`, `AmbiguousAggregationExpression` (compound), `InvalidArgumentType` (path prop pre-scan)
+- UNWIND of variable references / `collect()` results — SPARQL 1.1 limitation
 - Complex result shapes (node/rel/path objects) compared by row count only
 
 **Milestone**: Published compliance report. ≥ 80% pass rate.
