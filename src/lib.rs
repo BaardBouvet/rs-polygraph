@@ -25,10 +25,14 @@ pub mod ast;
 pub mod error;
 pub mod parser;
 pub mod rdf_mapping;
+pub mod result_mapping;
 pub mod target;
 pub mod translator;
 
 pub use error::PolygraphError;
+pub use result_mapping::{
+    CypherRow, CypherValue, ProjectionSchema, RdfTerm, SparqlSolution, TranspileOutput,
+};
 
 /// The main entry point for transpilation operations.
 ///
@@ -66,9 +70,23 @@ impl Transpiler {
         cypher: &str,
         engine: &dyn target::TargetEngine,
     ) -> Result<String, PolygraphError> {
+        let output = Self::cypher_to_sparql_mapped(cypher, engine)?;
+        Ok(output.sparql)
+    }
+
+    /// Transpile an openCypher query and return a [`TranspileOutput`] containing
+    /// both the SPARQL string and a projection schema for result mapping.
+    pub fn cypher_to_sparql_mapped(
+        cypher: &str,
+        engine: &dyn target::TargetEngine,
+    ) -> Result<TranspileOutput, PolygraphError> {
         let ast = parser::parse_cypher(cypher)?;
-        let sparql = translator::cypher::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
-        engine.finalize(sparql)
+        let result = translator::cypher::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
+        let sparql = engine.finalize(result.sparql)?;
+        Ok(TranspileOutput {
+            sparql,
+            schema: result.schema,
+        })
     }
 
     /// Transpile an ISO GQL query to a SPARQL query string.
@@ -93,8 +111,22 @@ impl Transpiler {
         gql: &str,
         engine: &dyn target::TargetEngine,
     ) -> Result<String, PolygraphError> {
+        let output = Self::gql_to_sparql_mapped(gql, engine)?;
+        Ok(output.sparql)
+    }
+
+    /// Transpile an ISO GQL query and return a [`TranspileOutput`] containing
+    /// both the SPARQL string and a projection schema for result mapping.
+    pub fn gql_to_sparql_mapped(
+        gql: &str,
+        engine: &dyn target::TargetEngine,
+    ) -> Result<TranspileOutput, PolygraphError> {
         let ast = parser::parse_gql(gql)?;
-        let sparql = translator::gql::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
-        engine.finalize(sparql)
+        let result = translator::gql::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
+        let sparql = engine.finalize(result.sparql)?;
+        Ok(TranspileOutput {
+            sparql,
+            schema: result.schema,
+        })
     }
 }

@@ -6,6 +6,7 @@
 use crate::ast::cypher::CypherQuery;
 use crate::ast::gql::GqlQuery;
 use crate::error::PolygraphError;
+use crate::translator::cypher::TranslationResult;
 
 /// Translate an ISO GQL [`GqlQuery`] into a SPARQL 1.1 query string.
 ///
@@ -17,7 +18,7 @@ pub fn translate(
     query: &GqlQuery,
     base_iri: Option<&str>,
     rdf_star: bool,
-) -> Result<String, PolygraphError> {
+) -> Result<TranslationResult, PolygraphError> {
     let cypher_query = CypherQuery { clauses: query.clauses.clone() };
     crate::translator::cypher::translate(&cypher_query, base_iri, rdf_star)
 }

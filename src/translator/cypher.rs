@@ -41,9 +41,20 @@ const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
 const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 const DEFAULT_BASE: &str = "http://polygraph.example/";
 
+use crate::result_mapping::schema::{ColumnKind, ProjectedColumn, ProjectionSchema};
+
+/// The result of translating a Cypher query to SPARQL.
+pub struct TranslationResult {
+    /// The SPARQL query string.
+    pub sparql: String,
+    /// Schema describing the projected columns.
+    pub schema: ProjectionSchema,
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Translates an openCypher [`CypherQuery`] AST into a SPARQL 1.1 query string.
+/// Translates an openCypher [`CypherQuery`] AST into a SPARQL 1.1 query string
+/// and a [`ProjectionSchema`] describing the output columns.
 ///
 /// * `base_iri` — namespace IRI for labels, relationship types and property
 ///   names. Pass `None` to use `http://polygraph.example/`.
@@ -53,17 +64,20 @@ pub fn translate(
     query: &CypherQuery,
     base_iri: Option<&str>,
     rdf_star: bool,
-) -> Result<String, PolygraphError> {
+) -> Result<TranslationResult, PolygraphError> {
     validate_semantics(query)?;
     let base = base_iri.unwrap_or(DEFAULT_BASE).to_string();
-    let mut state = TranslationState::new(base, rdf_star);
+    let mut state = TranslationState::new(base.clone(), rdf_star);
     let pattern = state.translate_query(query)?;
     let sparql_query = Query::Select {
         dataset: None,
         pattern,
         base_iri: None,
     };
-    Ok(sparql_query.to_string())
+    Ok(TranslationResult {
+        sparql: sparql_query.to_string(),
+        schema: state.build_schema(base, rdf_star),
+    })
 }
 
 /// Returns `true` if `expr` contains any aggregate sub-expression at any depth.
@@ -562,6 +576,12 @@ struct TranslationState {
     /// Named path variables → ordered list of node SPARQL variables.
     /// Used to resolve `nodes(p)` at compile time.
     path_node_vars: std::collections::HashMap<String, Vec<Variable>>,
+    /// Variables bound as node patterns in MATCH clauses.
+    node_vars: std::collections::HashSet<String>,
+    /// Projected columns collected during RETURN translation.
+    projected_columns: Vec<ProjectedColumn>,
+    /// Whether the last RETURN used DISTINCT.
+    return_distinct: bool,
 }
 
 impl TranslationState {
@@ -577,6 +597,49 @@ impl TranslationState {
             with_list_vars: Default::default(),
             path_hops: Default::default(),
             path_node_vars: Default::default(),
+            node_vars: Default::default(),
+            projected_columns: Vec::new(),
+            return_distinct: false,
+        }
+    }
+
+    /// Build a [`ProjectionSchema`] from the columns collected during RETURN translation.
+    fn build_schema(&self, base_iri: String, rdf_star: bool) -> ProjectionSchema {
+        ProjectionSchema {
+            columns: self.projected_columns.clone(),
+            distinct: self.return_distinct,
+            base_iri,
+            rdf_star,
+        }
+    }
+
+    /// Classify a RETURN item as a node, relationship, or scalar column.
+    fn classify_return_item(&self, item: &ReturnItem, sparql_var: &Variable) -> ColumnKind {
+        if let Expression::Variable(name) = &item.expression {
+            if self.node_vars.contains(name.as_str()) {
+                return ColumnKind::Node {
+                    iri_var: name.clone(),
+                };
+            }
+            if let Some(edge) = self.edge_map.get(name.as_str()) {
+                let src_var = match &edge.src {
+                    TermPattern::Variable(v) => v.as_str().to_string(),
+                    _ => String::new(),
+                };
+                let dst_var = match &edge.dst {
+                    TermPattern::Variable(v) => v.as_str().to_string(),
+                    _ => String::new(),
+                };
+                let type_info = edge.pred.as_str().to_string();
+                return ColumnKind::Relationship {
+                    src_var,
+                    dst_var,
+                    type_info,
+                };
+            }
+        }
+        ColumnKind::Scalar {
+            var: sparql_var.as_str().to_string(),
         }
     }
 
@@ -1390,6 +1453,11 @@ impl TranslationState {
         node_var: &TermPattern,
         triples: &mut Vec<TriplePattern>,
     ) -> Result<(), PolygraphError> {
+        // Register named node variables for schema classification.
+        if let Some(ref name) = node.variable {
+            self.node_vars.insert(name.clone());
+        }
+
         // One triple per label: `?n rdf:type <base:Label>`
         for label in &node.labels {
             triples.push(TriplePattern {
@@ -2285,9 +2353,26 @@ impl TranslationState {
                 let mut aggregates: Vec<(Variable, AggregateExpression)> = Vec::new();
                 let mut extends: Vec<(Variable, SparExpr)> = Vec::new();
                 let mut post_extends: Vec<(Variable, SparExpr)> = Vec::new();
+                self.projected_columns.clear();
+                self.return_distinct = ret.distinct;
                 for item in items {
                     let (var, agg_pair_opt, ext_opt) =
                         self.translate_return_item(item, &mut triples, extra)?;
+
+                    // Record projected column for schema.
+                    let col_name = item.alias.clone().unwrap_or_else(|| {
+                        if let Expression::Variable(v) = &item.expression {
+                            v.clone()
+                        } else {
+                            var.as_str().to_string()
+                        }
+                    });
+                    let col_kind = self.classify_return_item(item, &var);
+                    self.projected_columns.push(ProjectedColumn {
+                        name: col_name,
+                        kind: col_kind,
+                    });
+
                     vars.push(var.clone());
                     if let Some((agg_var, agg)) = agg_pair_opt {
                         aggregates.push((agg_var, agg));

@@ -24,6 +24,10 @@ path = "tests/integration/cypher_to_sparql.rs"
 name = "gql_integration"
 path = "tests/integration/gql_to_sparql.rs"
 
+[[test]]
+name = "result_mapping"
+path = "tests/integration/result_mapping.rs"
+
 [dependencies]
 pest = "2.7"
 pest_derive = "2.7"

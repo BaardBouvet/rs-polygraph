@@ -12,4 +12,8 @@ pub enum PolygraphError {
     /// An error occurred during translation from the AST to SPARQL algebra.
     #[error("Translation error: {message}")]
     Translation { message: String },
+
+    /// An error occurred while mapping SPARQL results back to Cypher values.
+    #[error("Result mapping error: {message}")]
+    ResultMapping { message: String },
 }
