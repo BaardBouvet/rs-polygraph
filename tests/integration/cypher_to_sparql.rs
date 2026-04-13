@@ -504,14 +504,14 @@ fn unwind_string_list_emits_values() {
 // ── Phase 4: variable-length paths ───────────────────────────────────────────
 
 #[test]
-fn varlength_star_emits_zero_or_more() {
-    // -[:KNOWS*]-> → ZeroOrMore property path
+fn varlength_star_emits_one_or_more() {
+    // -[:KNOWS*]-> → OneOrMore property path (Cypher * = 1+)
     let s = transpile_lower("MATCH (a)-[:KNOWS*]->(b) RETURN a, b");
-    // spargebra renders ZeroOrMore as (pred)* in SPARQL property path syntax
+    // spargebra renders OneOrMore as (pred)+ in SPARQL property path syntax
     assert!(s.contains("knows"), "got: {s}");
     assert!(
-        s.contains("*") || s.contains("zeroormore"),
-        "expected path *, got: {s}"
+        s.contains("+") || s.contains("oneormore"),
+        "expected path +, got: {s}"
     );
 }
 

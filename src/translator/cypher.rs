@@ -1412,8 +1412,8 @@ impl TranslationState {
         let has_range = rel.range.is_some();
         let multi_type = rel.rel_types.len() > 1;
 
-        if rel.rel_types.is_empty() {
-            // No type constraint: emit an anonymous predicate variable (no path).
+        if rel.rel_types.is_empty() && !has_range {
+            // No type constraint, no range: emit an anonymous predicate variable (no path).
             let pred_var = match &rel.variable {
                 Some(v) => Variable::new_unchecked(format!("{}_pred", v)),
                 None => self.fresh_var("rel"),
@@ -1504,8 +1504,15 @@ impl TranslationState {
             return Ok(());
         }
 
-        // Build base path expression (single type or Alternative for multiple).
-        let base_ppe: PPE = if multi_type {
+        // Build base path expression (single type, multi-type alt, or NegatedPropertySet for untyped).
+        let base_ppe: PPE = if rel.rel_types.is_empty() {
+            // Untyped variable-length: match any predicate except internal markers.
+            // Exclude rdf:type and __node to avoid traversing property/label triples.
+            PPE::NegatedPropertySet(vec![
+                NamedNode::new_unchecked(RDF_TYPE),
+                self.iri("__node"),
+            ])
+        } else if multi_type {
             let types: Vec<PPE> = rel
                 .rel_types
                 .iter()
@@ -1523,18 +1530,25 @@ impl TranslationState {
         let ppe: Option<PPE> = if has_range {
             let range = rel.range.as_ref().unwrap();
             let q = match (range.lower, range.upper) {
-                // * or *0..
-                (None, None) | (Some(0), None) => PPE::ZeroOrMore(Box::new(base_ppe)),
+                // * (bare star) = 1 or more hops in openCypher
+                (None, None) => PPE::OneOrMore(Box::new(base_ppe)),
+                // *0.. = zero or more hops
+                (Some(0), None) => PPE::ZeroOrMore(Box::new(base_ppe)),
                 // *1..
                 (Some(1), None) => PPE::OneOrMore(Box::new(base_ppe)),
                 // *0..1 or *..1
                 (None, Some(1)) | (Some(0), Some(1)) => PPE::ZeroOrOne(Box::new(base_ppe)),
                 // *1..1 = exact 1 hop, treat as simple triple
                 (Some(1), Some(1)) => {
-                    // Emit as regular triple (no range modifier).
-                    let pred = self.iri(&rel.rel_types[0]);
-                    self.emit_edge_triple(rel, src, dst, pred, triples, path_patterns)?;
-                    return Ok(());
+                    if rel.rel_types.is_empty() {
+                        // Untyped *1..1: use NPS as a 1-hop path
+                        base_ppe
+                    } else {
+                        // Typed *1..1: emit as regular triple (no range modifier).
+                        let pred = self.iri(&rel.rel_types[0]);
+                        self.emit_edge_triple(rel, src, dst, pred, triples, path_patterns)?;
+                        return Ok(());
+                    }
                 }
                 // Bounded ranges like *M..N — unroll as UNION of fixed-length chains.
                 (lo, hi) => {
@@ -1597,17 +1611,44 @@ impl TranslationState {
             };
             let path = if rel.direction == Direction::Left {
                 PPE::Reverse(Box::new(path))
+            } else if rel.direction == Direction::Both {
+                PPE::Alternative(
+                    Box::new(path.clone()),
+                    Box::new(PPE::Reverse(Box::new(path))),
+                )
             } else {
                 path
             };
-            path_patterns.push(GraphPattern::Path {
+            let mut path_gp = GraphPattern::Path {
                 subject: subj,
                 path,
                 object: obj,
-            });
+            };
+            // For untyped paths (NegatedPropertySet), filter out literal endpoints
+            // since NPS also matches property predicates leading to literals.
+            if rel.rel_types.is_empty() {
+                let endpoint = match rel.direction {
+                    Direction::Left => src,
+                    _ => dst,
+                };
+                if let TermPattern::Variable(v) = endpoint {
+                    path_gp = GraphPattern::Filter {
+                        expr: SparExpr::Not(Box::new(SparExpr::FunctionCall(
+                            spargebra::algebra::Function::IsLiteral,
+                            vec![SparExpr::Variable(v.clone())],
+                        ))),
+                        inner: Box::new(path_gp),
+                    };
+                }
+            }
+            path_patterns.push(path_gp);
             // Register edge variable in edge_map (no inline properties on path patterns).
             if let Some(ref var_name) = rel.variable {
-                let pred = self.iri(&rel.rel_types[0]);
+                let pred = if rel.rel_types.is_empty() {
+                    NamedNode::new_unchecked("urn:polygraph:untyped")
+                } else {
+                    self.iri(&rel.rel_types[0])
+                };
                 self.edge_map.insert(
                     var_name.clone(),
                     EdgeInfo {
@@ -1899,10 +1940,11 @@ impl TranslationState {
                     let intermediates: Vec<TermPattern> = (0..hop_count - 1)
                         .map(|k| self.fresh_var(&format!("mid{}", k)).into())
                         .collect();
+                    let is_untyped = rel.rel_types.is_empty();
 
                     let mut union_arms: Vec<GraphPattern> = Vec::new();
                     for combo in 0..(1u64 << hop_count) {
-                        let mut triples: Vec<TriplePattern> = Vec::new();
+                        let mut hop_parts: Vec<GraphPattern> = Vec::new();
                         let mut hop_subjs: Vec<TermPattern> = Vec::new();
                         let mut hop_objs: Vec<TermPattern> = Vec::new();
 
@@ -1921,15 +1963,28 @@ impl TranslationState {
                             };
                             hop_subjs.push(subj.clone());
                             hop_objs.push(obj.clone());
-                            triples.push(TriplePattern {
-                                subject: subj,
-                                predicate: type_iri.clone().into(),
-                                object: obj,
-                            });
+                            if is_untyped {
+                                hop_parts.push(GraphPattern::Path {
+                                    subject: subj,
+                                    path: base_ppe.clone(),
+                                    object: obj,
+                                });
+                            } else {
+                                hop_parts.push(GraphPattern::Bgp {
+                                    patterns: vec![TriplePattern {
+                                        subject: subj,
+                                        predicate: type_iri.clone().into(),
+                                        object: obj,
+                                    }],
+                                });
+                            }
                             prev = next;
                         }
 
-                        let mut arm = GraphPattern::Bgp { patterns: triples };
+                        let mut arm = hop_parts
+                            .into_iter()
+                            .reduce(|a, b| join_patterns(a, b))
+                            .unwrap_or_else(empty_bgp);
 
                         // Pairwise edge-uniqueness: FILTER NOT(si=sj AND oi=oj)
                         for i in 0..hop_count as usize {
@@ -1965,8 +2020,9 @@ impl TranslationState {
                         .unwrap_or_else(empty_bgp);
                     union_patterns.push(combined);
                 } else {
-                    // Directed multi-hop: simple chain of triple patterns.
-                    let mut chain: Vec<TriplePattern> = Vec::new();
+                    // Directed multi-hop: simple chain of triple/path patterns.
+                    let is_untyped = rel.rel_types.is_empty();
+                    let mut parts: Vec<GraphPattern> = Vec::new();
                     let mut prev = effective_src.clone();
                     for hop in 0..hop_count {
                         let next: TermPattern = if hop == hop_count - 1 {
@@ -1974,14 +2030,41 @@ impl TranslationState {
                         } else {
                             self.fresh_var(&format!("mid{}", hop)).into()
                         };
-                        chain.push(TriplePattern {
-                            subject: prev.clone(),
-                            predicate: type_iri.clone().into(),
-                            object: next.clone(),
-                        });
+                        if is_untyped {
+                            // Untyped: use NPS path per hop.
+                            parts.push(GraphPattern::Path {
+                                subject: prev.clone(),
+                                path: base_ppe.clone(),
+                                object: next.clone(),
+                            });
+                        } else {
+                            parts.push(GraphPattern::Bgp {
+                                patterns: vec![TriplePattern {
+                                    subject: prev.clone(),
+                                    predicate: type_iri.clone().into(),
+                                    object: next.clone(),
+                                }],
+                            });
+                        }
                         prev = next;
                     }
-                    union_patterns.push(GraphPattern::Bgp { patterns: chain });
+                    let mut chain = parts
+                        .into_iter()
+                        .reduce(|a, b| join_patterns(a, b))
+                        .unwrap_or_else(empty_bgp);
+                    // For untyped, filter out literal endpoints.
+                    if is_untyped {
+                        if let TermPattern::Variable(v) = &effective_dst {
+                            chain = GraphPattern::Filter {
+                                expr: SparExpr::Not(Box::new(SparExpr::FunctionCall(
+                                    spargebra::algebra::Function::IsLiteral,
+                                    vec![SparExpr::Variable(v.clone())],
+                                ))),
+                                inner: Box::new(chain),
+                            };
+                        }
+                    }
+                    union_patterns.push(chain);
                 }
             }
         }
