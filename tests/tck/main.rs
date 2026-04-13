@@ -125,6 +125,7 @@ fn is_complex_tck_value(s: &str) -> bool {
     // Relationship: [:T], [:T {key: val}]
     // Path: <...> (openCypher path notation)
     // List of graph objects: [(:A), ...]
+    // Map containing nodes/rels: {node1: (:A), ...}
     if s.starts_with('<') && s.ends_with('>') {
         return true;
     }
@@ -134,6 +135,9 @@ fn is_complex_tck_value(s: &str) -> bool {
     if s.starts_with('[') {
         // List literal [1,2,3] is NOT complex; [:T] IS complex; [()] IS complex (node)
         return s.contains(':') || s.contains('|') || s.contains('(');
+    }
+    if s.starts_with('{') && (s.contains("(:") || s.contains("[:")) {
+        return true;
     }
     false
 }

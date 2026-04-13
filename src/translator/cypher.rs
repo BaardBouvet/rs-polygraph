@@ -1878,6 +1878,10 @@ impl TranslationState {
                 // Single hop: emit as a plain path (allows multi-direction).
                 let p = match rel.direction {
                     Direction::Left => PPE::Reverse(Box::new(base_ppe.clone())),
+                    Direction::Both => PPE::Alternative(
+                        Box::new(base_ppe.clone()),
+                        Box::new(PPE::Reverse(Box::new(base_ppe.clone()))),
+                    ),
                     _ => base_ppe.clone(),
                 };
                 union_patterns.push(GraphPattern::Path {
@@ -1886,24 +1890,99 @@ impl TranslationState {
                     object: effective_dst.clone(),
                 });
             } else {
-                // Multiple hops: chain of `hop_count` explicit triple patterns.
-                let mut chain: Vec<TriplePattern> = Vec::new();
-                // Create intermediate variables.
-                let mut prev = effective_src.clone();
-                for hop in 0..hop_count {
-                    let next: TermPattern = if hop == hop_count - 1 {
-                        effective_dst.clone()
-                    } else {
-                        self.fresh_var(&format!("mid{}", hop)).into()
-                    };
-                    chain.push(TriplePattern {
-                        subject: prev.clone(),
-                        predicate: type_iri.clone().into(),
-                        object: next.clone(),
-                    });
-                    prev = next;
+                // Multiple hops: chain via intermediate vars.
+                // For undirected patterns, enumerate all 2^N direction combos
+                // with pairwise edge-uniqueness FILTERs.
+                let is_undirected = rel.direction == Direction::Both;
+                if is_undirected {
+                    // Pre-generate intermediate variables (shared across combos).
+                    let intermediates: Vec<TermPattern> = (0..hop_count - 1)
+                        .map(|k| self.fresh_var(&format!("mid{}", k)).into())
+                        .collect();
+
+                    let mut union_arms: Vec<GraphPattern> = Vec::new();
+                    for combo in 0..(1u64 << hop_count) {
+                        let mut triples: Vec<TriplePattern> = Vec::new();
+                        let mut hop_subjs: Vec<TermPattern> = Vec::new();
+                        let mut hop_objs: Vec<TermPattern> = Vec::new();
+
+                        let mut prev = effective_src.clone();
+                        for hop in 0..hop_count {
+                            let next: TermPattern = if (hop as usize) < intermediates.len() {
+                                intermediates[hop as usize].clone()
+                            } else {
+                                effective_dst.clone()
+                            };
+                            let is_forward = (combo >> hop) & 1 == 0;
+                            let (subj, obj) = if is_forward {
+                                (prev.clone(), next.clone())
+                            } else {
+                                (next.clone(), prev.clone())
+                            };
+                            hop_subjs.push(subj.clone());
+                            hop_objs.push(obj.clone());
+                            triples.push(TriplePattern {
+                                subject: subj,
+                                predicate: type_iri.clone().into(),
+                                object: obj,
+                            });
+                            prev = next;
+                        }
+
+                        let mut arm = GraphPattern::Bgp { patterns: triples };
+
+                        // Pairwise edge-uniqueness: FILTER NOT(si=sj AND oi=oj)
+                        for i in 0..hop_count as usize {
+                            for j in (i + 1)..hop_count as usize {
+                                let si_eq_sj = SparExpr::Equal(
+                                    Box::new(term_to_sparexpr(&hop_subjs[i])),
+                                    Box::new(term_to_sparexpr(&hop_subjs[j])),
+                                );
+                                let oi_eq_oj = SparExpr::Equal(
+                                    Box::new(term_to_sparexpr(&hop_objs[i])),
+                                    Box::new(term_to_sparexpr(&hop_objs[j])),
+                                );
+                                let same = SparExpr::And(
+                                    Box::new(si_eq_sj),
+                                    Box::new(oi_eq_oj),
+                                );
+                                arm = GraphPattern::Filter {
+                                    expr: SparExpr::Not(Box::new(same)),
+                                    inner: Box::new(arm),
+                                };
+                            }
+                        }
+
+                        union_arms.push(arm);
+                    }
+
+                    let combined = union_arms
+                        .into_iter()
+                        .reduce(|a, b| GraphPattern::Union {
+                            left: Box::new(a),
+                            right: Box::new(b),
+                        })
+                        .unwrap_or_else(empty_bgp);
+                    union_patterns.push(combined);
+                } else {
+                    // Directed multi-hop: simple chain of triple patterns.
+                    let mut chain: Vec<TriplePattern> = Vec::new();
+                    let mut prev = effective_src.clone();
+                    for hop in 0..hop_count {
+                        let next: TermPattern = if hop == hop_count - 1 {
+                            effective_dst.clone()
+                        } else {
+                            self.fresh_var(&format!("mid{}", hop)).into()
+                        };
+                        chain.push(TriplePattern {
+                            subject: prev.clone(),
+                            predicate: type_iri.clone().into(),
+                            object: next.clone(),
+                        });
+                        prev = next;
+                    }
+                    union_patterns.push(GraphPattern::Bgp { patterns: chain });
                 }
-                union_patterns.push(GraphPattern::Bgp { patterns: chain });
             }
         }
 
@@ -2483,10 +2562,15 @@ impl TranslationState {
                         }
                         _ => {
                             let translated = self.translate_expr(val_expr, extra)?;
-                            concat_pieces.push(SparExpr::FunctionCall(
-                                spargebra::algebra::Function::Str,
-                                vec![translated],
-                            ));
+                            // COALESCE(STR(...), "") prevents CONCAT from returning null
+                            // when a variable (e.g. relationship var) is unbound.
+                            concat_pieces.push(SparExpr::Coalesce(vec![
+                                SparExpr::FunctionCall(
+                                    spargebra::algebra::Function::Str,
+                                    vec![translated],
+                                ),
+                                SparExpr::Literal(SparLit::new_simple_literal("")),
+                            ]));
                         }
                     }
                 }
