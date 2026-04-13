@@ -456,60 +456,66 @@ Implement MERGE as conditional INSERT + SELECT. Low priority.
 
 ---
 
-## Recommended Execution Order
+## Recommended Execution Order (revised per §10 analysis)
 
-| Order | Phase | Scenarios Fixed | Running Total | % |
-|-------|-------|-----------------|---------------|---|
-| **0** | **0 — Enable RDF-star** | **+5..10** | **367-372** | **79-80%** |
-| 1 | G — Semantic checks | +2 | 374 | 80.8% |
-| 2 | A — Grammar/parser | +29 (parse only) | — | — |
-| 3 | B — Function translation | +~15 (parse+translate) | 389 | 84.0% |
-| 4 | C — Bounded paths | +5 | 394 | 85.1% |
-| 5 | D — GROUP BY / aggregation | +8 | 402 | 86.8% |
-| 6 | F — Uniqueness / cartesian | +20 | 422 | 91.1% |
-| 7 | E — UNWIND variables | +3..6 | 428 | 92.4% |
-| 8 | H — Complex return exprs | +3 | 431 | 93.1% |
-| 9 | I — MERGE | +1 | 432 | 93.3% |
+> **Supersedes** the original 93% ceiling estimate. §10 reclassified `type(r)` as
+> standard SPARQL and literal UNWIND as compile-time solvable, raising the ceiling
+> to **456/463 (98.5%)**. Only **7 scenarios** are truly unreachable with
+> single-query SPARQL transpilation.
 
-**Realistic ceiling with SPARQL-star**: ~432/463 (93%) — significantly higher than
-the previous 91% estimate because RDF-star resolves relationship property scenarios
-that were previously blocked.
+| Order | Phase | Net New Passes | Running Total | % |
+|-------|-------|----------------|---------------|---|
+| **0** | **0 — Enable RDF-star** | **+8** | **370** | **79.9%** |
+| 1 | G — Semantic checks | +2 | 372 | 80.3% |
+| 2 | A — Grammar & parser | *(parse-only, unlocks B/D)* | — | — |
+| 3 | B — Function translation | +20 | 392 | 84.7% |
+| 4 | D — GROUP BY & aggregation | +10 | 402 | 86.8% |
+| 5 | C — Bounded paths | +6 | 408 | 88.1% |
+| 6 | F — Uniqueness & cartesian | +28 | 436 | 94.2% |
+| 7 | E — UNWIND (compile-time) | +7 | 443 | 95.7% |
+| 8 | H — Complex return exprs | +2 | 445 | 96.1% |
+| 9 | AB² — Residual grammar+logic | +11 | 456 | 98.5% |
 
-**Hard 100% blockers** (~31 scenarios, require approximations or extensions):
-- `nodes(p)` / `relationships(p)` — path decomposition (no SPARQL equivalent)
-- UNWIND of `collect()` result — requires runtime list iteration
-- Map/List of graph objects in RETURN — requires node serialization
-- Some complex aggregation patterns with nested `collect()` + map construction
+**AB²** = second pass over A/B scenarios that have both a parse error as
+primary blocker **and** a secondary translation/logic issue only discoverable
+after Phase F fixes cartesian products and uniqueness.
 
-**Path to 100%**: The remaining ~31 scenarios after Phase I break down as:
-- ~15 fundamentally hard (path decomposition, runtime UNWIND, graph-object
-  serialization) — would need engine-specific custom functions or compile-time
-  approximations
-- ~16 potentially fixable with deeper translation work (complex nested
-  aggregations, multi-statement transaction semantics, DELETE+RETURN)
+### Unreachable scenarios (7)
 
-For truly engine-agnostic 100%, the project would need to define a small set of
-custom SPARQL functions (e.g., `pg:nodes()`, `pg:type()`) that target engines
-implement. This is consistent with the `TargetEngine` trait design — engines
-that support these extensions get fuller coverage.
+| # | Scenario | Gap | Reason |
+|---|----------|-----|--------|
+| 1 | Return2 [12] `RETURN [n, r, m]` | 5 | Graph-object list — Cypher/RDF model mismatch |
+| 2 | Return2 [13] `RETURN {node1: n, …}` | 5 | Graph-object map — Cypher/RDF model mismatch |
+| 3 | Return6 [6] `{foo: …, kids: collect(…)}` | 5 | Map with aggregate — graph-object serialization |
+| 4 | Unwind1 [5] `UNWIND collect(row)` | 3 | Runtime variable UNWIND of `collect()` result |
+| 5 | Unwind1 [12] `UNWIND bees` (from collect) | 3 | Runtime variable UNWIND + re-MATCH |
+| 6 | Return2 [14] `DELETE r RETURN type(r)` | 6 | Multi-phase DELETE+RETURN |
+| 7 | Match8 [2] `MERGE (b) WITH *` | 7 | SPARQL UPDATE multi-phase |
+
+Items 4-7 could become reachable with a `QueryPlan` multi-phase architecture
+or engine-specific extensions (Jena `list:member`, Oxigraph custom aggregates).
+Items 1-3 are a fundamental semantic boundary between Cypher's object model and
+RDF's term model.
+
+### Realistic ceiling: **456/463 (98.5%)**
 
 ---
 
 ## Estimated Total Effort
 
-| Phase | Effort |
-|-------|--------|
-| **0 — RDF-star** | **< 1 session** |
-| A — Grammar | 2-3 sessions |
-| B — Functions | 2-3 sessions |
-| C — Bounded paths | 1 session |
-| D — GROUP BY | 1-2 sessions |
-| E — UNWIND | 1-2 sessions |
-| F — Uniqueness | 2-3 sessions |
-| G — Semantic | < 1 session |
-| H — Complex return | 1 session |
-| I — MERGE | 1 session |
-| **Total** | **~13-17 sessions** |
+| Phase | Effort | Depends On |
+|-------|--------|------------|
+| **0 — RDF-star** | **< 1 session** | — |
+| G — Semantic checks | < 1 session | — |
+| A — Grammar & parser | 2-3 sessions | — |
+| B — Function translation | 2-3 sessions | A |
+| D — GROUP BY & aggregation | 1-2 sessions | A |
+| C — Bounded paths | 1 session | — |
+| F — Uniqueness & cartesian | 2-3 sessions | 0 |
+| E — UNWIND (compile-time) | 1-2 sessions | A |
+| H — Complex return | 1 session | B, D |
+| AB² — Residual cleanup | 1-2 sessions | all above |
+| **Total** | **~13-18 sessions** | |
 
 Phase 0 (RDF-star) should be done **first** as it changes the baseline for
 all subsequent measurements and may resolve scenarios currently categorized
@@ -877,3 +883,381 @@ pub trait TargetEngine {
     fn supports_multi_phase(&self) -> bool { false }
 }
 ```
+
+---
+
+## §11 — Concrete Scenario-Level Execution Plan
+
+This section assigns every one of the 101 failing scenarios to a specific
+implementation phase and tracks which are reachable (94) vs unreachable (7).
+
+### Legend
+
+- **Primary blocker**: the first error encountered — fixing this is required
+  before the scenario can pass.
+- **Secondary blocker**: a likely follow-on issue that will surface after the
+  primary blocker is resolved. Assigned to the phase that fixes it.
+- **⊘**: unreachable — scenario requires capabilities beyond single-query SPARQL.
+
+---
+
+### Phase 0 — Enable RDF-star in TCK (8 scenarios)
+
+Flip `TckEngine.supports_rdf_star()` to `true`, emit annotated triples for
+relationship properties in `emit_create_pattern()`. Scenarios that fail
+because relationship property triples are missing from the INSERT DATA:
+
+| Scenario | Name | Current Error |
+|----------|------|---------------|
+| Match2:108 [5] | Match relationship with inline property value | Row count 0→1 |
+| MatchWhere1:115 [5] | Filter end node of relationship with property predicate | Row count 3→1 |
+| MatchWhere1:172 [8] | Filter relationship with property predicate | Row count 0→1 |
+| MatchWhere2:52 [1] | Filter nodes with conjunctive two-part property predicate | Row count 0→2 |
+| MatchWhere1:210 [10] | Filter node with disjunctive property predicate | Row count 0→2 |
+| Return2:87 [4] | Returning a relationship property value | Row count 12→1 |
+| Return2:103 [5] | Missing relationship property should become null | Row count 12→1 |
+| Return2:135 [7] | Adding list properties in projection | Result set mismatch |
+
+**Expected lift**: 362 → **370** (79.9%)
+
+> **Note**: Return2 [4] and [5] show "got 12" which is a cartesian product
+> with the 4-node sentinel. Phase 0 alone may not fix these if the
+> relationship property lookup still produces extra cross-joins. If so, they
+> shift to Phase F.
+
+---
+
+### Phase G — Semantic Validation (2 scenarios)
+
+| Scenario | Name | Missing Check |
+|----------|------|---------------|
+| Return1:56 [2] | Fail when returning an undefined variable | `UndefinedVariable` |
+| Return6:353 [21] | Fail if complex expressions with aggregation | `AmbiguousAggregation` (compound expression) |
+
+**Implementation**:
+1. In `validate_semantics()`, collect bound variables from MATCH/WITH/UNWIND
+   clauses. Reject any RETURN variable not in the set → `UndefinedVariable`.
+2. Strengthen aggregation check: when a RETURN item mixes aggregate and
+   non-aggregate sub-expressions, verify the non-aggregate parts are exactly
+   the GROUP BY keys, not arbitrary re-derivations.
+
+**Expected lift**: 370 → **372** (80.3%)
+
+---
+
+### Phase A — Grammar & Parser (29 parse-error scenarios, no new passes alone)
+
+These scenarios all fail with "Parse error". Phase A fixes the grammar so they
+can reach the translator. Whether they then *pass* depends on Phases B, D, F.
+
+**§A1 — `function_call` rule (16 scenarios)**
+
+Add `function_call = { ident ~ "(" ~ (kw_DISTINCT? ~ expression ~ ("," ~ expression)*)? ~ ")" }`
+as an `atom` in the grammar. Add `Expression::FunctionCall { name, distinct, args }` to AST.
+
+| Scenario | Function | Translation Phase |
+|----------|----------|-------------------|
+| MatchWhere1:155 [7] | `type(r)` | → B |
+| MatchWhere1:233 [11] | `type(r)` disjunctive | → B |
+| MatchWhere1:251 [12] | `length(p)` | → B |
+| MatchWhere1:268 [13] | `length(p)` false | → B |
+| Match2:75 [3] | *(self-loop — parse error may be grammar not function)* | → F |
+| Match2:92 [4] | *(self-loop)* | → F |
+| Match9:45 [1] | `last(r)` | → B |
+| Return2:246 [14] | `type(r)` in DELETE+RETURN | → ⊘ (Gap 6) |
+| Return4:109 [5] | `count(*)` | → D |
+| Return4:176 [9] | `count(DISTINCT p)` | → D |
+| Return4:205 [11] | `avg(n.age)` | → D |
+| Return6:158 [8] | `min(length(p))` | → B |
+| Return6:246 [13] | `min(length(p))` | → B |
+| Return6:294 [16] | complex aggregation | → D |
+| Unwind1:54 [2] | `range()` | → B+E |
+| Unwind1:88 [4] | nested list literal | → E |
+
+**§A2 — `label_predicate` in WHERE (8 scenarios)**
+
+Add `label_predicate = { variable ~ ":" ~ label }` as a boolean atom.
+Translate to `EXISTS { ?var a <base:Label> }` or inline type triple.
+
+| Scenario | Context |
+|----------|---------|
+| MatchWhere1:45 [1] | `WHERE a:A` |
+| MatchWhere1:62 [2] | `WHERE n:B` |
+| MatchWhere5:70 [2] | `WHERE i:TextNode` |
+| MatchWhere6:50 [1] | after OPTIONAL MATCH |
+| MatchWhere6:73 [2] | after OPTIONAL MATCH |
+| Return2:151 [8] | label predicate expression in RETURN |
+| Match7:473 [22] | multi-line with label filter |
+| Match7:538 [25] | OPTIONAL MATCH self-loops + label filter |
+
+**§A3 — Bidirectional `<-->` (2 scenarios)**
+
+Add `<-->` as a direction variant (semantically "any direction", same as `--`).
+
+| Scenario | Pattern |
+|----------|---------|
+| Match6:230 [12] | `(n)<-->(k)<--(n)` |
+| Match6:251 [13] | `(:Start)<-[:CONNECTED_TO]-()…` |
+
+**§A4 — Pattern predicate in WHERE (1 scenario)**
+
+| Scenario | Pattern |
+|----------|---------|
+| MatchWhere4:67 [2] | `(a)-[:T]->(b:TheLabel)` as boolean in WHERE |
+
+**§A5 — Other parse issues (2 scenarios)**
+
+| Scenario | Error | Likely Fix |
+|----------|-------|------------|
+| Return3:44 [1] | `expected [_]` at pos 185 | Grammar bug in multi-expression RETURN |
+| Match3:365 [19] | comma-separated patterns | Chain pattern parsing |
+
+---
+
+### Phase B — Function Translation (20 scenarios pass after A+B)
+
+Map parsed `FunctionCall` AST nodes to SPARQL equivalents. Each function
+listed with the scenarios it unblocks:
+
+**`type(r)` → `REPLACE(STR(?r_pred), "^.*[/#]", "")`** (standard SPARQL, no extension)
+
+| MatchWhere1:155 [7] | MatchWhere1:233 [11] |
+
+Plus unlocks value-correct results for scenarios where `type()` was the
+only remaining issue.
+
+**`length(p)` → count path hops (compile-time for fixed-length)**
+
+| MatchWhere1:251 [12] | MatchWhere1:268 [13] |
+
+**`last(list)` / `head(list)` → take first/last VALUES binding**
+
+| Match9:45 [1] |
+
+**`min()` / `max()` / `avg()` / `sum()` → direct SPARQL aggregate mapping**
+
+Already exist in SPARQL; need to wire through the FunctionCall AST:
+
+| Return6:158 [8] | Return6:246 [13] |
+
+**`range(start, end)` → compile-time expansion to VALUES**
+
+| Unwind1:54 [2] |
+
+**`abs(x)` → `ABS()` in SPARQL**
+
+Needed for compound expressions in Return6:246.
+
+**`toString()` → `STR()`**, **`toInteger()` → `xsd:integer` cast**
+
+General utility; exact scenario impact depends on Phase F outcomes.
+
+**Expected lift** (A+B combined, after parse + translate): 372 → **392** (84.7%)
+
+---
+
+### Phase D — GROUP BY & Aggregation (10 scenarios)
+
+| Scenario | Name | Fix |
+|----------|------|-----|
+| Return4:109 [5] | `count(*)` standalone | Emit `SELECT (COUNT(*) AS ?count)` |
+| Return4:176 [9] | `count(DISTINCT p)` | `COUNT(DISTINCT ?p)` |
+| Return4:205 [11] | `avg(n.age)` reusing variable names | Alias handling + `AVG()` |
+| Return6:44 [1] | `n.num, count(n)` | GROUP BY `?n_num` |
+| Return6:77 [3] | `n.num, count(*)` | GROUP BY `?n_num` |
+| Return6:175 [9] | Aggregates with arithmetics | `SUM(?x + ?y)` via BIND |
+| Return6:191 [10] | `me.age + count(you.age)` | GROUP BY + BIND post-aggregate |
+| Return6:294 [16] | Complex aggregation | GROUP BY + nested function |
+| Return2:179 [10] | `count(a)` over empty graph | `SELECT (COUNT(*) …)` on empty → 0 row |
+| Return4:45 [1] | Column name preservation (`cOuNt`) | Alias with original casing |
+
+**Expected lift**: 392 → **402** (86.8%)
+
+---
+
+### Phase C — Bounded Variable-Length Paths (6 scenarios)
+
+Unroll `*N..M` into `UNION` of fixed-length triple chains.
+
+| Scenario | Pattern | Expansion |
+|----------|---------|-----------|
+| Match6:273 [14] | `[:KNOWS*3..3]` | 3-hop chain |
+| Match6:308 [16] | `[:KNOWS*1..2]` | UNION(1-hop, 2-hop) |
+| Match6:364 [19] | `[:KNOWS*..2]` | UNION(0, 1, 2-hop) |
+| Match9:65 [2] | `[*2..2]` | 2-hop chain |
+| Match9:81 [3] | `[*2..2]` | 2-hop chain |
+| Match9:98 [4] | `[*2..2]` | 2-hop chain |
+
+**Expected lift**: 402 → **408** (88.1%)
+
+---
+
+### Phase F — Relationship Uniqueness & Cartesian Products (28 scenarios)
+
+This is the largest single-phase improvement. Root causes:
+
+1. **`__node` sentinel pollution** — sentinel triples participate in
+   cartesian products, inflating row counts.
+2. **Missing `FILTER(?r1 != ?r2)`** — Cypher guarantees each relationship
+   traversed at most once per pattern.
+3. **Undirected match duplication** — `(a)--(b)` matches both `?a→?b` and
+   `?b→?a`; must be deduplicated or handled correctly.
+4. **OPTIONAL MATCH WHERE placement** — filter from OPTIONAL's WHERE must
+   go inside the `OPTIONAL {}` block, not outside.
+5. **Variable-length path over-counting** — SPARQL property paths return
+   all reachable pairs; Cypher returns distinct paths.
+
+| Scenario | Got | Expected | Root Cause |
+|----------|-----|----------|-----------|
+| Match1:110 [5] | mismatch | mismatch | Cartesian product values wrong (1) |
+| Match2:58 [2] | 320 | 1 | Label predicate + cartesian (1, 3) |
+| Match3:76 [3] | 1 | 2 | Undirected match (3) |
+| Match3:95 [4] | 6 | 2 | Undirected match + cartesian (1, 3) |
+| Match3:112 [5] | 1 | 2 | Undirected bound relationship (3) |
+| Match3:300 [16] | 4 | 6 | Undirected self-relationship (3) |
+| Match3:324 [17] | 3 | 1 | Cyclic pattern (2) |
+| Match3:486 [24] | 2 | 1 | Duplicate relationship types (2) |
+| Match3:521 [26] | 2 | 1 | Duplicate predicate (2) |
+| Match3:552 [28] | 1 | 0 | Null node filtering (1) |
+| Match4:64 [2] | 1 | 3 | Variable-length semantics (5) |
+| Match4:129 [5] | 6 | 1 | VLP + property predicate (2, 5) |
+| Match4:148 [6] | 9 | 1 | VLP from bound node (5) |
+| Match4:171 [7] | mismatch | mismatch | VLP + bound relationship (2, 5) |
+| Match4:192 [8] | 2 | 1 | VLP + list matching (5) |
+| Match6:94 [4] | 5 | 0 | Direction not respected (3) |
+| Match6:142 [7] | 5 | 1 | Direction not respected (3) |
+| Match6:160 [8] | 2 | 0 | Direction + multi-directions (3) |
+| Match6:175 [9] | 24 | 1 | Path query over-counting (5) |
+| Match6:345 [18] | 0 | 1 | Undirected named path (3) |
+| Match6:384 [20] | 30 | 2 | Unbounded VLP over-counting (5) |
+| Match7:156 [7] | 6 | 1 | OPTIONAL MATCH longer pattern (4) |
+| Match7:255 [12] | 2 | 4 | Variable-length optional (4, 5) |
+| Match7:302 [14] | 2 | 1 | VLP optional + length predicate (4, 5) |
+| Match7:629 [29] | mismatch | mismatch | Open-world OPTIONAL + VLP (4, 5) |
+| Match8:101 [3] | mismatch | mismatch | MATCH + disregard output (1) |
+| Match9:117 [5] | mismatch | mismatch | VLP with label predicate (5) |
+| Match9:138 [6] | 2 | 1 | VLP + bound nodes (2, 5) |
+
+Sub-items under Phase F:
+- **F1**: Rewrite sentinel emission — move `__node` to a named graph or use
+  `FILTER NOT EXISTS` to exclude sentinels from general pattern matching.
+- **F2**: Emit `FILTER(?r1 != ?r2)` for patterns with multiple relationships
+  of the same type.
+- **F3**: Undirected match → emit both directions via UNION or `^` inverse
+  path operator, with `DISTINCT`.
+- **F4**: Move OPTIONAL MATCH WHERE filters inside the `OPTIONAL { }` block.
+- **F5**: Variable-length paths → use `DISTINCT` and ensure path-level
+  uniqueness (not just endpoint uniqueness).
+
+**Expected lift**: 408 → **436** (94.2%)
+
+---
+
+### Phase E — UNWIND Compile-Time Expansion (7 scenarios)
+
+| Scenario | Type | Approach |
+|----------|------|----------|
+| Unwind1:54 [2] | `range(1, 3)` | Expand to `VALUES (?x) { (1) (2) (3) }` (after Phase B adds `range()`) |
+| Unwind1:69 [3] | `[1]+[2,3]+[4]` | Evaluate concatenation at compile time → VALUES |
+| Unwind1:88 [4] | `[[1,2,3],[4,5,6]]` | Flatten nested list → VALUES of sub-lists |
+| Unwind1:149 [7] | `WITH [[…]] AS lol UNWIND lol` | Compile-time — WITH-bound literal list |
+| Unwind1:177 [9] | `UNWIND null` | → empty result set (zero rows) |
+| Unwind1:210 [11] | `WITH [1,2,3] AS list UNWIND list` | Compile-time literal expansion |
+| Unwind1:251 [13] | `WITH [1,2] AS xs, [3,4] AS ys UNWIND xs … UNWIND ys` | Cascaded compile-time expansion |
+
+**Implementation**: In the translator, when an UNWIND expression is:
+- A literal list → expand inline to `VALUES`
+- A WITH-bound variable whose definition is a literal list → propagate the
+  constant and expand to `VALUES`
+- `null` or `[]` → emit empty result (no VALUES rows)
+- `range(a, b)` with literal args → expand to VALUES `{(a) (a+1) … (b)}`
+- A runtime variable (from `collect()`) → error: "unsupported" (→ ⊘)
+
+**Expected lift**: 436 → **443** (95.7%)
+
+---
+
+### Phase H — Complex Return Expressions (2 scenarios)
+
+| Scenario | Query | Fix |
+|----------|-------|-----|
+| Return2:39 [1] | `1+(2-(3*(4/(5^(6%null)))))` | Arithmetic: map `^`→SPARQL (none natively; evaluate constant-expressions at compile time); `%`→not in SPARQL 1.1 (evaluate at compile time for literals); null propagation |
+| Return4:141 [7] | `head(collect({…}))` | Nested aggregation result set mismatch — likely passes after D+B |
+
+> Return2 [9] (`{a: 1, b: 'foo'}` map), Return2 [12], Return2 [13], and
+> Return6 [6] are counted as unreachable (Gap 5) or addressed by other phases.
+
+**Expected lift**: 443 → **445** (96.1%)
+
+---
+
+### Phase AB² — Residual Cleanup (11 scenarios)
+
+These scenarios have a parse error as primary blocker but a secondary
+translation or logic bug that only surfaces after Phases A through F are
+complete. Listed here as a mop-up pass:
+
+| Scenario | Primary (Phase A) | Secondary Issue |
+|----------|-------------------|-----------------|
+| MatchWhere1:45 [1] | label predicate | Row count after label triple added (F) |
+| MatchWhere1:62 [2] | label predicate | No bindings case (F) |
+| MatchWhere6:50 [1] | label predicate + OPTIONAL | OPTIONAL WHERE placement (F) |
+| MatchWhere6:73 [2] | label predicate + OPTIONAL | OPTIONAL WHERE placement (F) |
+| MatchWhere6:96 [3] | *(not parse error)* | OPTIONAL property predicate (F) |
+| MatchWhere6:156 [6] | *(not parse error)* | OPTIONAL + join non-equality (F) |
+| MatchWhere6:179 [7] | *(not parse error)* | Two-relationship OPTIONAL (F) |
+| MatchWhere6:203 [8] | *(not parse error)* | Two OPTIONAL clauses (F) |
+| Match9:159 [7] | *(not parse error)* | VLP wrong direction (F) |
+| Return3:77 [3] | *(not parse error; alias/projection)* | Projection + cartesian (F) |
+| Return4:77 [3] | *(result mismatch)* | `nodes(p)` or aliasing (B) |
+
+**Expected lift**: 445 → **456** (98.5%)
+
+---
+
+### Scenario Accounting Summary
+
+| Phase | Scenarios Targeted | Unreachable | Net Passes |
+|-------|-------------------|-------------|------------|
+| 0 — RDF-star | 8 | 0 | +8 |
+| G — Semantic | 2 | 0 | +2 |
+| A — Grammar | 29 | 0 | 0 (enables B/D) |
+| B — Functions | 20 (overlaps A) | 1 (Return2 [14]) | +20 |
+| D — GROUP BY | 10 | 0 | +10 |
+| C — Bounded paths | 6 | 0 | +6 |
+| F — Uniqueness/cartesian | 28 | 0 | +28 |
+| E — UNWIND | 7+2 ⊘ | 2 (Unwind1 [5], [12]) | +7 |
+| H — Complex return | 2+3 ⊘ | 3 (Return2 [12,13], Return6 [6]) | +2 |
+| AB² — Residual | 11 | 0 | +11 |
+| I — MERGE/DELETE ⊘ | — | 1 (Match8 [2]) | 0 |
+| **Total** | **101** | **7** | **+94** |
+
+**Final**: 362 + 94 = **456/463 (98.5%)**
+
+---
+
+### Dependency Graph
+
+```
+Phase 0 (RDF-star)
+  └─→ Phase F (benefits from correct rel-property data)
+
+Phase G (semantic) ── independent, do anytime
+
+Phase A (grammar) ── prerequisite for:
+  ├─→ Phase B (function translation)
+  ├─→ Phase D (GROUP BY/aggregation)
+  └─→ Phase E (UNWIND compile-time)
+
+Phase C (bounded paths) ── independent
+
+Phase F (uniqueness/cartesian) ── benefits from Phase 0
+
+Phase H (complex return) ── depends on B + D
+
+Phase AB² (residual) ── depends on all of the above
+```
+
+**Critical path**: 0 → A → {B, D} → F → AB² (longest chain)
+
+**Parallelizable**: Phase G and Phase C can be done at any time independently.
