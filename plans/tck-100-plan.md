@@ -515,3 +515,365 @@ Phase 0 (RDF-star) should be done **first** as it changes the baseline for
 all subsequent measurements and may resolve scenarios currently categorized
 under other failure buckets (especially §4 row-count mismatches involving
 relationship properties).
+
+---
+
+## §10 — SPARQL Extension Functions: Deep Dive
+
+### What we actually need
+
+After analyzing the ~31 scenarios beyond the 93% ceiling, the **truly hard
+blockers** reduce to approximately **10 scenarios across 5 capability gaps**.
+The rest are addressable with deeper translation work (complex expressions,
+GROUP BY improvements, etc.) or standard SPARQL.
+
+### Gap 1: `type(r)` — Relationship type extraction
+
+**Scenarios**: MatchWhere1:155, :233, :268, Match2:75, :92, Return2:246
+
+**Cypher**: `WHERE type(r) = 'KNOWS'` / `RETURN type(r)`
+
+**Analysis**: This is **not actually a hard blocker**. It can be solved with
+standard SPARQL:
+
+```sparql
+# Given edge_map[r] = { pred: <base:KNOWS> }
+# type(r) → extract local name from the predicate IRI
+BIND(REPLACE(STR(?r_pred), "^.*[/#]", "") AS ?type_r)
+```
+
+Since our translator already tracks `edge_map[r].pred` (the predicate
+`NamedNode`), we know the relationship type IRI at translation time. For a
+single-type relationship, `type(r)` is a compile-time constant. For
+multi-type (`[:A|B]`), we bind the predicate variable and extract the local
+name.
+
+**Engine coverage**:
+- **Standard SPARQL 1.1**: `REPLACE(STR(?pred), "^.*[/#]", "")` ✓
+- **Jena**: `afn:localname(?pred)` ✓
+- **Oxigraph**: standard REPLACE works ✓
+
+**Verdict**: Solvable in Phase B (function translation). **No extension needed.**
+
+---
+
+### Gap 2: `collect()` — List aggregation
+
+**Scenarios**: Return6:123 (`{kids: collect(child.name)}`), Return6:246,
+Return6:294
+
+**Cypher**: `collect(expr)` — aggregates values into an ordered list.
+
+**Analysis**: SPARQL 1.1 has `GROUP_CONCAT` which concatenates strings with a
+separator. This is **lossy** (can't distinguish `"a,b"` from `["a","b"]`) and
+doesn't work for non-string types. However, for TCK compliance the comparison
+is against string representations.
+
+**Engine coverage**:
+- **Standard SPARQL 1.1**: `GROUP_CONCAT(?val; separator=",")` — lossy
+- **Jena**: Custom aggregates via Java ServiceLoader — can implement true
+  `collect()` returning RDF lists
+- **Oxigraph**: `with_custom_aggregate_function()` — Rust `AggregateFunctionAccumulator`
+  trait. Can build a proper list:
+  ```rust
+  struct CollectAccumulator { items: Vec<Term> }
+  impl AggregateFunctionAccumulator for CollectAccumulator {
+      fn accumulate(&mut self, element: Term) { self.items.push(element); }
+      fn finish(&mut self) -> Option<Term> {
+          // serialize as "[item1, item2, ...]" string literal
+          Some(Literal::new_simple_literal(format!("[{}]",
+              self.items.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ")
+          )).into())
+      }
+  }
+  ```
+
+**Complication**: Return6:123 uses `collect()` **inside a map literal**:
+```cypher
+RETURN a.name, {foo: a.name='Andres', kids: collect(child.name)}
+```
+This requires both `collect()` as an aggregate **and** map construction in
+RETURN. The map-in-RETURN is a separate issue (§2).
+
+**Verdict**: `collect()` alone is solvable with `GROUP_CONCAT` (lossy) for
+standard SPARQL, or custom aggregate on Oxigraph/Jena. The scenarios that use
+it inside map literals remain blocked by map construction (Gap 5).
+
+---
+
+### Gap 3: UNWIND of runtime variables (4 scenarios)
+
+| Scenario | Query | Kind |
+|----------|-------|------|
+| Unwind1 [5] | `WITH collect(row) AS rows UNWIND rows AS node` | UNWIND of `collect()` result |
+| Unwind1 [11] | `WITH [1,2,3] AS list UNWIND list AS x RETURN *` | UNWIND of WITH-bound list variable |
+| Unwind1 [12] | `WITH a, collect(b1) AS bees UNWIND bees AS b2 MATCH ...` | UNWIND + re-MATCH |
+| Unwind1 [13] | `WITH [1,2] AS xs, [3,4] AS ys UNWIND xs AS x UNWIND ys AS y` | Cascaded variable UNWIND |
+
+**Analysis**: SPARQL has no native UNNEST/LATERAL JOIN. The fundamental
+problem is: given a binding `?list = "[1, 2, 3]"`, generate 3 rows with
+`?x = 1`, `?x = 2`, `?x = 3`.
+
+**Approaches**:
+
+**A. Compile-time expansion** (works for literals only):
+When the UNWIND expression is a literal list or a WITH-bound literal, the
+translator can expand at compile time:
+```cypher
+WITH [1, 2, 3] AS list UNWIND list AS x
+```
+→
+```sparql
+VALUES (?x ?list) { (1 "[1, 2, 3]") (2 "[1, 2, 3]") (3 "[1, 2, 3]") }
+```
+This handles scenarios [11] and [13] (both use WITH-bound literal lists).
+
+**B. Two-phase execution** (works for `collect()` results):
+1. Execute query up to the `collect()`, get the result
+2. Inject the collected values as `VALUES` into a second query
+3. Execute the second query
+
+This is a **runtime** strategy. The `TargetEngine` trait would need:
+```rust
+fn supports_two_phase_unwind(&self) -> bool { false }
+```
+Or rs-polygraph returns a `QueryPlan` with multiple stages instead of a
+single SPARQL string. This is a significant architectural change.
+
+**C. Jena property functions**:
+```sparql
+?list list:member ?item
+```
+Jena's `list:member` iterates RDF Collection members. But the collected
+values would need to be stored as RDF Collections (rdf:first/rdf:rest
+linked lists), not as string literals.
+
+**D. Oxigraph custom function** — no equivalent to property functions.
+Oxigraph only has scalar and aggregate custom functions, not property
+functions that generate multiple bindings.
+
+**Verdict**:
+- Scenarios [11] and [13]: **Solvable** via compile-time expansion (literal
+  lists bound in WITH). No extension needed.
+- Scenario [5] and [12]: **Hard.** Requires either two-phase execution
+  (architectural change) or engine-specific list iteration (Jena only).
+
+---
+
+### Gap 4: `nodes(p)` / `relationships(p)` — Path decomposition (1 scenario)
+
+**Scenario**: Return4 [5]:
+```cypher
+MATCH p = (n)-->(b) RETURN nOdEs( p )
+```
+Expected: list of nodes traversed in the path.
+
+**Analysis**: SPARQL property paths (`?a :p+ ?b`) find endpoints but **do not
+expose intermediate nodes**. There is no standard way to extract the sequence
+of nodes along a path.
+
+**Approaches**:
+
+**A. Fixed-length unrolling**: For paths of known length, unroll into
+explicit triple chains:
+```sparql
+# For a 1-hop path p = (n)-->(b):
+SELECT ?n ?b WHERE { ?n ?p ?b }
+# nodes(p) = [?n, ?b]
+```
+For the specific scenario (1-hop `-->`), `nodes(p)` is just `[n, b]`.
+The translator knows the path length at compile time for fixed-length
+patterns.
+
+**B. Custom function on Oxigraph**: Register `<pg:nodes>` that takes the
+path endpoints and predicate, then queries the store to reconstruct the path.
+But this requires access to the store during function evaluation, which
+Oxigraph's `with_custom_function` closure doesn't provide.
+
+**C. Jena ARQ**: No built-in path decomposition either. Would need a custom
+property function with access to the dataset.
+
+**Complication**: The expected result is a **list of node objects** (not
+scalars), which is the graph-object serialization problem (Gap 5).
+
+**Verdict**: For fixed-length paths, the node list is known at compile time.
+For variable-length paths, this is **fundamentally unsolvable** in standard
+SPARQL. However, the specific TCK scenario uses `(n)-->(b)` (1-hop), so
+the result is simply `[n, b]` — but returning it as a **list of nodes** hits
+Gap 5.
+
+---
+
+### Gap 5: Graph object serialization in RETURN (3 scenarios)
+
+| Scenario | Query | Expected |
+|----------|-------|----------|
+| Return2 [12] | `RETURN [n, r, m] AS r` | `[(:A), [:T], (:B)]` |
+| Return2 [13] | `RETURN {node1: n, rel: r, node2: m} AS m` | `{node1: (:A), rel: [:T], node2: (:B)}` |
+| Return6 [6] | `RETURN a.name, {foo: ..., kids: collect(...)}` | map with aggregate |
+
+**Analysis**: Cypher's `RETURN` can project **graph objects** (nodes,
+relationships) and construct **lists and maps** containing them. RDF/SPARQL
+has no equivalent — SPARQL SELECT returns RDF terms (URIs, literals, blank
+nodes), not structured graph objects with labels, properties, and types.
+
+The expected output `(:A)` means "a node with label A" — this requires
+reconstructing the node's labels and properties from the RDF store and
+serializing them into Cypher's display format.
+
+**Approaches**:
+
+**A. Approximate with IRI serialization**:
+```sparql
+# Instead of (:A), return the blank node IRI
+SELECT ?n WHERE { ?n a <base:A> }
+```
+The TCK test runner already handles this via `is_complex_tck_value()` — it
+compares row counts only for complex results. These scenarios currently fail
+on **row count**, not on value comparison.
+
+**B. Construct Cypher display strings**:
+Build `CONCAT("(:", STR(?label), ")")` in SPARQL to approximate the display
+format. Very fragile and doesn't generalize.
+
+**C. Custom function on Oxigraph**:
+```rust
+// pg:node_display(?node) → "(:A {name: 'Alice'})"
+.with_custom_function(NamedNode::new("http://polygraph.example/node_display")?, |args| {
+    // Would need store access to look up labels and properties — NOT POSSIBLE
+    // from a scalar function closure
+})
+```
+Oxigraph custom functions only take `&[Term]` — they don't have access to
+the store. This approach is **not feasible**.
+
+**D. Post-processing in the TCK runner**:
+After getting SPARQL results, the TCK runner could query the store for each
+returned node/relationship to reconstruct its Cypher display form. This is
+a **test-infrastructure** solution, not a translator solution.
+
+**Verdict**: **Fundamentally unsolvable** in the translator. The Cypher→SPARQL
+boundary cannot preserve graph object structure. These 3 scenarios represent
+a semantic mismatch between Cypher's object model and RDF's term model.
+
+For the TCK runner specifically, approach D (post-processing) could work,
+but it's test-specific, not part of the transpiler's output.
+
+---
+
+### Gap 6: DELETE + RETURN (1 scenario)
+
+**Scenario**: Return2 [14]:
+```cypher
+MATCH ()-[r]->() DELETE r RETURN type(r)
+```
+Expected: `type(r) = 'T'` with side effect `-relationships 1`.
+
+**Analysis**: This requires DELETE (SPARQL UPDATE) **followed by** RETURN
+(SPARQL SELECT) in a single query, with the deleted binding still available.
+SPARQL UPDATE and SPARQL SELECT are separate operations.
+
+**Approach**: Execute as two operations:
+1. `SELECT` to capture the bindings (save `type(r)`)
+2. `DELETE` to remove the triples
+3. Return the saved bindings
+
+This is a **multi-phase execution** problem similar to Gap 3B.
+
+**Verdict**: Requires multi-phase execution. Not solvable as a single SPARQL
+query.
+
+---
+
+### Gap 7: MERGE clause (1 scenario)
+
+**Scenario**: Match8 [2]:
+```cypher
+MATCH (a) MERGE (b) WITH * OPTIONAL MATCH (a)--(b) RETURN count(*)
+```
+
+**Analysis**: MERGE is a conditional upsert. In SPARQL, this would be:
+```sparql
+INSERT { _:b <__node> <__node> }
+WHERE { FILTER NOT EXISTS { ?b <__node> <__node> } }
+```
+Then a SELECT for the RETURN. Again, multi-phase execution.
+
+**Verdict**: Requires SPARQL UPDATE + multi-phase execution.
+
+---
+
+### Summary: True Hard Blockers
+
+| Gap | Scenarios | Root Cause | Solvable? |
+|-----|-----------|-----------|-----------|
+| 1. `type(r)` | 6 | Function mapping | **Yes** — standard SPARQL `REPLACE(STR())` |
+| 2. `collect()` | 3 | List aggregation | **Partially** — `GROUP_CONCAT` or custom aggregate; blocked when inside map literal |
+| 3. UNWIND variables | 4 | No SQL-like UNNEST | **2 yes** (compile-time expansion), **2 hard** (runtime collect) |
+| 4. `nodes(p)` | 1 | Path decomposition | **No** for variable-length; fixed-length computable but hits Gap 5 |
+| 5. Graph object display | 3 | Cypher vs RDF model | **No** — fundamental semantic mismatch |
+| 6. DELETE+RETURN | 1 | Multi-phase execution | **Possible** with architectural change |
+| 7. MERGE | 1 | SPARQL UPDATE | **Possible** with architectural change |
+
+**Truly unsolvable in a single SPARQL query**: 5 scenarios (Gaps 4, 5)
+**Solvable with architectural change** (multi-phase): 4 scenarios (Gaps 3 partial, 6, 7)
+**Solvable with standard SPARQL**: 8+ scenarios (Gaps 1, 2 partial, 3 partial)
+
+### Revised Realistic Ceiling
+
+With all phases A–I complete **plus** `type(r)` via REPLACE/STR and
+compile-time UNWIND expansion:
+
+**~456/463 (98.5%)**
+
+The remaining **7 scenarios** are:
+1. Return2 [12]: `RETURN [n, r, m]` — graph objects in list
+2. Return2 [13]: `RETURN {node1: n, ...}` — graph objects in map
+3. Return6 [6]: `RETURN {foo: ..., kids: collect(...)}` — map with aggregate
+4. Unwind1 [5]: `UNWIND collect(row)` — runtime variable UNWIND
+5. Unwind1 [12]: `UNWIND bees` (from collect) + re-MATCH — runtime UNWIND
+6. Return2 [14]: `DELETE r RETURN type(r)` — multi-phase execution
+7. Match8 [2]: `MERGE (b)` — SPARQL UPDATE multi-phase
+
+Of these, **items 6 and 7** could be solved with a `QueryPlan` architecture
+that returns a sequence of SPARQL operations rather than a single string.
+**Item 4 and 5** could be solved with two-phase execution or Jena's
+`list:member`. **Items 1-3** are the true semantic boundary — Cypher returns
+structured graph objects, SPARQL returns RDF terms.
+
+### Engine Extension Mapping
+
+| Extension | IRI | Type | Oxigraph | Jena | Generic |
+|-----------|-----|------|----------|------|---------|
+| `type(r)` | — | Not needed | `REPLACE(STR())` | `afn:localname()` | `REPLACE(STR())` |
+| `collect()` | `<pg:collect>` | Custom aggregate | `with_custom_aggregate_function` | Java ServiceLoader | `GROUP_CONCAT` (lossy) |
+| `head(list)` | `<pg:head>` | Custom function | `with_custom_function` | `list:index` | Not available |
+| `last(list)` | `<pg:last>` | Custom function | `with_custom_function` | `list:index` | Not available |
+| `unnest(list)` | `<pg:unnest>` | Property function | **Not available** | `list:member` | Not available |
+| `nodes(p)` | `<pg:nodes>` | Requires store access | **Not feasible** | **Not feasible** | Not available |
+
+### TargetEngine Trait Extensions
+
+```rust
+pub trait TargetEngine {
+    // Existing
+    fn supports_rdf_star(&self) -> bool;
+    fn supports_federation(&self) -> bool;
+    fn base_iri(&self) -> Option<&str>;
+    
+    // New: extension capabilities
+    /// Whether the engine has a list-member property function (e.g., Jena's list:member)
+    /// that can iterate RDF Collection members, enabling UNWIND of runtime variables.
+    fn supports_list_unnest(&self) -> bool { false }
+    
+    /// IRI for the list-member property function. Default: Jena's list:member.
+    fn list_unnest_iri(&self) -> Option<&str> { None }
+    
+    /// Whether the engine supports custom aggregate functions (e.g., collect()).
+    fn supports_custom_aggregates(&self) -> bool { false }
+    
+    /// Whether the transpiler should emit multi-phase query plans
+    /// (Vec<String> instead of single String) for DELETE+RETURN, MERGE, etc.
+    fn supports_multi_phase(&self) -> bool { false }
+}
+```
