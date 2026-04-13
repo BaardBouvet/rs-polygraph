@@ -655,6 +655,9 @@ impl TranslationState {
     // ── Top-level query translation ──────────────────────────────────────────
 
     fn translate_query(&mut self, query: &CypherQuery) -> Result<GraphPattern, PolygraphError> {
+        // Peephole: eliminate collect(X) AS list / UNWIND list AS var → passthrough.
+        let clauses = eliminate_collect_unwind(&query.clauses);
+
         // Accumulate extra BGP triples emitted during expression translation.
         let mut extra_triples: Vec<TriplePattern> = Vec::new();
         // The pattern is built left-to-right over clauses.
@@ -665,7 +668,7 @@ impl TranslationState {
         // sub-select scope boundaries when nullable variables must be checked).
         let mut last_with_vars: Option<Vec<Variable>> = None;
 
-        for clause in &query.clauses {
+        for clause in &clauses {
             match clause {
                 Clause::Match(m) => {
                     if m.optional {
@@ -2008,8 +2011,13 @@ impl TranslationState {
             Expression::Variable(name) => {
                 let var = Variable::new_unchecked(name.clone());
                 if let Some(alias) = &item.alias {
-                    let _ = var;
-                    Ok((Variable::new_unchecked(alias.clone()), None, None))
+                    if alias == name {
+                        Ok((var, None, None))
+                    } else {
+                        // Different alias: emit BIND(?name AS ?alias).
+                        let alias_var = Variable::new_unchecked(alias.clone());
+                        Ok((alias_var, None, Some(SparExpr::Variable(var))))
+                    }
                 } else {
                     Ok((var, None, None))
                 }
@@ -3104,6 +3112,70 @@ impl TranslationState {
             }),
         }
     }
+}
+
+// ── Peephole optimizations ────────────────────────────────────────────────────
+
+/// Detect `WITH … collect(X) AS list … / UNWIND list AS item` pairs and rewrite
+/// them into simple projections (`WITH … X AS item …`).  This eliminates the
+/// need for runtime list iteration which SPARQL 1.1 cannot express.
+fn eliminate_collect_unwind(clauses: &[Clause]) -> Vec<Clause> {
+    let mut result: Vec<Clause> = Vec::new();
+    let mut i = 0;
+    while i < clauses.len() {
+        // Look for WITH(..., collect(X) AS list_var, ...) followed by UNWIND list_var AS item
+        if let (Clause::With(w), Some(Clause::Unwind(u))) = (&clauses[i], clauses.get(i + 1)) {
+            if let Expression::Variable(unwind_list_var) = &u.expression {
+                if let crate::ast::cypher::ReturnItems::Explicit(items) = &w.items {
+                    // Find a collect() aggregate aliased to the UNWIND source variable.
+                    let collect_idx = items.iter().position(|item| {
+                        if let Expression::Aggregate(AggregateExpr::Collect { .. }) =
+                            &item.expression
+                        {
+                            item.alias.as_deref() == Some(unwind_list_var.as_str())
+                        } else {
+                            false
+                        }
+                    });
+
+                    if let Some(ci) = collect_idx {
+                        if let Expression::Aggregate(AggregateExpr::Collect { expr, .. }) =
+                            &items[ci].expression
+                        {
+                            // Build new WITH items:
+                            //  - remove the collect() item
+                            //  - add the inner expression aliased to the UNWIND output var
+                            let mut new_items: Vec<crate::ast::cypher::ReturnItem> = items
+                                .iter()
+                                .enumerate()
+                                .filter(|(idx, _)| *idx != ci)
+                                .map(|(_, item)| item.clone())
+                                .collect();
+                            new_items.push(crate::ast::cypher::ReturnItem {
+                                expression: *expr.clone(),
+                                alias: Some(u.variable.clone()),
+                            });
+
+                            // Emit the modified WITH (now aggregate-free for this item).
+                            result.push(Clause::With(crate::ast::cypher::WithClause {
+                                distinct: w.distinct,
+                                items: crate::ast::cypher::ReturnItems::Explicit(new_items),
+                                where_: w.where_.clone(),
+                                order_by: w.order_by.clone(),
+                                skip: w.skip.clone(),
+                                limit: w.limit.clone(),
+                            }));
+                            i += 2; // skip both WITH and UNWIND
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        result.push(clauses[i].clone());
+        i += 1;
+    }
+    result
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
