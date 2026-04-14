@@ -100,15 +100,14 @@ impl Default for TckWorld {
 fn term_to_string(term: &Term) -> String {
     match term {
         Term::Literal(lit) => {
-            // For xsd:double, reformat using Rust's {:?} float style to match
-            // Cypher output expectations ("1.0", "1.5", "1.26e305", "-0.0", "NaN").
+            // For xsd:double, reformat using Cypher/Neo4j compatible float style.
             if lit.datatype().as_str() == "http://www.w3.org/2001/XMLSchema#double" {
                 let v = lit.value();
                 if v.eq_ignore_ascii_case("nan") {
                     return "NaN".to_owned();
                 }
                 if let Ok(f) = v.parse::<f64>() {
-                    return format!("{f:?}");
+                    return cypher_float_str(f);
                 }
             }
             lit.value().to_owned()
@@ -117,6 +116,51 @@ fn term_to_string(term: &Term) -> String {
         Term::BlankNode(bn) => format!("__bnode__{}", bn.as_str()),
         Term::Triple(_) => "<<triple>>".to_owned(),
     }
+}
+
+/// Format a float in Cypher/Neo4j style: decimal for reasonable magnitudes, scientific otherwise.
+/// Negative zero becomes "0.0".
+fn cypher_float_str(f: f64) -> String {
+    if f == 0.0 {
+        return "0.0".to_string();
+    }
+    let s = format!("{f:?}");
+    if let Some(e_pos) = s.to_lowercase().find('e') {
+        let mantissa = &s[..e_pos];
+        let exp_str = &s[e_pos + 1..];
+        if let Ok(exp) = exp_str.parse::<i32>() {
+            if exp >= -6 && exp <= 9 {
+                let neg = mantissa.starts_with('-');
+                let mant_abs = if neg { &mantissa[1..] } else { mantissa };
+                let (int_part, frac_part) = if let Some(d) = mant_abs.find('.') {
+                    (&mant_abs[..d], &mant_abs[d + 1..])
+                } else {
+                    (mant_abs, "")
+                };
+                let all_digits = format!("{}{}", int_part, frac_part);
+                let int_len = int_part.len() as i32 + exp;
+                let result = if int_len >= all_digits.len() as i32 {
+                    let zeros = (int_len - all_digits.len() as i32) as usize;
+                    format!("{}{}{}.0", if neg { "-" } else { "" }, all_digits, "0".repeat(zeros))
+                } else if int_len <= 0 {
+                    let leading = (-int_len) as usize;
+                    format!("{}0.{}{}", if neg { "-" } else { "" }, "0".repeat(leading), all_digits)
+                } else {
+                    let (i_d, f_d) = all_digits.split_at(int_len as usize);
+                    if f_d.is_empty() {
+                        format!("{}{}.0", if neg { "-" } else { "" }, i_d)
+                    } else {
+                        format!("{}{}.{}", if neg { "-" } else { "" }, i_d, f_d)
+                    }
+                };
+                return result;
+            }
+        }
+    }
+    if !s.contains('.') && !s.to_lowercase().contains('e') {
+        return format!("{s}.0");
+    }
+    s
 }
 
 /// Normalize a TCK expected cell value for comparison.

@@ -3834,7 +3834,47 @@ impl TranslationState {
                 Ok(result)
             }
             Expression::QuantifierExpr { kind, variable, list, predicate } => {
-                // all(x IN list WHERE pred), any(...), none(...), single(...)
+                use crate::ast::cypher::QuantifierKind;
+                // Special case: predicate is exactly the iteration variable (truthy check).
+                // For boolean-value lists coming from collect(), use CONTAINS on the
+                // serialized list string. Our collect() format: ['true', 'false', ...]
+                let pred_is_self_var = matches!(predicate.as_deref(), Some(Expression::Variable(v)) if v == variable);
+                if pred_is_self_var {
+                    let list_expr = self.translate_expr(list, extra)?;
+                    let true_marker = SparExpr::Literal(SparLit::new_simple_literal("'true'"));
+                    let false_marker = SparExpr::Literal(SparLit::new_simple_literal("'false'"));
+                    return match kind {
+                        QuantifierKind::All => {
+                            // all(x IN L WHERE x) ≡ no element is false/null
+                            // ≡ !CONTAINS(L, "'false'")
+                            Ok(SparExpr::Not(Box::new(SparExpr::FunctionCall(
+                                spargebra::algebra::Function::Contains,
+                                vec![list_expr, false_marker],
+                            ))))
+                        }
+                        QuantifierKind::Any => {
+                            // any(x IN L WHERE x) ≡ at least one element is true
+                            Ok(SparExpr::FunctionCall(
+                                spargebra::algebra::Function::Contains,
+                                vec![list_expr, true_marker],
+                            ))
+                        }
+                        QuantifierKind::None => {
+                            // none(x IN L WHERE x) ≡ no element is true
+                            Ok(SparExpr::Not(Box::new(SparExpr::FunctionCall(
+                                spargebra::algebra::Function::Contains,
+                                vec![list_expr, true_marker],
+                            ))))
+                        }
+                        QuantifierKind::Single => {
+                            // single(x IN L WHERE x) ≡ exactly one true element
+                            // Approximate: contains true but list with true removed doesn't
+                            Err(PolygraphError::UnsupportedFeature {
+                                feature: "single() quantifier (Phase C)".to_string(),
+                            })
+                        }
+                    };
+                }
                 // For runtime collections, we can't translate statically.
                 Err(PolygraphError::UnsupportedFeature {
                     feature: format!(
@@ -4162,10 +4202,98 @@ impl TranslationState {
                     feature: "nodes() requires a named path argument".to_string(),
                 })
             }
-            "keys" | "labels" | "relationships" | "reverse" | "split" | "trim"
-            | "ltrim" | "rtrim" | "left" | "right" => Err(PolygraphError::UnsupportedFeature {
-                feature: format!("function call: {name}()"),
-            }),
+            "keys" | "labels" | "relationships" | "reverse" | "split" => {
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: format!("function call: {name}()"),
+                })
+            }
+            "trim" => {
+                let arg = self.translate_expr(
+                    args.first().ok_or_else(|| PolygraphError::UnsupportedFeature {
+                        feature: "trim() requires an argument".to_string(),
+                    })?,
+                    extra,
+                )?;
+                // REPLACE(REPLACE(s, leading_spaces, ""), trailing_spaces, "")
+                // Use SPARQL REPLACE with regex
+                let trimmed = SparExpr::FunctionCall(
+                    Function::Replace,
+                    vec![arg, SparExpr::Literal(SparLit::new_simple_literal("^\\s+|\\s+$")), SparExpr::Literal(SparLit::new_simple_literal(""))],
+                );
+                Ok(trimmed)
+            }
+            "ltrim" => {
+                let arg = self.translate_expr(
+                    args.first().ok_or_else(|| PolygraphError::UnsupportedFeature {
+                        feature: "ltrim() requires an argument".to_string(),
+                    })?,
+                    extra,
+                )?;
+                Ok(SparExpr::FunctionCall(
+                    Function::Replace,
+                    vec![arg, SparExpr::Literal(SparLit::new_simple_literal("^\\s+")), SparExpr::Literal(SparLit::new_simple_literal(""))],
+                ))
+            }
+            "rtrim" => {
+                let arg = self.translate_expr(
+                    args.first().ok_or_else(|| PolygraphError::UnsupportedFeature {
+                        feature: "rtrim() requires an argument".to_string(),
+                    })?,
+                    extra,
+                )?;
+                Ok(SparExpr::FunctionCall(
+                    Function::Replace,
+                    vec![arg, SparExpr::Literal(SparLit::new_simple_literal("\\s+$")), SparExpr::Literal(SparLit::new_simple_literal(""))],
+                ))
+            }
+            "left" => {
+                // left(s, n) → SUBSTR(s, 1, n)
+                let s_arg = self.translate_expr(
+                    args.first().ok_or_else(|| PolygraphError::UnsupportedFeature { feature: "left() requires arguments".to_string() })?,
+                    extra,
+                )?;
+                let n_arg = self.translate_expr(
+                    args.get(1).ok_or_else(|| PolygraphError::UnsupportedFeature { feature: "left() requires 2 arguments".to_string() })?,
+                    extra,
+                )?;
+                Ok(SparExpr::FunctionCall(Function::SubStr, vec![
+                    s_arg,
+                    SparExpr::Literal(SparLit::new_typed_literal("1", NamedNode::new_unchecked(XSD_INTEGER))),
+                    n_arg,
+                ]))
+            }
+            "right" => {
+                // right(s, n) → SUBSTR(s, STRLEN(s) - n + 1, n)
+                let s_arg = self.translate_expr(
+                    args.first().ok_or_else(|| PolygraphError::UnsupportedFeature { feature: "right() requires arguments".to_string() })?,
+                    extra,
+                )?;
+                let n_arg = self.translate_expr(
+                    args.get(1).ok_or_else(|| PolygraphError::UnsupportedFeature { feature: "right() requires 2 arguments".to_string() })?,
+                    extra,
+                )?;
+                // start = strlen(s) - n + 1
+                let strlen = SparExpr::FunctionCall(Function::StrLen, vec![s_arg.clone()]);
+                let offset = SparExpr::Add(
+                    Box::new(SparExpr::Subtract(Box::new(strlen), Box::new(n_arg.clone()))),
+                    Box::new(SparExpr::Literal(SparLit::new_typed_literal("1", NamedNode::new_unchecked(XSD_INTEGER)))),
+                );
+                Ok(SparExpr::FunctionCall(Function::SubStr, vec![s_arg, offset, n_arg]))
+            }
+            "toboolean" => {
+                // toBoolean(v): identity for booleans, string-to-bool for strings,
+                // null for invalid strings, error for non-string/non-bool.
+                // SPARQL: xsd:boolean(STR(v)) — works for "true"/"false" strings and
+                // boolean literals; produces error (→ null) for invalid strings.
+                let arg = self.translate_expr(
+                    args.first().ok_or_else(|| PolygraphError::UnsupportedFeature { feature: "toBoolean() requires an argument".to_string() })?,
+                    extra,
+                )?;
+                Ok(SparExpr::FunctionCall(
+                    Function::Custom(NamedNode::new_unchecked(XSD_BOOLEAN)),
+                    vec![SparExpr::FunctionCall(Function::Str, vec![arg])],
+                ))
+            }
             "range" => {
                 // range(start, end [, step]) → list of integers.
                 // Pre-evaluate when arguments are literal integers.
@@ -4568,9 +4696,9 @@ impl TranslationState {
                 NamedNode::new_unchecked(XSD_INTEGER),
             )),
             Literal::Float(f) => {
-                // Format floats in Cypher/Neo4j style using Rust's {:?} formatter which
-                // produces "1.0", "1.5", "1.2635e305", "-0.0", "NaN" etc.
-                let s = format!("{f:?}");
+                // Format floats in Cypher/Neo4j compatible style via cypher_float_str:
+                // uses decimal notation in [-6..+9] exponent range, scientific otherwise.
+                let s = cypher_float_str(*f);
                 Ok(SparLit::new_typed_literal(s, NamedNode::new_unchecked(XSD_DOUBLE)))
             }
             Literal::String(s) => Ok(SparLit::new_simple_literal(s.clone())),
@@ -4968,16 +5096,104 @@ fn try_const_fold_arith(op: char, la: &SparExpr, lb: &SparExpr) -> Option<SparEx
     None
 }
 
+/// Format a float value in Cypher / Neo4j compatible style:
+/// - `-0.0` normalises to `0.0`
+/// - small-magnitude values (exponent -6 to +9) use decimal notation
+/// - very large / very small values use `1.23e4` / `1.23e-5` style
+fn cypher_float_str(f: f64) -> String {
+    // Neg-zero normalisation
+    if f == 0.0 {
+        return "0.0".to_string();
+    }
+    // Use Rust Debug ("{:?}") as the base, which gives the shortest round-trip decimal.
+    let s = format!("{f:?}");
+    // Handle cases where Debug gives scientific notation like "1e-5" or "1.5e300".
+    if let Some(e_pos) = s.to_lowercase().find('e') {
+        let mantissa = &s[..e_pos];
+        let exp_str = &s[e_pos + 1..];
+        if let Ok(exp) = exp_str.parse::<i32>() {
+            // Cypher decimal range: -6 ≤ exp ≤ 9
+            if exp >= -6 && exp <= 9 {
+                // Expand to decimal. Build mantissa digits.
+                let neg = mantissa.starts_with('-');
+                let mant_abs = if neg { &mantissa[1..] } else { mantissa };
+                let (int_part, frac_part) = if let Some(d) = mant_abs.find('.') {
+                    (&mant_abs[..d], &mant_abs[d + 1..])
+                } else {
+                    (mant_abs, "")
+                };
+                // Combine digits without decimal point
+                let all_digits = format!("{}{}", int_part, frac_part);
+                // Number of digits that belong to the integer part at position 0:
+                // int_part has int_part.len() digits; shift by exp
+                let int_len = int_part.len() as i32 + exp;
+                let result = if int_len >= all_digits.len() as i32 {
+                    // All digits are in integer part, add trailing zeros + ".0"
+                    let zeros = (int_len - all_digits.len() as i32) as usize;
+                    format!("{}{}{}.0",
+                        if neg { "-" } else { "" },
+                        all_digits,
+                        "0".repeat(zeros),
+                    )
+                } else if int_len <= 0 {
+                    // All digits are in fractional part, add leading zeros
+                    let leading = (-int_len) as usize;
+                    format!("{}0.{}{}",
+                        if neg { "-" } else { "" },
+                        "0".repeat(leading),
+                        all_digits,
+                    )
+                } else {
+                    // Split into integer and fractional
+                    let (i_digits, f_digits) = all_digits.split_at(int_len as usize);
+                    if f_digits.is_empty() {
+                        format!("{}{}.0", if neg { "-" } else { "" }, i_digits)
+                    } else {
+                        format!("{}{}.{}", if neg { "-" } else { "" }, i_digits, f_digits)
+                    }
+                };
+                return result;
+            }
+        }
+    }
+    // Already in decimal notation or exponent out of range — return as-is,
+    // but ensure there's always a decimal point + at least one fractional digit.
+    if !s.contains('.') && !s.to_lowercase().contains('e') {
+        return format!("{s}.0");
+    }
+    s
+}
+
 /// Serialize a list of expressions to a string like `[1, 2, 'foo']`.
 fn serialize_list_literal(elems: &[Expression]) -> String {
     let parts: Vec<String> = elems
         .iter()
         .map(|e| match e {
             Expression::Literal(Literal::Integer(n)) => n.to_string(),
-            Expression::Literal(Literal::Float(f)) => f.to_string(),
+            Expression::Literal(Literal::Float(f)) => cypher_float_str(*f),
             Expression::Literal(Literal::String(s)) => format!("'{s}'"),
             Expression::Literal(Literal::Boolean(b)) => b.to_string(),
+            Expression::Literal(Literal::Null) => "null".to_string(),
             Expression::List(inner) => serialize_list_literal(inner),
+            Expression::Map(pairs) => {
+                let entries: Vec<String> = pairs.iter().map(|(k, v)| {
+                    let val = match v {
+                        Expression::Literal(Literal::Integer(n)) => n.to_string(),
+                        Expression::Literal(Literal::Float(f)) => cypher_float_str(*f),
+                        Expression::Literal(Literal::String(s)) => format!("'{s}'"),
+                        Expression::Literal(Literal::Boolean(b)) => b.to_string(),
+                        Expression::Literal(Literal::Null) => "null".to_string(),
+                        _ => "?".to_string(),
+                    };
+                    format!("{k}: {val}")
+                }).collect();
+                format!("{{{}}}", entries.join(", "))
+            }
+            Expression::Negate(inner) => match inner.as_ref() {
+                Expression::Literal(Literal::Integer(n)) => format!("-{n}"),
+                Expression::Literal(Literal::Float(f)) => cypher_float_str(-f),
+                _ => "?".to_string(),
+            },
             _ => "?".to_string(),
         })
         .collect();
