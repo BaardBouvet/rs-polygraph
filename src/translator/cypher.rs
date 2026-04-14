@@ -3961,7 +3961,46 @@ impl TranslationState {
                     feature: "list slice expr[n..m] (Phase C)".to_string(),
                 })
             }
-            Expression::ListComprehension { variable: _, list: _, predicate: _, projection: _ } => {
+            Expression::ListComprehension { variable, list, predicate, projection } => {
+                // Attempt compile-time evaluation when the list is a literal or a known WITH-bound literal.
+                let items_opt: Option<Vec<Expression>> = match list.as_ref() {
+                    Expression::List(items) => Some(items.clone()),
+                    Expression::Variable(v) => {
+                        self.with_list_vars.get(v.as_str()).and_then(|e| {
+                            if let Expression::List(items) = e { Some(items.clone()) } else { None }
+                        })
+                    }
+                    _ => None,
+                };
+
+                if let Some(items) = items_opt {
+                    let mut results: Vec<String> = Vec::new();
+                    let mut all_ok = true;
+                    for item in &items {
+                        // Apply predicate filter if present (skip unresolvable predicates)
+                        if let Some(pred_expr) = predicate {
+                            // Only handle predicate that is a simple variable ref (no-op pass) or literal true
+                            match pred_expr.as_ref() {
+                                Expression::Literal(Literal::Boolean(true)) => {} // pass
+                                Expression::Variable(v) if v == variable.as_str() => {}
+                                _ => { all_ok = false; break; }
+                            }
+                        }
+                        if let Some(proj_expr) = projection {
+                            match eval_comprehension_item(variable, item, proj_expr) {
+                                Some(result) => results.push(result),
+                                None => { all_ok = false; break; }
+                            }
+                        } else {
+                            // No projection — emit each element as-is
+                            results.push(serialize_list_element(item));
+                        }
+                    }
+                    if all_ok {
+                        let serialized = format!("[{}]", results.join(", "));
+                        return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
+                    }
+                }
                 Err(PolygraphError::UnsupportedFeature {
                     feature: "list comprehension [x IN list WHERE pred | expr] (Phase C)".to_string(),
                 })
@@ -5291,6 +5330,95 @@ fn serialize_list_literal(elems: &[Expression]) -> String {
         })
         .collect();
     format!("[{}]", parts.join(", "))
+}
+
+/// Serialize a single expression as a list element (no outer brackets).
+fn serialize_list_element(e: &Expression) -> String {
+    match e {
+        Expression::Literal(Literal::Integer(n)) => n.to_string(),
+        Expression::Literal(Literal::Float(f)) => cypher_float_str(*f),
+        Expression::Literal(Literal::String(s)) => format!("'{s}'"),
+        Expression::Literal(Literal::Boolean(b)) => b.to_string(),
+        Expression::Literal(Literal::Null) => "null".to_string(),
+        Expression::List(inner) => serialize_list_literal(inner),
+        Expression::Negate(inner) => match inner.as_ref() {
+            Expression::Literal(Literal::Integer(n)) => format!("-{n}"),
+            Expression::Literal(Literal::Float(f)) => cypher_float_str(-f),
+            _ => "?".to_string(),
+        },
+        _ => "?".to_string(),
+    }
+}
+
+/// Evaluate a list comprehension projection for a single literal element.
+/// Returns the serialized string form of the result, or None if unevaluable.
+fn eval_comprehension_item(var: &str, val: &Expression, proj: &Expression) -> Option<String> {
+    match proj {
+        // Projection is just the variable → pass element through
+        Expression::Variable(v) if v == var => Some(serialize_list_element(val)),
+        // Projection is a function call
+        Expression::FunctionCall { name, args, .. } => {
+            if args.len() != 1 {
+                return None;
+            }
+            // Resolve the single argument (must be the variable or a literal)
+            let resolved = match &args[0] {
+                Expression::Variable(v) if v == var => val.clone(),
+                Expression::Literal(_) => args[0].clone(),
+                _ => return None,
+            };
+            let lit = match &resolved {
+                Expression::Literal(l) => l,
+                _ => return None,
+            };
+            match name.to_ascii_lowercase().as_str() {
+                "tointeger" => {
+                    let result = match lit {
+                        Literal::Integer(n) => Literal::Integer(*n),
+                        Literal::Float(f) => Literal::Integer(*f as i64),
+                        Literal::String(s) => {
+                            if let Ok(n) = s.parse::<i64>() {
+                                Literal::Integer(n)
+                            } else if let Ok(f) = s.parse::<f64>() {
+                                Literal::Integer(f as i64)
+                            } else {
+                                Literal::Null
+                            }
+                        }
+                        _ => Literal::Null,
+                    };
+                    Some(serialize_list_element(&Expression::Literal(result)))
+                }
+                "tofloat" => {
+                    let result = match lit {
+                        Literal::Integer(n) => Literal::Float(*n as f64),
+                        Literal::Float(f) => Literal::Float(*f),
+                        Literal::String(s) => {
+                            if let Ok(f) = s.parse::<f64>() {
+                                Literal::Float(f)
+                            } else {
+                                Literal::Null
+                            }
+                        }
+                        _ => Literal::Null,
+                    };
+                    Some(serialize_list_element(&Expression::Literal(result)))
+                }
+                "tostring" => {
+                    let s = match lit {
+                        Literal::Integer(n) => n.to_string(),
+                        Literal::Float(f) => cypher_float_str(*f),
+                        Literal::Boolean(b) => b.to_string(),
+                        Literal::String(s) => s.clone(),
+                        Literal::Null => return Some("null".to_string()),
+                    };
+                    Some(format!("'{s}'"))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Join two `GraphPattern`s, merging adjacent BGPs where possible.
