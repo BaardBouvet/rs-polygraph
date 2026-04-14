@@ -730,3 +730,41 @@ fn parse_call_clause() {
         panic!("first clause should be CALL");
     }
 }
+
+#[test]
+fn test_prec2_multiply_parens() {
+    use oxigraph::sparql::{QueryResults};
+    use oxigraph::store::Store;
+    let store = Store::new().unwrap();
+    let sparql = transpile("RETURN 4 * (2 + 3) * 2 AS c");
+    println!("SPARQL: {sparql}");
+    // Should be 40, not 14
+    #[allow(deprecated)]
+    match store.query(sparql.as_str()) {
+        Ok(QueryResults::Solutions(mut sols)) => {
+            let vars: Vec<_> = sols.variables().iter().map(|v| v.as_str().to_owned()).collect();
+            for sol_r in &mut sols {
+                if let Ok(sol) = sol_r {
+                    for v in &vars {
+                        println!("  {}: {:?}", v, sol.get(v.as_str()));
+                    }
+                }
+            }
+        }
+        Err(e) => println!("Error: {e}"),
+        _ => {}
+    }
+    // Also check the AST
+    let ast = Transpiler::parse_cypher("RETURN 4 * (2 + 3) * 2 AS c").unwrap();
+    println!("AST: {:?}", ast.clauses[0]);
+}
+
+#[test]
+fn debug_with_orderby_limit() {
+    let output = Transpiler::cypher_to_sparql(
+        "MATCH (a) WITH a ORDER BY a.bool, a.num LIMIT 4 RETURN a",
+        &polygraph::sparql_engine::GenericSparql11
+    ).unwrap();
+    println!("SPARQL:\n{}", output.sparql);
+    assert!(output.sparql.len() > 0);
+}
