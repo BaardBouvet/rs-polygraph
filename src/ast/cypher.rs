@@ -35,6 +35,8 @@ pub enum Clause {
     Delete(DeleteClause),
     Remove(RemoveClause),
     Call(CallClause),
+    /// UNION [ALL] separator between two query arms.
+    Union { all: bool },
 }
 
 /// A `MATCH` or `OPTIONAL MATCH` clause, with an optional inline `WHERE`.
@@ -292,6 +294,7 @@ pub enum CompOp {
     StartsWith,
     EndsWith,
     Contains,
+    RegexMatch,
 }
 
 // ── Literals ─────────────────────────────────────────────────────────────────

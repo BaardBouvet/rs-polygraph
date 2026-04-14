@@ -49,28 +49,36 @@ fn build_query(pair: Pair<Rule>) -> Result<CypherQuery, PolygraphError> {
 }
 
 fn build_statement(pair: Pair<Rule>) -> Result<CypherQuery, PolygraphError> {
-    // statement = { clause+ }
+    // statement = { clause+ ~ (union_marker ~ clause+)* }
     let mut clauses = Vec::new();
-    for clause_pair in pair.into_inner() {
-        // Each is Rule::clause, which wraps the concrete clause variant.
-        let inner = clause_pair
-            .into_inner()
-            .next()
-            .expect("clause always has an inner rule");
-        let clause = match inner.as_rule() {
-            Rule::match_clause => Clause::Match(build_match_clause(inner)?),
-            Rule::with_clause => Clause::With(build_with_clause(inner)?),
-            Rule::return_clause => Clause::Return(build_return_clause(inner)?),
-            Rule::unwind_clause => Clause::Unwind(build_unwind_clause(inner)?),
-            Rule::create_clause => Clause::Create(build_create_clause(inner)?),
-            Rule::merge_clause => Clause::Merge(build_merge_clause(inner)?),
-            Rule::set_clause => Clause::Set(build_set_clause(inner)?),
-            Rule::delete_clause => Clause::Delete(build_delete_clause(inner)?),
-            Rule::remove_clause => Clause::Remove(build_remove_clause(inner)?),
-            Rule::call_clause => Clause::Call(build_call_clause(inner)?),
-            _ => unreachable!("unexpected clause rule: {:?}", inner.as_rule()),
-        };
-        clauses.push(clause);
+    for child in pair.into_inner() {
+        match child.as_rule() {
+            Rule::clause => {
+                let inner = child
+                    .into_inner()
+                    .next()
+                    .expect("clause always has an inner rule");
+                let clause = match inner.as_rule() {
+                    Rule::match_clause => Clause::Match(build_match_clause(inner)?),
+                    Rule::with_clause => Clause::With(build_with_clause(inner)?),
+                    Rule::return_clause => Clause::Return(build_return_clause(inner)?),
+                    Rule::unwind_clause => Clause::Unwind(build_unwind_clause(inner)?),
+                    Rule::create_clause => Clause::Create(build_create_clause(inner)?),
+                    Rule::merge_clause => Clause::Merge(build_merge_clause(inner)?),
+                    Rule::set_clause => Clause::Set(build_set_clause(inner)?),
+                    Rule::delete_clause => Clause::Delete(build_delete_clause(inner)?),
+                    Rule::remove_clause => Clause::Remove(build_remove_clause(inner)?),
+                    Rule::call_clause => Clause::Call(build_call_clause(inner)?),
+                    _ => unreachable!("unexpected clause rule: {:?}", inner.as_rule()),
+                };
+                clauses.push(clause);
+            }
+            Rule::union_marker => {
+                let all = child.into_inner().any(|p| p.as_rule() == Rule::kw_ALL);
+                clauses.push(Clause::Union { all });
+            }
+            _ => {}
+        }
     }
     Ok(CypherQuery { clauses })
 }
@@ -691,9 +699,9 @@ fn build_sort_item(pair: Pair<Rule>) -> Result<SortItem, PolygraphError> {
         match inner.as_rule() {
             Rule::expression => expr = Some(build_expression(inner)?),
             Rule::sort_direction => {
-                // sort_direction = { kw_ASC | kw_DESC }
+                // sort_direction = { kw_ASCENDING | kw_DESCENDING | kw_ASC | kw_DESC }
                 let dir = inner.into_inner().next().expect("sort_direction has child");
-                descending = dir.as_rule() == Rule::kw_DESC;
+                descending = matches!(dir.as_rule(), Rule::kw_DESC | Rule::kw_DESCENDING);
             }
             _ => {}
         }
@@ -798,17 +806,18 @@ fn build_not_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
 }
 
 fn build_comparison_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    // comparison_expr = { add_sub_expr ~ comparison_suffix? }
+    // comparison_expr = { add_sub_expr ~ comparison_suffix* }
     let mut inners = pair.into_inner();
     let lhs_pair = inners.next().expect("comparison_expr has add_sub_expr");
-    let lhs = build_add_sub_expr(lhs_pair)?;
+    let mut current = build_add_sub_expr(lhs_pair)?;
 
-    if let Some(suffix) = inners.next() {
-        // comparison_suffix = { comp_op ~ add_sub_expr | kw_IS ... | kw_IN ... | ... }
-        build_comparison_suffix(lhs, suffix)
-    } else {
-        Ok(lhs)
+    // Apply each comparison suffix left-to-right.
+    // e.g. `(a AND b) IS NULL = (b AND a) IS NULL` becomes
+    // Comparison(IsNull((a AND b)), Eq, IsNull((b AND a)))
+    for suffix in inners {
+        current = build_comparison_suffix(current, suffix)?;
     }
+    Ok(current)
 }
 
 fn build_comparison_suffix(
@@ -835,11 +844,23 @@ fn build_comparison_suffix(
                     })
                 }
             };
+            // RHS is a comparison_expr (allows chained IS NULL, etc.)
             let rhs_pair = children
                 .next()
-                .expect("comp_op is followed by add_sub_expr");
-            let rhs = build_add_sub_expr(rhs_pair)?;
+                .expect("comp_op is followed by comparison_expr");
+            let rhs = build_comparison_expr(rhs_pair)?;
             Ok(Expression::Comparison(Box::new(lhs), op, Box::new(rhs)))
+        }
+        Rule::regex_op => {
+            let rhs_pair = children
+                .next()
+                .expect("=~ is followed by add_sub_expr");
+            let rhs = build_add_sub_expr(rhs_pair)?;
+            Ok(Expression::Comparison(
+                Box::new(lhs),
+                CompOp::RegexMatch,
+                Box::new(rhs),
+            ))
         }
         Rule::kw_IS => {
             // IS NULL or IS NOT NULL
@@ -1001,6 +1022,24 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
             let n: i64 = inner.as_str().parse().map_err(|_| PolygraphError::Parse {
                 span: inner.as_str().to_string(),
                 message: "integer literal out of range".to_string(),
+            })?;
+            Ok(Expression::Literal(Literal::Integer(n)))
+        }
+        Rule::hex_integer_literal => {
+            let s = inner.as_str();
+            let digits = &s[2..]; // strip "0x" / "0X"
+            let n = i64::from_str_radix(digits, 16).map_err(|_| PolygraphError::Parse {
+                span: s.to_string(),
+                message: "hexadecimal integer literal out of range".to_string(),
+            })?;
+            Ok(Expression::Literal(Literal::Integer(n)))
+        }
+        Rule::octal_integer_literal => {
+            let s = inner.as_str();
+            let digits = &s[2..]; // strip "0o" / "0O"
+            let n = i64::from_str_radix(digits, 8).map_err(|_| PolygraphError::Parse {
+                span: s.to_string(),
+                message: "octal integer literal out of range".to_string(),
             })?;
             Ok(Expression::Literal(Literal::Integer(n)))
         }

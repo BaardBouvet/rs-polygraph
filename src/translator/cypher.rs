@@ -606,6 +606,11 @@ struct TranslationState {
     /// translate_match_clause after all path patterns are joined (so the outer
     /// variables from preceding MATCH clauses are in scope for the FILTER).
     pending_match_filters: Vec<spargebra::algebra::Expression>,
+    /// Expressions to bind to fresh variables (for IsNull/IsNotNull on complex
+    /// boolean expressions). Each entry corresponds to a (var, expr) Extend binding
+    /// that should be applied BEFORE the filter using the bound variable.
+    pending_bind_checks: Vec<spargebra::algebra::Expression>,
+    pending_bind_targets: Vec<Variable>,
 }
 
 impl TranslationState {
@@ -628,7 +633,25 @@ impl TranslationState {
             map_vars: Default::default(),
             with_generation: 0,
             pending_match_filters: Vec::new(),
+            pending_bind_checks: Vec::new(),
+            pending_bind_targets: Vec::new(),
         }
+    }
+
+    /// Apply any pending `BIND(expr AS ?var)` extends accumulated by IsNull/IsNotNull
+    /// on complex boolean expressions.  Must be called BEFORE any Filter that
+    /// references those fresh variables.
+    fn apply_pending_binds(&mut self, mut pattern: GraphPattern) -> GraphPattern {
+        let exprs = std::mem::take(&mut self.pending_bind_checks);
+        let vars = std::mem::take(&mut self.pending_bind_targets);
+        for (var, expr) in vars.into_iter().zip(exprs.into_iter()) {
+            pattern = GraphPattern::Extend {
+                inner: Box::new(pattern),
+                variable: var,
+                expression: expr,
+            };
+        }
+        pattern
     }
 
     /// Build a [`ProjectionSchema`] from the columns collected during RETURN translation.
@@ -757,6 +780,66 @@ impl TranslationState {
         // Peephole: eliminate collect(X) AS list / UNWIND list AS var → passthrough.
         let clauses = eliminate_collect_unwind(&query.clauses);
 
+        // If the query contains UNION markers, split into sub-queries and join.
+        if clauses.iter().any(|c| matches!(c, Clause::Union { .. })) {
+            return self.translate_union_query(&clauses);
+        }
+
+        self.translate_clause_sequence(&clauses)
+    }
+
+    /// Split a clause list on `Clause::Union` markers, translate each arm with
+    /// fresh state, and combine with SPARQL `UNION`.  `UNION` (without ALL)
+    /// wraps the result in `DISTINCT`; `UNION ALL` preserves duplicates.
+    fn translate_union_query(
+        &mut self,
+        clauses: &[Clause],
+    ) -> Result<GraphPattern, PolygraphError> {
+        // Split into segments separated by Union markers; record whether each separator is UNION ALL.
+        let mut segments: Vec<Vec<Clause>> = Vec::new();
+        let mut all_flags: Vec<bool> = Vec::new();
+        let mut current_seg: Vec<Clause> = Vec::new();
+        for clause in clauses {
+            if let Clause::Union { all } = clause {
+                segments.push(std::mem::take(&mut current_seg));
+                all_flags.push(*all);
+            } else {
+                current_seg.push(clause.clone());
+            }
+        }
+        segments.push(current_seg);
+
+        // Translate each segment independently (fresh counters from shared state).
+        let mut combined: Option<(GraphPattern, bool)> = None;
+        for (i, seg) in segments.iter().enumerate() {
+            let arm = self.translate_clause_sequence(seg)?;
+            match combined {
+                None => combined = Some((arm, false)), // first arm, all_flags unused yet
+                Some((prev, _)) => {
+                    let all = all_flags[i - 1]; // separator BEFORE this arm
+                    let unioned = GraphPattern::Union {
+                        left: Box::new(prev),
+                        right: Box::new(arm),
+                    };
+                    combined = Some((unioned, all));
+                }
+            }
+        }
+        let (pattern, last_all) = combined.expect("at least one segment");
+        // UNION without ALL → DISTINCT
+        if !last_all && !all_flags.iter().all(|a| *a) {
+            Ok(GraphPattern::Distinct {
+                inner: Box::new(pattern),
+            })
+        } else {
+            Ok(pattern)
+        }
+    }
+
+    fn translate_clause_sequence(
+        &mut self,
+        clauses: &[Clause],
+    ) -> Result<GraphPattern, PolygraphError> {
         // Accumulate extra BGP triples emitted during expression translation.
         let mut extra_triples: Vec<TriplePattern> = Vec::new();
         // The pattern is built left-to-right over clauses.
@@ -767,13 +850,11 @@ impl TranslationState {
         // sub-select scope boundaries when nullable variables must be checked).
         let mut last_with_vars: Option<Vec<Variable>> = None;
 
-        for clause in &clauses {
+        for clause in clauses {
             match clause {
                 Clause::Match(m) => {
                     if m.optional {
                         // For OPTIONAL MATCH, use a local extra buffer so that
-                        // property-access triples from the WHERE clause go INSIDE
-                        // the LeftJoin (right side), not into the outer scope.
                         let mut opt_extra: Vec<TriplePattern> = Vec::new();
                         let (match_pattern, opt_filter, where_extra) =
                             self.translate_match_clause(m, &mut opt_extra)?;
@@ -1105,6 +1186,8 @@ impl TranslationState {
                     if let Some(wc) = &w.where_ {
                         let filter_expr =
                             self.translate_expr(&wc.expression, &mut extra_triples)?;
+                        // Apply any pending BIND extends from IsNull/IsNotNull on complex exprs.
+                        current = self.apply_pending_binds(current);
                         pending_filters.push(filter_expr);
                     }
                     // Update nullable_vars based on WITH output items.
@@ -1214,6 +1297,8 @@ impl TranslationState {
                     }
 
                     // Apply pre-group Extend bindings (non-aggregate expression aliases).
+                    // First apply any pending BIND extends from IsNull/IsNotNull on complex exprs.
+                    current = self.apply_pending_binds(current);
                     for (var, expr) in extends {
                         current = GraphPattern::Extend {
                             inner: Box::new(current),
@@ -1401,6 +1486,11 @@ impl TranslationState {
                         ),
                     });
                 }
+                Clause::Union { .. } => {
+                    // Should never appear here — translate_query routes UNION queries
+                    // to translate_union_query which splits on these markers first.
+                    unreachable!("Clause::Union in translate_clause_sequence")
+                }
             }
         }
 
@@ -1411,6 +1501,7 @@ impl TranslationState {
             };
             current = join_patterns(current, extra);
         }
+        current = self.apply_pending_binds(current);
         current = apply_filters(current, pending_filters.into_iter());
 
         Ok(current)
@@ -3125,9 +3216,19 @@ impl TranslationState {
                 // (e.g. count(*) * 10), record them via pending_aggs so that
                 // the caller can wire them up to a GROUP pattern.
                 //
-                // Always use a fresh var for the Extend target to avoid conflicts
-                // with pattern variables that may share the same alias name.
-                let result_var = self.fresh_var(item.alias.as_deref().unwrap_or("ret"));
+                // Use the alias name directly as the result var so that UNION arms
+                // with the same alias produce compatible SPARQL projection variables.
+                // Fall back to fresh_var when there is no alias or the alias
+                // conflicts with a node/edge pattern variable.
+                let alias_name = item.alias.as_deref().unwrap_or("");
+                let result_var = if !alias_name.is_empty()
+                    && !self.node_vars.contains(alias_name)
+                    && !self.edge_map.contains_key(alias_name)
+                {
+                    Variable::new_unchecked(alias_name.to_string())
+                } else {
+                    self.fresh_var(if alias_name.is_empty() { "ret" } else { alias_name })
+                };
                 self.pending_aggs.clear();
                 match self.translate_expr(other, extra) {
                     Ok(sparql_expr) => {
@@ -3275,30 +3376,40 @@ impl TranslationState {
                 Ok(SparExpr::Not(Box::new(e)))
             }
             Expression::IsNull(inner) => {
-                // IS NULL → !BOUND(?var)
+                // IS NULL → !BOUND(?var) for simple variable access
+                // For complex boolean expressions, use 3-valued-logic expansion.
                 let e = self.translate_expr(inner, extra)?;
-                let var = match e {
-                    SparExpr::Variable(v) => v,
+                match e {
+                    SparExpr::Variable(v) => Ok(SparExpr::Not(Box::new(SparExpr::Bound(v)))),
                     _ => {
-                        return Err(PolygraphError::UnsupportedFeature {
-                            feature: "IS NULL on non-variable expression".to_string(),
-                        })
+                        // For a complex expression `expr IS NULL`: use SPARQL
+                        // !BOUND(COALESCE(expr, "null")) workaround — BIND expr to
+                        // a fresh var.  We add the bind to a field on state and
+                        // apply it immediately in the clause sequence.
+                        // Simpler alternative: use IF(BOUND check) expansion.
+                        // For AND(a,b) IS NULL: ((!BOUND(a)||!BOUND(b)) && !a=false && !b=false)
+                        // For OR(a,b) IS NULL:  ((!BOUND(a)||!BOUND(b)) && !a=true  && !b=true)
+                        // For NOT(a) IS NULL:   a IS NULL
+                        // For general: bind fresh var then !BOUND
+                        self.pending_bind_checks.push(e.clone());
+                        let fresh = self.fresh_var("isnull");
+                        self.pending_bind_targets.push(fresh.clone());
+                        Ok(SparExpr::Not(Box::new(SparExpr::Bound(fresh))))
                     }
-                };
-                Ok(SparExpr::Not(Box::new(SparExpr::Bound(var))))
+                }
             }
             Expression::IsNotNull(inner) => {
-                // IS NOT NULL → BOUND(?var)
+                // IS NOT NULL → BOUND(?var) for simple variables
                 let e = self.translate_expr(inner, extra)?;
-                let var = match e {
-                    SparExpr::Variable(v) => v,
+                match e {
+                    SparExpr::Variable(v) => Ok(SparExpr::Bound(v)),
                     _ => {
-                        return Err(PolygraphError::UnsupportedFeature {
-                            feature: "IS NOT NULL on non-variable expression".to_string(),
-                        })
+                        self.pending_bind_checks.push(e.clone());
+                        let fresh = self.fresh_var("isnotnull");
+                        self.pending_bind_targets.push(fresh.clone());
+                        Ok(SparExpr::Bound(fresh))
                     }
-                };
-                Ok(SparExpr::Bound(var))
+                }
             }
             Expression::Comparison(lhs, op, rhs) => {
                 // Special case: relationship identity comparison (r = r2 or r <> r2).
@@ -3368,6 +3479,9 @@ impl TranslationState {
                     }
                     CompOp::Contains => {
                         SparExpr::FunctionCall(spargebra::algebra::Function::Contains, vec![l, r])
+                    }
+                    CompOp::RegexMatch => {
+                        SparExpr::FunctionCall(spargebra::algebra::Function::Regex, vec![l, r])
                     }
                 };
                 Ok(result)

@@ -14,7 +14,8 @@ COMMENT    = _{ "//" ~ (!NEWLINE ~ ANY)* ~ NEWLINE?
 
 // ----- Entry point ------------------------------------------
 query     = { SOI ~ statement ~ EOI }
-statement = { clause+ }
+statement = { clause+ ~ (union_marker ~ clause+)* }
+union_marker = { kw_UNION ~ kw_ALL? }
 clause    = { match_clause | unwind_clause | with_clause | return_clause
             | create_clause | merge_clause | set_clause
             | delete_clause | remove_clause | call_clause }
@@ -56,6 +57,10 @@ kw_DELETE   = @{ ^"DELETE"   ~ !ident_char }
 kw_DETACH   = @{ ^"DETACH"   ~ !ident_char }
 kw_REMOVE   = @{ ^"REMOVE"   ~ !ident_char }
 kw_CALL     = @{ ^"CALL"     ~ !ident_char }
+kw_UNION    = @{ ^"UNION"    ~ !ident_char }
+kw_ALL      = @{ ^"ALL"      ~ !ident_char }
+kw_ASCENDING  = @{ ^"ASCENDING"  ~ !ident_char }
+kw_DESCENDING = @{ ^"DESCENDING" ~ !ident_char }
 // Aggregate function keywords
 kw_COUNT    = @{ ^"count"    ~ !ident_char }
 kw_SUM      = @{ ^"sum"      ~ !ident_char }
@@ -71,7 +76,8 @@ keyword = _{
     kw_DISTINCT | kw_AND | kw_OR | kw_XOR | kw_NOT | kw_NULL |
     kw_TRUE | kw_FALSE | kw_IS | kw_IN | kw_CONTAINS | kw_STARTS | kw_ENDS |
     kw_ORDER | kw_BY | kw_SKIP | kw_LIMIT | kw_UNWIND |
-    kw_CREATE | kw_MERGE | kw_SET | kw_DELETE | kw_DETACH | kw_REMOVE | kw_CALL
+    kw_CREATE | kw_MERGE | kw_SET | kw_DELETE | kw_DETACH | kw_REMOVE | kw_CALL |
+    kw_UNION | kw_ALL | kw_ASCENDING | kw_DESCENDING
 }
 
 // ----- Identifiers & variables ------------------------------
@@ -107,7 +113,7 @@ yield_items    = { variable ~ ("," ~ variable)* }
 // ORDER BY / SKIP / LIMIT
 order_by_clause = { kw_ORDER ~ kw_BY ~ sort_item ~ ("," ~ sort_item)* }
 sort_item       = { expression ~ sort_direction? }
-sort_direction  = { kw_ASC | kw_DESC }
+sort_direction  = { kw_ASCENDING | kw_DESCENDING | kw_ASC | kw_DESC }
 skip_clause     = { kw_SKIP ~ expression }
 limit_clause    = { kw_LIMIT ~ expression }
 
@@ -158,14 +164,16 @@ or_expr             = { xor_expr    ~ (kw_OR   ~ xor_expr)* }
 xor_expr            = { and_expr    ~ (kw_XOR  ~ and_expr)* }
 and_expr            = { not_expr    ~ (kw_AND  ~ not_expr)* }
 not_expr            = { kw_NOT ~ not_expr | comparison_expr }
-comparison_expr     = { add_sub_expr ~ comparison_suffix? }
-comparison_suffix   = { comp_op ~ add_sub_expr
+comparison_expr     = { add_sub_expr ~ comparison_suffix* }
+comparison_suffix   = { comp_op ~ comparison_expr
+                      | regex_op ~ add_sub_expr
                       | kw_IS ~ kw_NOT ~ kw_NULL
                       | kw_IS ~ kw_NULL
                       | kw_IN ~ add_sub_expr
                       | kw_STARTS ~ kw_WITH ~ add_sub_expr
                       | kw_ENDS   ~ kw_WITH ~ add_sub_expr
                       | kw_CONTAINS ~ add_sub_expr }
+regex_op            = { "=~" }
 comp_op             = { "=" | "<>" | "<=" | ">=" | "<" | ">" }
 add_sub_expr        = { mul_div_expr ~ (add_sub_op ~ mul_div_expr)* }
 add_sub_op          = { "+" | "-" }
@@ -178,6 +186,8 @@ prop_expr           = { atom ~ property_lookup* }
 property_lookup     = { "." ~ prop_name }
 
 atom        = { float_literal
+              | hex_integer_literal
+              | octal_integer_literal
               | integer_literal
               | string_literal
               | boolean_literal
@@ -213,9 +223,12 @@ agg_func_name    = { kw_SUM | kw_AVG | kw_MIN | kw_MAX | kw_COLLECT }
 // ----- Literals ---------------------------------------------
 boolean_literal = { kw_TRUE | kw_FALSE }
 null_literal    = { kw_NULL }
-integer_literal = @{ ASCII_DIGIT+ }
-float_literal   = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+
-                    ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)? }
+hex_integer_literal   = @{ ("0x" | "0X") ~ ASCII_HEX_DIGIT+ }
+octal_integer_literal = @{ ("0o" | "0O") ~ ASCII_OCT_DIGIT+ }
+integer_literal       = @{ ASCII_DIGIT+ }
+// Float: allows forms like .1, 1.0, 1.0e3, 1e3
+float_literal   = @{ ASCII_DIGIT* ~ "." ~ ASCII_DIGIT+ ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
+                   | ASCII_DIGIT+ ~ ^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+ }
 string_literal  = @{ "\"" ~ double_str_char* ~ "\""
                    | "'"  ~ single_str_char* ~ "'"  }
 double_str_char = { !("\"" | "\\") ~ ANY | "\\" ~ ANY }
