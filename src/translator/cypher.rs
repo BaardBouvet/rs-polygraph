@@ -4017,10 +4017,40 @@ impl TranslationState {
                     feature: "nodes() requires a named path argument".to_string(),
                 })
             }
-            "keys" | "labels" | "relationships" | "range" | "reverse" | "split" | "trim"
+            "keys" | "labels" | "relationships" | "reverse" | "split" | "trim"
             | "ltrim" | "rtrim" | "left" | "right" => Err(PolygraphError::UnsupportedFeature {
                 feature: format!("function call: {name}()"),
             }),
+            "range" => {
+                // range(start, end [, step]) → list of integers.
+                // Pre-evaluate when arguments are literal integers.
+                let get_int = |e: &Expression| match e {
+                    Expression::Literal(Literal::Integer(n)) => Some(*n),
+                    _ => None,
+                };
+                let start = args.first().and_then(get_int);
+                let end_val = args.get(1).and_then(get_int);
+                let step = args.get(2).and_then(get_int).unwrap_or(1);
+                if let (Some(s), Some(e)) = (start, end_val) {
+                    if step == 0 {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: "range() with step=0".to_string(),
+                        });
+                    }
+                    let mut items = Vec::new();
+                    let mut i = s;
+                    while (step > 0 && i <= e) || (step < 0 && i >= e) {
+                        items.push(i.to_string());
+                        i += step;
+                    }
+                    let serialized = format!("[{}]", items.join(", "));
+                    Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)))
+                } else {
+                    Err(PolygraphError::UnsupportedFeature {
+                        feature: "range() with non-literal arguments".to_string(),
+                    })
+                }
+            }
             "last" => {
                 // last(r) / head(r) on a varlen relationship variable (*lower..upper):
                 // Emit two OPTIONAL triple patterns (forward and backward directions)
