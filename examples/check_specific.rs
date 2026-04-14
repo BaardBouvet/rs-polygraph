@@ -8,20 +8,26 @@ impl TargetEngine for TckEngine {
 }
 
 fn main() {
-    // Match4[5]: varlen with inline property predicate
-    let q5 = "MATCH (a:Artist)-[:WORKED_WITH* {year: 1988}]->(b:Artist)\nRETURN *";
-    // Match4[7]: bound relationship in varlen
-    let q7 = "MATCH ()-[r:EDGE]-()\nMATCH p = (n)-[*0..1]-()-[r]-()-[*0..1]-(m)\nRETURN count(p) AS c";
-    // Match7[12]: optional variable length
-    let q12 = "MATCH (a:A), (b:B)\nOPTIONAL MATCH (a)-[r*]-(b)\nWHERE r IS NULL AND a <> b\nRETURN b";
+    // Match4[8]: WITH [r1, r2] AS rs MATCH (first)-[rs*]->(second) 
+    let q = r#"MATCH ()-[r1]->()-[r2]->()
+WITH [r1, r2] AS rs
+  LIMIT 1
+MATCH (first)-[rs*]->(second)
+RETURN first, second"#;
     
-    for (name, q) in [("Match4[5]", q5), ("Match4[7]", q7), ("Match7[12]", q12)] {
-        println!("\n=== {} ===", name);
-        match Transpiler::cypher_to_sparql(q, &TckEngine) {
-            Ok(tr) => println!("SPARQL:\n{}", tr.sparql),
-            Err(e) => println!("TRANSLATION ERROR: {:?}", e),
-        }
+    match Transpiler::cypher_to_sparql(q, &TckEngine) {
+        Ok(tr) => {
+            let sparql = &tr.sparql;
+            println!("Length: {}", sparql.len());
+            // Print in 100-char chunks for readability
+            for (i, chunk) in sparql.as_bytes().chunks(100).enumerate() {
+                println!("[{}..{}] {}", i*100, (i+1)*100, std::str::from_utf8(chunk).unwrap());
+            }
+        },
+        Err(e) => println!("TRANSLATION ERROR: {:?}", e),
     }
 }
+
+
 
 

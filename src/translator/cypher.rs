@@ -976,17 +976,24 @@ impl TranslationState {
                         // The Property branch uses a fresh var when alias == base_var,
                         // so the project_vars contain the fresh name, not the alias.
                         // Build a rename map: alias → fresh_var for these cases.
+                        // IMPORTANT: only compare translatable_items (not list items),
+                        // since pvars is built from translatable_items first, then list
+                        // vars are appended. Zipping all items against pvars would
+                        // misalign when list items appear earlier in the original WITH.
                         let mut outer_renames: Vec<(Variable, Variable)> = Vec::new();
-                        if let Some(ref pvars) = project_vars {
-                            for (item, pvar) in items.iter().zip(pvars.iter()) {
-                                if let Some(ref alias) = item.alias {
-                                    if alias != pvar.as_str() {
-                                        // Projected var differs from the alias —
-                                        // need to rename after sub-select.
-                                        outer_renames.push((
-                                            Variable::new_unchecked(alias.clone()),
-                                            pvar.clone(),
-                                        ));
+                        if let crate::ast::cypher::ReturnItems::Explicit(ref ti) = as_return.items
+                        {
+                            if let Some(ref pvars) = project_vars {
+                                for (item, pvar) in ti.iter().zip(pvars.iter()) {
+                                    if let Some(ref alias) = item.alias {
+                                        if alias != pvar.as_str() {
+                                            // Projected var differs from the alias —
+                                            // need to rename after sub-select.
+                                            outer_renames.push((
+                                                Variable::new_unchecked(alias.clone()),
+                                                pvar.clone(),
+                                            ));
+                                        }
                                     }
                                 }
                             }
