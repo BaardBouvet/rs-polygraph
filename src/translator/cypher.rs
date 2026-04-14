@@ -589,6 +589,9 @@ struct TranslationState {
     /// Variable-length relationship variables with their (lower, upper) hop bounds.
     /// Used to support `last(r)` / `head(r)` on bounded varlen paths.
     varlen_rel_scope: std::collections::HashMap<String, (u64, u64)>,
+    /// Virtual map aliases from `head(collect({k: v})) AS alias`.
+    /// Maps alias name → {key → SPARQL variable holding the min-aggregated value}.
+    map_vars: std::collections::HashMap<String, std::collections::HashMap<String, Variable>>,
 }
 
 impl TranslationState {
@@ -608,6 +611,7 @@ impl TranslationState {
             projected_columns: Vec::new(),
             return_distinct: false,
             varlen_rel_scope: Default::default(),
+            map_vars: Default::default(),
         }
     }
 
@@ -2559,6 +2563,12 @@ impl TranslationState {
                 // n.prop or r.prop [AS alias] → add BGP triple + projected var.
                 let base_var = self.extract_variable(base_expr)?;
                 let var_name = base_var.as_str().to_string();
+                // Check if base is a virtual map alias from head(collect({...})).
+                if let Some(key_map) = self.map_vars.get(&var_name) {
+                    if let Some(v) = key_map.get(key.as_str()).cloned() {
+                        return Ok((v, None, None));
+                    }
+                }
                 // Use alias when it doesn't conflict with the base variable name.
                 // When alias == base_var (e.g. `a.name AS a`), always use a fresh var
                 // to avoid self-referential triple `?a <name> ?a`.  The WITH handler
@@ -2695,6 +2705,65 @@ impl TranslationState {
                 Ok((result_var.clone(), Some((result_var, sparql_agg)), None))
             }
             other => {
+                // Peephole: `head(collect({k1: v1, k2: v2, ...})) AS alias`
+                // → MIN-aggregate each key value, register alias→{key→var} in map_vars.
+                // This allows `alias.k` property accesses in downstream clauses.
+                if let Expression::FunctionCall { name, args, .. } = other {
+                    if (name.eq_ignore_ascii_case("head") || name.eq_ignore_ascii_case("last"))
+                        && args.len() == 1
+                    {
+                        if let Expression::Aggregate(AggregateExpr::Collect {
+                            expr: collect_expr,
+                            ..
+                        }) = &args[0]
+                        {
+                            if let Expression::Map(pairs) = collect_expr.as_ref() {
+                                if let Some(alias) = &item.alias {
+                                    if !pairs.is_empty() {
+                                        let mut key_vars: std::collections::HashMap<
+                                            String,
+                                            Variable,
+                                        > = Default::default();
+                                        let mut first_result: Option<(
+                                            Variable,
+                                            Option<(Variable, AggregateExpression)>,
+                                            Option<SparExpr>,
+                                        )> = None;
+                                        for (key, val_expr) in pairs {
+                                            let v_key = self.fresh_var(&format!(
+                                                "{alias}__{key}"
+                                            ));
+                                            let inner =
+                                                self.translate_expr(val_expr, extra)?;
+                                            let min_agg = AggregateExpression::FunctionCall {
+                                                name: AggregateFunction::Min,
+                                                expr: inner,
+                                                distinct: false,
+                                            };
+                                            key_vars.insert(key.clone(), v_key.clone());
+                                            if first_result.is_none() {
+                                                first_result = Some((
+                                                    v_key.clone(),
+                                                    Some((v_key, min_agg)),
+                                                    None,
+                                                ));
+                                            } else {
+                                                // Additional keys go into pending_aggs so
+                                                // translate_return_clause wires them up.
+                                                self.pending_aggs.push((v_key, min_agg));
+                                            }
+                                        }
+                                        self.map_vars.insert(alias.clone(), key_vars);
+                                        if let Some(res) = first_result {
+                                            return Ok(res);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // General expression: try to translate as SPARQL expression,
                 // and bind it via Extend. If the expression contains aggregates
                 // (e.g. count(*) * 10), record them via pending_aggs so that
@@ -2765,6 +2834,12 @@ impl TranslationState {
             Expression::Property(base_expr, key) => {
                 let base_var = self.extract_variable(base_expr)?;
                 let var_name = base_var.as_str().to_string();
+                // Check if base is a virtual map alias from head(collect({...})).
+                if let Some(key_map) = self.map_vars.get(&var_name) {
+                    if let Some(v) = key_map.get(key.as_str()).cloned() {
+                        return Ok(SparExpr::Variable(v));
+                    }
+                }
                 let fresh = self.fresh_var(&format!("{}_{}", var_name, key));
                 // Check if `base_var` is a relationship variable (edge_map hit).
                 if let Some(edge) = self.edge_map.get(&var_name).cloned() {
