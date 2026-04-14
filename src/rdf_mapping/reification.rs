@@ -11,7 +11,6 @@
 ///       rdf:object    ?b ;
 ///       <base:since>  ?since .
 /// ```
-
 use spargebra::term::{NamedNode, TermPattern, TriplePattern, Variable};
 
 // ── Well-known IRIs ───────────────────────────────────────────────────────────
@@ -24,11 +23,11 @@ const RDF_OBJECT: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#object";
 
 fn rdf(local: &str) -> NamedNode {
     NamedNode::new_unchecked(match local {
-        "type"      => RDF_TYPE,
+        "type" => RDF_TYPE,
         "Statement" => RDF_STATEMENT,
-        "subject"   => RDF_SUBJECT,
+        "subject" => RDF_SUBJECT,
         "predicate" => RDF_PREDICATE,
-        "object"    => RDF_OBJECT,
+        "object" => RDF_OBJECT,
         _ => unreachable!("unknown rdf: local {local}"),
     })
 }
@@ -51,10 +50,26 @@ pub fn structural_triples(
 ) -> Vec<TriplePattern> {
     let r: TermPattern = reif_var.clone().into();
     vec![
-        TriplePattern { subject: r.clone(), predicate: rdf("type").into(),      object: rdf("Statement").into() },
-        TriplePattern { subject: r.clone(), predicate: rdf("subject").into(),    object: src },
-        TriplePattern { subject: r.clone(), predicate: rdf("predicate").into(),  object: pred.into() },
-        TriplePattern { subject: r,         predicate: rdf("object").into(),     object: dst },
+        TriplePattern {
+            subject: r.clone(),
+            predicate: rdf("type").into(),
+            object: rdf("Statement").into(),
+        },
+        TriplePattern {
+            subject: r.clone(),
+            predicate: rdf("subject").into(),
+            object: src,
+        },
+        TriplePattern {
+            subject: r.clone(),
+            predicate: rdf("predicate").into(),
+            object: pred.into(),
+        },
+        TriplePattern {
+            subject: r,
+            predicate: rdf("object").into(),
+            object: dst,
+        },
     ]
 }
 
@@ -122,7 +137,10 @@ mod tests {
     fn structural_triples_first_is_rdf_type() {
         let ts = structural_triples(&var("r"), var_tp("a"), iri("http://ex/KNOWS"), var_tp("b"));
         let pred_str = ts[0].predicate.to_string();
-        assert!(pred_str.contains("type") || pred_str.contains("#type"), "got: {pred_str}");
+        assert!(
+            pred_str.contains("type") || pred_str.contains("#type"),
+            "got: {pred_str}"
+        );
     }
 
     #[test]
@@ -144,7 +162,7 @@ mod tests {
     #[test]
     fn property_triples_count() {
         let props = vec![
-            (iri("http://ex/since"),  var_tp("since")),
+            (iri("http://ex/since"), var_tp("since")),
             (iri("http://ex/weight"), var_tp("weight")),
         ];
         let ts = property_triples(&var("r"), &props);
@@ -163,7 +181,10 @@ mod tests {
     fn all_triples_structural_plus_property() {
         let props = vec![(iri("http://ex/since"), var_tp("since"))];
         let ts = all_triples(
-            &var("r"), var_tp("a"), iri("http://ex/KNOWS"), var_tp("b"),
+            &var("r"),
+            var_tp("a"),
+            iri("http://ex/KNOWS"),
+            var_tp("b"),
             &props,
         );
         // 4 structural + 1 property
@@ -173,7 +194,11 @@ mod tests {
     #[test]
     fn all_triples_display_contains_rdf_subject() {
         let ts = structural_triples(&var("r"), var_tp("a"), iri("http://ex/KNOWS"), var_tp("b"));
-        let combined = ts.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" ");
+        let combined = ts
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
             combined.contains("subject") || combined.contains("rdf-syntax"),
             "got: {combined}"

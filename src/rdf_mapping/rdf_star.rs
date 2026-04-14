@@ -8,7 +8,6 @@
 ///
 /// The `rdf-star` feature on `spargebra` must be enabled (it is, via
 /// `Cargo.toml`).
-
 use spargebra::term::{NamedNode, TermPattern, TriplePattern};
 
 /// Produce the annotated triple pattern `<<?src <pred> ?dst>> <prop_iri> ?prop_var`
@@ -86,8 +85,11 @@ mod tests {
     #[test]
     fn annotated_triple_subject_is_triple_pattern() {
         let tp = annotated_triple(
-            var("a"), iri("http://ex/KNOWS"), var("b"),
-            iri("http://ex/since"), var("since"),
+            var("a"),
+            iri("http://ex/KNOWS"),
+            var("b"),
+            iri("http://ex/since"),
+            var("since"),
         );
         assert!(matches!(tp.subject, TermPattern::Triple(_)));
     }
@@ -95,8 +97,11 @@ mod tests {
     #[test]
     fn annotated_triple_object_is_variable() {
         let tp = annotated_triple(
-            var("a"), iri("http://ex/KNOWS"), var("b"),
-            iri("http://ex/since"), var("since"),
+            var("a"),
+            iri("http://ex/KNOWS"),
+            var("b"),
+            iri("http://ex/since"),
+            var("since"),
         );
         assert!(matches!(tp.object, TermPattern::Variable(_)));
     }
@@ -104,7 +109,9 @@ mod tests {
     #[test]
     fn annotated_triple_object_is_literal() {
         let tp = annotated_triple(
-            var("a"), iri("http://ex/KNOWS"), var("b"),
+            var("a"),
+            iri("http://ex/KNOWS"),
+            var("b"),
             iri("http://ex/since"),
             TermPattern::Literal(Literal::new_simple_literal("2020")),
         );
@@ -114,7 +121,7 @@ mod tests {
     #[test]
     fn all_property_triples_count() {
         let props = vec![
-            (iri("http://ex/since"),  var("since")),
+            (iri("http://ex/since"), var("since")),
             (iri("http://ex/weight"), var("weight")),
         ];
         let result = all_property_triples(var("a"), iri("http://ex/KNOWS"), var("b"), &props);
@@ -128,7 +135,9 @@ mod tests {
             (iri("http://ex/p2"), var("v2")),
         ];
         let result = all_property_triples(var("a"), iri("http://ex/KNOWS"), var("b"), &props);
-        assert!(result.iter().all(|tp| matches!(tp.subject, TermPattern::Triple(_))));
+        assert!(result
+            .iter()
+            .all(|tp| matches!(tp.subject, TermPattern::Triple(_))));
         // Both annotation subjects should display identically.
         assert_eq!(result[0].subject.to_string(), result[1].subject.to_string());
     }
@@ -136,8 +145,11 @@ mod tests {
     #[test]
     fn display_contains_rdf_star_syntax() {
         let tp = annotated_triple(
-            var("a"), iri("http://ex/KNOWS"), var("b"),
-            iri("http://ex/since"), var("since"),
+            var("a"),
+            iri("http://ex/KNOWS"),
+            var("b"),
+            iri("http://ex/since"),
+            var("since"),
         );
         let s = tp.to_string();
         assert!(s.contains("<<") && s.contains(">>"), "got: {s}");

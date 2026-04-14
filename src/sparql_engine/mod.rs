@@ -1,9 +1,5 @@
 use crate::error::PolygraphError;
 
-pub mod rdf_star;
-
-pub use rdf_star::RdfStar;
-
 /// Describes the SPARQL capabilities of a target engine.
 ///
 /// Implementors are used by the translator to select the correct encoding

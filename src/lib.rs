@@ -9,8 +9,8 @@
 //! - Phase 4: ORDER BY/SKIP/LIMIT, aggregation, UNWIND, variable-length paths,
 //!   multi-type relationships, IN list literals, write clause stubs
 //!
-//! Use [`target::RdfStar`] for engines that support SPARQL-star natively, or
-//! [`target::GenericSparql11`] for standard SPARQL 1.1.
+//! Use [`sparql_engine::RdfStar`] for engines that support SPARQL-star natively, or
+//! [`sparql_engine::GenericSparql11`] for standard SPARQL 1.1.
 //!
 //! # Example
 //!
@@ -26,7 +26,7 @@ pub mod error;
 pub mod parser;
 pub mod rdf_mapping;
 pub mod result_mapping;
-pub mod target;
+pub mod sparql_engine;
 pub mod translator;
 
 pub use error::PolygraphError;
@@ -60,7 +60,7 @@ impl Transpiler {
     /// # Example
     ///
     /// ```rust
-    /// use polygraph::{Transpiler, target::GenericSparql11};
+    /// use polygraph::{Transpiler, sparql_engine::GenericSparql11};
     ///
     /// let engine = GenericSparql11;
     /// let output = Transpiler::cypher_to_sparql(
@@ -71,10 +71,11 @@ impl Transpiler {
     /// ```
     pub fn cypher_to_sparql(
         cypher: &str,
-        engine: &dyn target::TargetEngine,
+        engine: &dyn sparql_engine::TargetEngine,
     ) -> Result<TranspileOutput, PolygraphError> {
         let ast = parser::parse_cypher(cypher)?;
-        let result = translator::cypher::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
+        let result =
+            translator::cypher::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
         let sparql = engine.finalize(result.sparql)?;
         Ok(TranspileOutput {
             sparql,
@@ -94,7 +95,7 @@ impl Transpiler {
     /// # Example
     ///
     /// ```rust
-    /// use polygraph::{Transpiler, target::GenericSparql11};
+    /// use polygraph::{Transpiler, sparql_engine::GenericSparql11};
     ///
     /// let engine = GenericSparql11;
     /// let output = Transpiler::gql_to_sparql(
@@ -105,10 +106,11 @@ impl Transpiler {
     /// ```
     pub fn gql_to_sparql(
         gql: &str,
-        engine: &dyn target::TargetEngine,
+        engine: &dyn sparql_engine::TargetEngine,
     ) -> Result<TranspileOutput, PolygraphError> {
         let ast = parser::parse_gql(gql)?;
-        let result = translator::gql::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
+        let result =
+            translator::gql::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
         let sparql = engine.finalize(result.sparql)?;
         Ok(TranspileOutput {
             sparql,

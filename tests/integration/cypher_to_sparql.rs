@@ -385,14 +385,14 @@ fn rdf_star_no_rel_props_same_as_reification_for_simple_path() {
 
 #[test]
 fn rdf_star_adapter_reports_rdf_star_true() {
-    use polygraph::target::TargetEngine;
+    use polygraph::sparql_engine::TargetEngine;
     let engine = RdfStar::default();
     assert!(engine.supports_rdf_star());
 }
 
 #[test]
 fn generic_sparql11_reports_rdf_star_false() {
-    use polygraph::target::TargetEngine;
+    use polygraph::sparql_engine::TargetEngine;
     assert!(!ENGINE.supports_rdf_star());
 }
 
