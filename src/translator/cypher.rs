@@ -2187,6 +2187,35 @@ impl TranslationState {
                         .insert(var_name.clone(), (lower, upper));
                 }
             }
+            // For unbounded variable-length paths (no upper bound), add extra
+            // rows for self-loop nodes, since Cypher semantics count distinct
+            // PATHS (not just endpoint pairs) and a self-loop on the endpoint
+            // creates a second path.  SPARQL property paths only return distinct
+            // endpoint pairs, so the extra row is emitted via a UNION that requires
+            // a self-loop triple at the far endpoint.
+            let is_unbounded = rel.range.as_ref().map_or(false, |r| r.upper.is_none());
+            let far_end: &TermPattern = match rel.direction {
+                Direction::Left => src,
+                _ => dst,
+            };
+            if is_unbounded {
+                if let TermPattern::Variable(far_var) = far_end {
+                    let sl_pred_var = self.fresh_var("sl_pred");
+                    let sl_gp = GraphPattern::Bgp {
+                        patterns: vec![TriplePattern {
+                            subject: far_var.clone().into(),
+                            predicate: sl_pred_var.into(),
+                            object: far_var.clone().into(),
+                        }],
+                    };
+                    let path_with_sl = join_patterns(path_gp.clone(), sl_gp);
+                    path_patterns.push(GraphPattern::Union {
+                        left: Box::new(path_gp),
+                        right: Box::new(path_with_sl),
+                    });
+                    return Ok(());
+                }
+            }
             path_patterns.push(path_gp);
             Ok(())
         } else {
