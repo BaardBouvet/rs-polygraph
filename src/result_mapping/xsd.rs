@@ -77,7 +77,7 @@ mod tests {
             datatype: Some(XSD_DOUBLE.into()),
             language: None,
         };
-        assert_eq!(rdf_term_to_cypher(&term, BASE), CypherValue::Float(3.14));
+        assert_eq!(rdf_term_to_cypher(&term, BASE), CypherValue::Float(std::f64::consts::PI));
     }
 
     #[test]

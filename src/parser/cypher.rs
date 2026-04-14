@@ -1020,7 +1020,7 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
             Ok(Expression::Literal(Literal::String(s)))
         }
         Rule::boolean_literal => {
-            let b = inner.as_str().to_ascii_lowercase() == "true";
+            let b = inner.as_str().eq_ignore_ascii_case("true");
             Ok(Expression::Literal(Literal::Boolean(b)))
         }
         Rule::null_literal => Ok(Expression::Literal(Literal::Null)),

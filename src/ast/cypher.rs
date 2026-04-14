@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn expression_literal_variants() {
         let _ = Expression::Literal(Literal::Integer(42));
-        let _ = Expression::Literal(Literal::Float(3.14));
+        let _ = Expression::Literal(Literal::Float(std::f64::consts::PI));
         let _ = Expression::Literal(Literal::String("hello".into()));
         let _ = Expression::Literal(Literal::Boolean(false));
         let _ = Expression::Literal(Literal::Null);
