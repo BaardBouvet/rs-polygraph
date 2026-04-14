@@ -309,7 +309,7 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                                 // Check: are all free terms individually covered by non_agg_items?
                                 free_terms.iter().any(|ft| {
                                     // ft is a free term; check if it matches any non_agg item exactly
-                                    !non_agg_items.iter().any(|ni| *ni == *ft)
+                                    !non_agg_items.contains(ft)
                                 })
                             };
                             if ambiguous {
@@ -844,7 +844,7 @@ impl TranslationState {
                     // Flush any pending extra triples.
                     if !extra_triples.is_empty() {
                         let extra = GraphPattern::Bgp {
-                            patterns: extra_triples.drain(..).collect(),
+                            patterns: std::mem::take(&mut extra_triples),
                         };
                         current = join_patterns(current, extra);
                     }
@@ -1133,7 +1133,7 @@ impl TranslationState {
                     // Flush pending extra triples before projection.
                     if !extra_triples.is_empty() {
                         let extra = GraphPattern::Bgp {
-                            patterns: extra_triples.drain(..).collect(),
+                            patterns: std::mem::take(&mut extra_triples),
                         };
                         current = join_patterns(current, extra);
                     }
@@ -1619,11 +1619,8 @@ impl TranslationState {
                     // variable in each UNION branch.  The canonical form uses the actual
                     // stored-triple component order (subject, predicate, object) so that
                     // forward and reverse matches of the same triple yield the same ID.
-                    let (fwd, bwd) = if rel.variable.is_some() {
-                        let eid = Variable::new_unchecked(format!(
-                            "__eid_{}",
-                            rel.variable.as_ref().unwrap()
-                        ));
+                    let (fwd, bwd) = if let Some(rel_var_name) = &rel.variable {
+                        let eid = Variable::new_unchecked(format!("__eid_{}", rel_var_name));
                         let pred_expr = SparExpr::Variable(pred_var.clone());
                         let fwd_eid = build_edge_id_expr(src, pred_expr.clone(), dst);
                         let bwd_eid = build_edge_id_expr(dst, pred_expr, src);
@@ -1979,11 +1976,8 @@ impl TranslationState {
                 };
                 // If the relationship has a name, BIND a synthetic edge-identity
                 // variable in each UNION branch (canonical stored-triple order).
-                let (fwd, bwd) = if rel.variable.is_some() {
-                    let eid = Variable::new_unchecked(format!(
-                        "__eid_{}",
-                        rel.variable.as_ref().unwrap()
-                    ));
+                let (fwd, bwd) = if let Some(rel_var_name) = &rel.variable {
+                    let eid = Variable::new_unchecked(format!("__eid_{}", rel_var_name));
                     let pred_expr = SparExpr::Literal(SparLit::new_simple_literal(pred.as_str()));
                     let fwd_eid = build_edge_id_expr(src, pred_expr.clone(), dst);
                     let bwd_eid = build_edge_id_expr(dst, pred_expr, src);
@@ -2119,6 +2113,7 @@ impl TranslationState {
     /// Emit a bounded path `*lower..upper` as a UNION of explicit fixed-length chain patterns.
     ///
     /// Each hop-count from `lower` to `upper` produces one alternative in the UNION.
+    #[allow(clippy::too_many_arguments)]
     fn emit_bounded_path_union(
         &mut self,
         rel: &RelationshipPattern,
@@ -2241,7 +2236,7 @@ impl TranslationState {
 
                         let mut arm = hop_parts
                             .into_iter()
-                            .reduce(|a, b| join_patterns(a, b))
+                            .reduce(join_patterns)
                             .unwrap_or_else(empty_bgp);
 
                         // Pairwise edge-uniqueness: FILTER NOT(si=sj AND oi=oj)
@@ -2305,7 +2300,7 @@ impl TranslationState {
                     }
                     let mut chain = parts
                         .into_iter()
-                        .reduce(|a, b| join_patterns(a, b))
+                        .reduce(join_patterns)
                         .unwrap_or_else(empty_bgp);
                     // For untyped, filter out literal endpoints.
                     if is_untyped {
@@ -2408,7 +2403,7 @@ impl TranslationState {
 
             let chain = parts
                 .into_iter()
-                .reduce(|a, b| join_patterns(a, b))
+                .reduce(join_patterns)
                 .unwrap_or_else(empty_bgp);
             union_patterns.push(chain);
         }
@@ -2427,6 +2422,7 @@ impl TranslationState {
     // ── RETURN clause ─────────────────────────────────────────────────────────
 
     /// Returns `(extra_bgp_triples, Some(projected_vars) | None for *, distinct_flag, aggregates, pre_extends, post_extends)`.
+    #[allow(clippy::type_complexity)]
     fn translate_return_clause(
         &mut self,
         ret: &ReturnClause,
@@ -2501,7 +2497,7 @@ impl TranslationState {
                     // Drain any extra aggregates pushed during item translation
                     // (e.g. the COUNT auxiliary for AVG null-on-empty semantics).
                     if !self.pending_aggs.is_empty() {
-                        aggregates.extend(self.pending_aggs.drain(..));
+                        aggregates.append(&mut self.pending_aggs);
                     }
                 }
                 Ok((
@@ -2516,6 +2512,7 @@ impl TranslationState {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn translate_return_item(
         &mut self,
         item: &ReturnItem,
@@ -2680,7 +2677,7 @@ impl TranslationState {
                 //
                 // Always use a fresh var for the Extend target to avoid conflicts
                 // with pattern variables that may share the same alias name.
-                let result_var = self.fresh_var(&item.alias.as_deref().unwrap_or("ret"));
+                let result_var = self.fresh_var(item.alias.as_deref().unwrap_or("ret"));
                 self.pending_aggs.clear();
                 match self.translate_expr(other, extra) {
                     Ok(sparql_expr) => {
@@ -3490,7 +3487,7 @@ impl TranslationState {
                 };
                 Ok(join_patterns(current, values))
             }
-            Expression::FunctionCall { name, args, .. } if name.to_ascii_lowercase() == "range" => {
+            Expression::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("range") => {
                 // UNWIND range(start, end) or range(start, end, step) AS var.
                 // Expand to a VALUES clause at compile time if args are literals.
                 let get_int = |e: &Expression| match e {

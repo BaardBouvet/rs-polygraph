@@ -1,8 +1,8 @@
-/// openCypher AST node types (Phase 1 + Phase 4).
-///
-/// Covers: `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`,
-/// `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `CREATE`, `MERGE`, `SET`,
-/// `DELETE`, `DETACH DELETE`, `REMOVE`, and `CALL` procedure stubs.
+//! openCypher AST node types (Phase 1 + Phase 4).
+//!
+//! Covers: `MATCH`, `OPTIONAL MATCH`, `WHERE`, `RETURN`, `WITH`,
+//! `ORDER BY`, `SKIP`, `LIMIT`, `UNWIND`, `CREATE`, `MERGE`, `SET`,
+//! `DELETE`, `DETACH DELETE`, `REMOVE`, and `CALL` procedure stubs.
 // ── Primitive aliases ────────────────────────────────────────────────────────
 
 /// A bare identifier (variable name, label, property key, relationship type).
