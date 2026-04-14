@@ -131,6 +131,76 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 
 ---
 
+## Phase 8 — Full openCypher TCK Suite Expansion
+
+**Goal**: Expand TCK coverage from 463 scenarios (4 clause categories) to the full 3,650 scenarios across all 37 categories. Current coverage is 12.7% of the upstream TCK.
+
+**Scope summary**:
+
+| Phase | Categories | New scenarios | Difficulty |
+|-------|-----------|---------------|------------|
+| A — Low-hanging fruit | return-orderby, return-skip-limit, with, with-skip-limit, with-where, with-orderBy, union, expressions/literals, expressions/boolean | 572 | Low |
+| B — Expression engine | comparison, null, mathematical, precedence, string, aggregation, conditional, typeConversion, list, map, countingSubgraphMatches | 558 | Medium |
+| C — Advanced features | call, graph, pattern, existentialSubqueries, path, quantifier, triadicSelection | 670 | Hard |
+| D — Write ops & temporal | create, delete, merge, remove, set, temporal | 1,370 | Very Hard |
+
+### Phase A — Low-Hanging Fruit (572 scenarios)
+
+Features from Phases 2–4 are already implemented; this phase primarily vendorizes feature files and patches edge-case parse failures.
+
+- [ ] Automate TCK vendorization with `scripts/vendor-tck.sh` (clone opencypher/openCypher, copy all feature files)
+- [ ] Vendorize 42 feature files for phase A categories
+- [ ] Harden harness for `Scenario Outline:` + `Examples:` tables (cucumber crate handles natively; verify)
+- [ ] Fix grammar edge-cases: `CASE WHEN … END`, `IS NULL` / `IS NOT NULL`, `UNION` / `UNION ALL`
+- [ ] Fix `WITH` + aggregation combos (`WITH count(*) AS c`)
+- [ ] Target: ≥ 90% pass rate on phase A categories
+
+### Phase B — Expression Engine (558 scenarios)
+
+- [ ] Grammar additions to `grammars/cypher.pest`: `function_call`, `case_expression`, `list_comprehension`, `map_literal`
+- [ ] New AST nodes: `Expression::FunctionCall`, `Expression::CaseExpression`, `Expression::ListComprehension`, `Expression::MapLiteral`
+- [ ] Translator mappings for string functions: `toString→STR`, `toUpper→UCASE`, `toLower→LCASE`, `trim/ltrim/rtrim→REPLACE`, `left/right/substring→SUBSTR`, `replace→REPLACE`, `STARTS WITH→STRSTARTS`, `ENDS WITH→STRENDS`, `CONTAINS→CONTAINS`, `=~→REGEX`
+- [ ] Translator mappings for numeric functions: `abs→ABS`, `ceil→CEIL`, `floor→FLOOR`, `round→ROUND`, `rand→RAND`, `x % y→arithmetic`, `sign→IF chain`
+- [ ] Translator mappings for type conversion: `toInteger→xsd:integer`, `toFloat→xsd:double`, `toBoolean→xsd:boolean`
+- [ ] `CASE WHEN` → nested `IF()` expression
+- [ ] `coalesce(a, b)` → `COALESCE(a, b)`
+- [ ] `x IS NULL` / `x IS NOT NULL` → `!BOUND(x)` / `BOUND(x)`
+- [ ] Vendorize 64 feature files; target: ≥ 75% pass rate on phase B categories
+
+### Phase C — Advanced Features (670 scenarios)
+
+- [ ] Graph functions: `type(r)` via `PREDICATE()` (SPARQL 1.2); `labels(n)` via subquery; `id(n)` via IRI/BNode; `properties(n)` / `keys(n)` via property subquery
+- [ ] `nodes(p)` / `relationships(p)` for bounded (unrolled) paths — intermediate variables are available
+- [ ] Pattern predicates: `EXISTS { … }` / `NOT EXISTS { … }` → `FILTER EXISTS { }` / `FILTER NOT EXISTS { }`
+- [ ] Existential subqueries: `EXISTS { MATCH … WHERE … }` → SPARQL `EXISTS` block
+- [ ] Quantifier expressions for compile-time literal lists: `all(x IN list WHERE …)`, `any`, `none`, `single` — unroll at translation time; mark runtime-list variants as `UnsupportedFeature`
+- [ ] `CALL` procedure stubs: parse and emit `UnsupportedFeature` for unknown procedures (counts as "correctly rejected")
+- [ ] Triadic selection patterns
+- [ ] Vendorize remaining phase C feature files; target: ≥ 40% pass rate on phase C categories (quantifiers are fundamentally hard for runtime lists)
+
+### Phase D — Write Operations & Temporal (1,370 scenarios)
+
+- [ ] Implement `cypher_to_sparql_update()` API returning SPARQL Update strings
+- [ ] `CREATE` → `INSERT DATA { }` with RDF-star annotated triples for relationship properties
+- [ ] `DELETE` → `DELETE DATA { }` / `DELETE WHERE { }`
+- [ ] `SET` / `REMOVE` → `DELETE { old } INSERT { new } WHERE { }`
+- [ ] `MERGE` → `INSERT { } WHERE { NOT EXISTS { } }` pattern
+- [ ] TCK harness: add `Then the side effects should be:` step validating graph mutations against Oxigraph store
+- [ ] Temporal types: map `xsd:date`, `xsd:dateTime`, `xsd:time`, `xsd:duration` for basic constructors and `YEAR/MONTH/DAY/HOURS/MINUTES/SECONDS` accessors
+- [ ] Document known gaps: `LocalTime`/`LocalDateTime` (no xsd equivalent), duration arithmetic, temporal truncation
+- [ ] Vendorize remaining phase D feature files; target: ≥ 50% for write ops, ≥ 30% for temporal
+
+**Full-TCK compliance tracker** (updated each release):
+
+| Release | Pass | Fail | Total | % |
+|---------|------|------|-------|---|
+| dev     | 461  | 2    | 463   | 99.6% (current 4-category subset) |
+| target  | —    | —    | 3,650 | — (all 37 categories) |
+
+**Milestone**: All 37 TCK categories vendorized; ≥ 60% pass rate across the complete suite.
+
+---
+
 ## Future Considerations
 
 - **SPARQL-star federation** (`SERVICE` keyword pass-through)
