@@ -1,5 +1,8 @@
 # Target Engine Analysis
 
+**Status**: reference  
+**Updated**: 2026-04-14
+
 This document evaluates SPARQL engine targets worth supporting in `rs-polygraph` beyond the built-in `GenericSparql11` and `RdfStar` adapters.
 
 The `TargetEngine` trait has three levers relevant to this analysis:

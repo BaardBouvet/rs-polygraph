@@ -1,5 +1,8 @@
 # Protocol Extension: Path-Decomposition Primitives for the Postgres Triplestore
 
+**Status**: planned  
+**Updated**: 2026-04-14
+
 This document specifies the two custom SPARQL functions and one custom aggregate
 that are needed to lift the fundamental SPARQL 1.1 limitations described in
 [fundamental-limitations.md](fundamental-limitations.md), assuming the target

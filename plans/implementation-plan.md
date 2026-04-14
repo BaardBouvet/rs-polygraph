@@ -1,5 +1,8 @@
 # Implementation Plan
 
+**Status**: complete  
+**Updated**: 2026-04-14
+
 This document details the technical implementation of `rs-polygraph` — a Rust library that transpiles openCypher and ISO GQL queries into SPARQL 1.1 algebra.
 
 ---

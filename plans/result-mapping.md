@@ -1,5 +1,8 @@
 # Result Mapping: SPARQL Results → openCypher Results
 
+**Status**: in progress  
+**Updated**: 2026-04-14
+
 **Goal**: Make `rs-polygraph` a complete openCypher-on-triplestore bridge. The
 library already transpiles Cypher→SPARQL. This plan adds the inverse: mapping
 SPARQL query results back into Cypher-shaped values (nodes, relationships,

@@ -6,6 +6,23 @@
 
 See [plans/implementation-plan.md](plans/implementation-plan.md) for detailed design decisions and [ROADMAP.md](ROADMAP.md) for phased delivery.
 
+## Plans Index
+
+All design documents live in `plans/`. Each file carries a **Status** and **Updated** date in its header. Consult status before acting on a plan's content.
+
+| File | Status | Purpose |
+|------|--------|---------|
+| [implementation-plan.md](plans/implementation-plan.md) | complete | Module layout, crate structure, initial design decisions |
+| [fundamental-limitations.md](plans/fundamental-limitations.md) | reference | Hard limits of the static transpiler; L1/L2/L3 mitigation levels |
+| [result-mapping.md](plans/result-mapping.md) | in progress | SPARQL results → openCypher values hydration API |
+| [tck-full-plan.md](plans/tck-full-plan.md) | in progress | Full 3,650-scenario TCK expansion (Phases A–D) |
+| [target-engines.md](plans/target-engines.md) | reference | SPARQL engine capability analysis (`TargetEngine` trait) |
+| [pg-extension-protocol.md](plans/pg-extension-protocol.md) | planned | Postgres triplestore custom SPARQL functions for path decomposition |
+
+**Status values**: `complete` — implemented and stable; `in progress` — actively being built; `planned` — future work, not yet started; `reference` — living document with no discrete completion state.
+
+When updating a plan, bump its **Updated** date. When finishing a plan, change status to `complete`.
+
 ## Architecture
 
 ```

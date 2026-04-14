@@ -1,5 +1,8 @@
 # Fundamental Limitations of rs-polygraph
 
+**Status**: reference  
+**Updated**: 2026-04-14
+
 This document describes the hard boundaries of what `rs-polygraph` can express
 as a **static transpiler** (one Cypher input → one SPARQL string output).
 
