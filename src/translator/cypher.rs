@@ -1064,6 +1064,46 @@ impl TranslationState {
                             }
                         }
 
+                        // Also handle Map-valued items: bind each key as a separate variable
+                        // so property access like `map.key` can be resolved at translation time.
+                        let map_items: Vec<_> = items
+                            .iter()
+                            .filter(|item| matches!(&item.expression, Expression::Map(_)))
+                            .cloned()
+                            .collect();
+                        for mi in &map_items {
+                            let alias = mi.alias.as_deref().unwrap_or("__map");
+                            if let Expression::Map(pairs) = &mi.expression {
+                                let mut key_vars: std::collections::HashMap<String, Variable> = Default::default();
+                                for (key, val_expr) in pairs {
+                                    let key_var = Variable::new_unchecked(format!("{alias}__{key}"));
+                                    // Bind the key variable to the value (or leave unbound for null).
+                                    match val_expr {
+                                        Expression::Literal(Literal::Null) => {
+                                            // null → leave key_var unbound (not added to Extend)
+                                        }
+                                        _ => {
+                                            if let Ok(sparql_expr) = self.translate_expr(val_expr, &mut extra_triples) {
+                                                current = GraphPattern::Extend {
+                                                    inner: Box::new(current),
+                                                    variable: key_var.clone(),
+                                                    expression: sparql_expr,
+                                                };
+                                            }
+                                        }
+                                    }
+                                    key_vars.insert(key.clone(), key_var.clone());
+                                    if let Some(ref mut pvars) = project_vars {
+                                        // Only add non-null vars (null ones remain unbound)
+                                        if !matches!(val_expr, Expression::Literal(Literal::Null)) {
+                                            pvars.push(key_var);
+                                        }
+                                    }
+                                }
+                                self.map_vars.insert(alias.to_string(), key_vars);
+                            }
+                        }
+
                         // Property-access triples in WITH must be OPTIONAL.
                         for tp in with_triples {
                             current = GraphPattern::LeftJoin {
