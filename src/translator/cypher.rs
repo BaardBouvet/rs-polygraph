@@ -2392,23 +2392,54 @@ impl TranslationState {
                 };
                 let mut hop_triples = vec![edge_triple.clone()];
 
-                // RDF-star annotation triples for property constraints:
-                // << ?prev <T> ?next >> <prop> value .
-                for (key, val_expr) in props {
-                    if let Expression::Literal(lit) = val_expr {
-                        if let Ok(sparql_lit) = self.translate_literal(lit) {
-                            let anno_triple = TriplePattern {
-                                subject: spargebra::term::TermPattern::Triple(Box::new(
-                                    spargebra::term::TriplePattern {
-                                        subject: prev.clone(),
-                                        predicate: type_iri.clone().into(),
-                                        object: next.clone(),
-                                    },
-                                )),
-                                predicate: self.iri(key).into(),
-                                object: spargebra::term::TermPattern::Literal(sparql_lit),
-                            };
-                            hop_triples.push(anno_triple);
+                // RDF 1.2 reification-based property constraints for this hop:
+                // ?reif rdf:reifies <<(?prev <T> ?next)>> . ?reif <prop> val . ...
+                if self.rdf_star {
+                    let reif_var = self.fresh_var("__rdf12_reif");
+                    let rdf_reifies = NamedNode::new_unchecked(
+                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
+                    );
+                    let edge_term =
+                        spargebra::term::TermPattern::Triple(Box::new(TriplePattern {
+                            subject: prev.clone(),
+                            predicate: type_iri.clone().into(),
+                            object: next.clone(),
+                        }));
+                    // Add rdf:reifies triple once per hop.
+                    hop_triples.push(TriplePattern {
+                        subject: reif_var.clone().into(),
+                        predicate: rdf_reifies.into(),
+                        object: edge_term,
+                    });
+                    for (key, val_expr) in props {
+                        if let Expression::Literal(lit) = val_expr {
+                            if let Ok(sparql_lit) = self.translate_literal(lit) {
+                                hop_triples.push(TriplePattern {
+                                    subject: reif_var.clone().into(),
+                                    predicate: self.iri(key).into(),
+                                    object: spargebra::term::TermPattern::Literal(sparql_lit),
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    // RDF reification (classic) — not used in TCK engine but kept for completeness.
+                    for (key, val_expr) in props {
+                        if let Expression::Literal(lit) = val_expr {
+                            if let Ok(sparql_lit) = self.translate_literal(lit) {
+                                let anno_triple = TriplePattern {
+                                    subject: spargebra::term::TermPattern::Triple(Box::new(
+                                        spargebra::term::TriplePattern {
+                                            subject: prev.clone(),
+                                            predicate: type_iri.clone().into(),
+                                            object: next.clone(),
+                                        },
+                                    )),
+                                    predicate: self.iri(key).into(),
+                                    object: spargebra::term::TermPattern::Literal(sparql_lit),
+                                };
+                                hop_triples.push(anno_triple);
+                            }
                         }
                     }
                 }

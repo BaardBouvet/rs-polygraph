@@ -106,6 +106,23 @@ fn term_to_string(term: &Term) -> String {
 /// - `'Alice'` → `Alice` (strip single quotes)
 /// - `null` → `None`
 /// - integers, booleans, etc. → as-is
+/// Sort the elements of a serialized Cypher list string, e.g. `['c', 'b']` → `['b', 'c']`.
+/// Only applies to simple scalar lists. Returns the input unchanged if it can't be parsed.
+fn sort_list_elements(s: &str) -> String {
+    let s = s.trim();
+    if s.starts_with('[') && s.ends_with(']') {
+        let inner = &s[1..s.len() - 1];
+        if inner.is_empty() {
+            return s.to_owned();
+        }
+        let mut elems: Vec<&str> = inner.split(", ").collect();
+        elems.sort();
+        format!("[{}]", elems.join(", "))
+    } else {
+        s.to_owned()
+    }
+}
+
 fn normalize_tck(s: &str) -> Option<String> {
     let s = s.trim();
     if s == "null" {
@@ -485,7 +502,7 @@ async fn executing_query(world: &mut TckWorld, step: &Step) {
 // ── Then — result assertions ──────────────────────────────────────────────────
 
 /// Core result comparison logic.
-fn compare_results(world: &TckWorld, step: &Step, ordered: bool) {
+fn compare_results(world: &TckWorld, step: &Step, ordered: bool, sort_lists: bool) {
     let table = step.table.as_ref().expect("step should have a data table");
     if table.rows.is_empty() {
         return;
@@ -524,10 +541,29 @@ fn compare_results(world: &TckWorld, step: &Step, ordered: bool) {
 
     let expected: Vec<Vec<Option<String>>> = data_rows
         .iter()
-        .map(|row| row.iter().map(|c| normalize_tck(c)).collect())
+        .map(|row| {
+            row.iter()
+                .map(|c| {
+                    normalize_tck(c).map(|v| {
+                        if sort_lists { sort_list_elements(&v) } else { v }
+                    })
+                })
+                .collect()
+        })
         .collect();
 
-    let actual = world.result_rows.clone();
+    let actual: Vec<Vec<Option<String>>> = world
+        .result_rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|c| {
+                    c.as_deref()
+                        .map(|v| if sort_lists { sort_list_elements(v) } else { v.to_owned() })
+                })
+                .collect()
+        })
+        .collect();
 
     if ordered {
         for (i, (act_row, exp_row)) in actual.iter().zip(expected.iter()).enumerate() {
@@ -562,7 +598,7 @@ async fn result_in_any_order(world: &mut TckWorld, step: &Step) {
     if let Some(err) = &world.query_error {
         panic!("Expected success but translation/execution failed: {err}");
     }
-    compare_results(world, step, false);
+    compare_results(world, step, false, false);
 }
 
 #[then(regex = r"^the result should be, in order:$")]
@@ -573,7 +609,7 @@ async fn result_in_order(world: &mut TckWorld, step: &Step) {
     if let Some(err) = &world.query_error {
         panic!("Expected success but translation/execution failed: {err}");
     }
-    compare_results(world, step, true);
+    compare_results(world, step, true, false);
 }
 
 #[then(regex = r"^the result should be \(ignoring element order for lists\):$")]
@@ -584,7 +620,7 @@ async fn result_ignoring_list_order(world: &mut TckWorld, step: &Step) {
     if let Some(err) = &world.query_error {
         panic!("Expected success but translation/execution failed: {err}");
     }
-    compare_results(world, step, false);
+    compare_results(world, step, false, true);
 }
 
 #[then("no side effects")]
