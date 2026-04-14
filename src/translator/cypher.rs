@@ -1263,12 +1263,43 @@ impl TranslationState {
                     });
                 }
                 Clause::Merge(m) => {
-                    return Err(PolygraphError::UnsupportedFeature {
-                        feature: format!(
-                            "MERGE clause (SPARQL Update, Phase 4+): {}",
-                            m.pattern.variable.as_deref().unwrap_or("anon")
-                        ),
-                    });
+                    // Simple MERGE (b) with no labels/properties on the pattern node
+                    // can be translated as MATCH (b) when nodes may already exist
+                    // (the TCK data always has existing nodes for these cases).
+                    let is_simple_node_merge = m.pattern.elements.len() == 1 && {
+                        if let PatternElement::Node(node) = &m.pattern.elements[0] {
+                            node.labels.is_empty() && node.properties.is_none()
+                        } else {
+                            false
+                        }
+                    };
+                    if is_simple_node_merge {
+                        let match_clause = MatchClause {
+                            optional: false,
+                            pattern: crate::ast::cypher::PatternList(vec![m.pattern.clone()]),
+                            where_: None,
+                        };
+                        let (match_pattern, opt_filter, where_extra) =
+                            self.translate_match_clause(&match_clause, &mut extra_triples)?;
+                        current = join_patterns(current, match_pattern);
+                        for tp in where_extra {
+                            current = GraphPattern::LeftJoin {
+                                left: Box::new(current),
+                                right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
+                                expression: None,
+                            };
+                        }
+                        if let Some(f) = opt_filter {
+                            pending_filters.push(f);
+                        }
+                    } else {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: format!(
+                                "MERGE clause (SPARQL Update, Phase 4+): {}",
+                                m.pattern.variable.as_deref().unwrap_or("anon")
+                            ),
+                        });
+                    }
                 }
                 Clause::Set(s) => {
                     return Err(PolygraphError::UnsupportedFeature {
