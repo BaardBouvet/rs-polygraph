@@ -1624,8 +1624,7 @@ impl TranslationState {
                             "__eid_{}",
                             rel.variable.as_ref().unwrap()
                         ));
-                        let pred_expr =
-                            SparExpr::Variable(pred_var.clone());
+                        let pred_expr = SparExpr::Variable(pred_var.clone());
                         let fwd_eid = build_edge_id_expr(src, pred_expr.clone(), dst);
                         let bwd_eid = build_edge_id_expr(dst, pred_expr, src);
                         let fwd = GraphPattern::Extend {
@@ -2052,8 +2051,7 @@ impl TranslationState {
             } else {
                 // Directed typed: BIND edge identity based on known direction.
                 let eid = Variable::new_unchecked(format!("__eid_{var_name}"));
-                let pred_expr =
-                    SparExpr::Literal(SparLit::new_simple_literal(pred.as_str()));
+                let pred_expr = SparExpr::Literal(SparLit::new_simple_literal(pred.as_str()));
                 let (actual_s, actual_o) = match rel.direction {
                     Direction::Left => (dst, src),
                     _ => (src, dst),
