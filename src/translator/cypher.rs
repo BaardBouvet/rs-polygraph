@@ -3534,6 +3534,27 @@ impl TranslationState {
                             .collect();
                         return Ok(SparExpr::In(Box::new(l), members?));
                     }
+                    // Special case: expr IN keys(map_expr) → expand keys at compile time
+                    if let Expression::FunctionCall { name: fname, args: fargs, .. } = rhs.as_ref() {
+                        if fname.to_ascii_lowercase() == "keys" {
+                            let keys_opt: Option<Vec<String>> = match fargs.first() {
+                                Some(Expression::Map(pairs)) => {
+                                    Some(pairs.iter().map(|(k, _)| k.clone()).collect())
+                                }
+                                Some(Expression::Variable(v)) => {
+                                    self.map_vars.get(v.as_str()).map(|km| km.keys().cloned().collect())
+                                }
+                                _ => None,
+                            };
+                            if let Some(keys) = keys_opt {
+                                let l = self.translate_expr(lhs, extra)?;
+                                let members: Vec<SparExpr> = keys.iter()
+                                    .map(|k| SparExpr::Literal(SparLit::new_simple_literal(k.as_str())))
+                                    .collect();
+                                return Ok(SparExpr::In(Box::new(l), members));
+                            }
+                        }
+                    }
                 }
                 let l = self.translate_expr(lhs, extra)?;
                 let r = self.translate_expr(rhs, extra)?;
@@ -4242,7 +4263,39 @@ impl TranslationState {
                     feature: "nodes() requires a named path argument".to_string(),
                 })
             }
-            "keys" | "labels" | "relationships" | "reverse" | "split" => {
+            "keys" => {
+                let arg = args.first().ok_or_else(|| PolygraphError::UnsupportedFeature {
+                    feature: "keys() requires an argument".to_string(),
+                })?;
+                match arg {
+                    Expression::Map(pairs) => {
+                        // keys({k: v, ...}) → compile-time list of key strings
+                        let key_list: Vec<String> = pairs.iter().map(|(k, _)| format!("'{k}'")).collect();
+                        let serialized = format!("[{}]", key_list.join(", "));
+                        return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
+                    }
+                    Expression::Literal(Literal::Null) => {
+                        // keys(null) → null
+                        return Ok(SparExpr::Variable(self.fresh_var("null")));
+                    }
+                    Expression::Variable(v) => {
+                        let vname = v.clone();
+                        // Check if variable is a known map alias from WITH clause
+                        if let Some(key_map) = self.map_vars.get(&vname).cloned() {
+                            let key_list: Vec<String> = key_map.keys().map(|k| format!("'{k}'")).collect();
+                            let serialized = format!("[{}]", key_list.join(", "));
+                            return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
+                        }
+                        // Unknown variable — return null (unbound)
+                        return Ok(SparExpr::Variable(self.fresh_var("null")));
+                    }
+                    _ => {}
+                }
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: "keys() on non-literal map".to_string(),
+                })
+            }
+            "labels" | "relationships" | "reverse" | "split" => {
                 Err(PolygraphError::UnsupportedFeature {
                     feature: format!("function call: {name}()"),
                 })
