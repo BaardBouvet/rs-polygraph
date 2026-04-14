@@ -97,24 +97,18 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 - [x] Track and document skipped/failing scenarios with issue references
 - [x] Achieve ≥ 80% TCK pass rate
 - [x] Achieve ≥ 90% TCK pass rate
-- [x] Achieve ≥ 95% TCK pass rate (currently 96.3%)
+- [x] Achieve ≥ 95% TCK pass rate (currently 99.6%)
 
 **TCK compliance tracker** (updated each release):
 
 | Release | Pass | Fail | Total | % |
 |---------|------|------|-------|---|
 | 0.1.0   | 362  | 101  | 463   | 78.2% |
-| dev     | 451  | 12   | 463   | 97.4% |
+| dev     | 461  | 2    | 463   | 99.6% |
 
-**Remaining 12 failures** — see [plans/tck-18-final.md](plans/tck-18-final.md):
-- Variable-length relationship list syntax (`last(r)`, `[rs*]`): 3 scenarios (P5, infeasible)
-- Bound relationship reuse in cross-MATCH varlen: 1 scenario (P3, hard)
-- Undirected typed varlen with parallel edges: 1 scenario (infeasible, RDF dedup)
-- Relationship identity comparison (`r <> r2`): 1 scenario (P2)
-- Untyped `[*]` path multiplicity: 1 scenario (P4)
-- MERGE / DELETE (SPARQL Update not implemented): 2 scenarios (P6)
-- `head(collect({map})).prop` map aggregation peephole: 1 scenario (P3)
-- Match5 Gherkin parse error (Background section): 1 parse error
+**Remaining 2 failures** — fundamental static-transpiler limitations:
+- Match4[8]: `[rs*]` runtime list as path constraint (requires multi-phase execution, see plans/fundamental-limitations.md §1a)
+- Match6[14]: undirected *3..3 with parallel edges (RDF collapses duplicate triples; multigraph not representable in RDF)
 
 **Milestone**: Published compliance report. ≥ 80% pass rate.
 
