@@ -23,7 +23,11 @@
 use std::collections::HashMap;
 
 use cucumber::{gherkin::Step, given, then, when, World};
-use oxigraph::{model::Term, sparql::{QueryResults, SparqlEvaluator}, store::Store};
+use oxigraph::{
+    model::Term,
+    sparql::{QueryResults, SparqlEvaluator},
+    store::Store,
+};
 use polygraph::{
     ast::cypher::{Clause, Direction, Expression, Literal, PatternElement},
     parser::parse_cypher,
@@ -545,7 +549,11 @@ fn compare_results(world: &TckWorld, step: &Step, ordered: bool, sort_lists: boo
             row.iter()
                 .map(|c| {
                     normalize_tck(c).map(|v| {
-                        if sort_lists { sort_list_elements(&v) } else { v }
+                        if sort_lists {
+                            sort_list_elements(&v)
+                        } else {
+                            v
+                        }
                     })
                 })
                 .collect()
@@ -558,8 +566,13 @@ fn compare_results(world: &TckWorld, step: &Step, ordered: bool, sort_lists: boo
         .map(|row| {
             row.iter()
                 .map(|c| {
-                    c.as_deref()
-                        .map(|v| if sort_lists { sort_list_elements(v) } else { v.to_owned() })
+                    c.as_deref().map(|v| {
+                        if sort_lists {
+                            sort_list_elements(v)
+                        } else {
+                            v.to_owned()
+                        }
+                    })
                 })
                 .collect()
         })

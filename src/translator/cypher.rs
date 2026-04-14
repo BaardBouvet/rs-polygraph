@@ -1006,8 +1006,7 @@ impl TranslationState {
                         // vars are appended. Zipping all items against pvars would
                         // misalign when list items appear earlier in the original WITH.
                         let mut outer_renames: Vec<(Variable, Variable)> = Vec::new();
-                        if let crate::ast::cypher::ReturnItems::Explicit(ref ti) = as_return.items
-                        {
+                        if let crate::ast::cypher::ReturnItems::Explicit(ref ti) = as_return.items {
                             if let Some(ref pvars) = project_vars {
                                 for (item, pvar) in ti.iter().zip(pvars.iter()) {
                                     if let Some(ref alias) = item.alias {
@@ -1360,8 +1359,7 @@ impl TranslationState {
                         .collect();
                     let return_safe = clauses.iter().any(|c| {
                         if let Clause::Return(ret) = c {
-                            if let crate::ast::cypher::ReturnItems::Explicit(ref items) =
-                                ret.items
+                            if let crate::ast::cypher::ReturnItems::Explicit(ref items) = ret.items
                             {
                                 // Safe only if no item accesses a property of a deleted var.
                                 !items.iter().any(|item| {
@@ -1765,8 +1763,7 @@ impl TranslationState {
                 })
             });
             // Also compute convenience alias for Direction::Both eid detection.
-            let reuse_eid: Option<Variable> =
-                reuse_prior.as_ref().and_then(|e| e.eid_var.clone());
+            let reuse_eid: Option<Variable> = reuse_prior.as_ref().and_then(|e| e.eid_var.clone());
 
             match rel.direction {
                 Direction::Left => {
@@ -1819,17 +1816,18 @@ impl TranslationState {
                                 object: src.clone(),
                             }],
                         };
-                        let sl_filter =
-                            if let (TermPattern::Variable(s), TermPattern::Variable(d)) =
-                                (src, dst)
-                            {
-                                Some(SparExpr::Not(Box::new(SparExpr::Equal(
-                                    Box::new(SparExpr::Variable(s.clone())),
-                                    Box::new(SparExpr::Variable(d.clone())),
-                                ))))
-                            } else {
-                                None
-                            };
+                        let sl_filter = if let (
+                            TermPattern::Variable(s),
+                            TermPattern::Variable(d),
+                        ) = (src, dst)
+                        {
+                            Some(SparExpr::Not(Box::new(SparExpr::Equal(
+                                Box::new(SparExpr::Variable(s.clone())),
+                                Box::new(SparExpr::Variable(d.clone())),
+                            ))))
+                        } else {
+                            None
+                        };
                         let bwd_bgp = if let Some(f) = sl_filter {
                             GraphPattern::Filter {
                                 expr: f,
@@ -1876,10 +1874,8 @@ impl TranslationState {
                                 )))),
                             )),
                         );
-                        self.pending_match_filters.push(SparExpr::Or(
-                            Box::new(fwd_f),
-                            Box::new(bwd_f),
-                        ));
+                        self.pending_match_filters
+                            .push(SparExpr::Or(Box::new(fwd_f), Box::new(bwd_f)));
                         // Do not re-register in edge_map or track iso_hop for re-use.
                         return Ok(());
                     }
@@ -2732,12 +2728,11 @@ impl TranslationState {
                     let rdf_reifies = NamedNode::new_unchecked(
                         "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
                     );
-                    let edge_term =
-                        spargebra::term::TermPattern::Triple(Box::new(TriplePattern {
-                            subject: prev.clone(),
-                            predicate: type_iri.clone().into(),
-                            object: next.clone(),
-                        }));
+                    let edge_term = spargebra::term::TermPattern::Triple(Box::new(TriplePattern {
+                        subject: prev.clone(),
+                        predicate: type_iri.clone().into(),
+                        object: next.clone(),
+                    }));
                     // Add rdf:reifies triple once per hop.
                     hop_triples.push(TriplePattern {
                         subject: reif_var.clone().into(),
@@ -3094,11 +3089,8 @@ impl TranslationState {
                                             Option<SparExpr>,
                                         )> = None;
                                         for (key, val_expr) in pairs {
-                                            let v_key = self.fresh_var(&format!(
-                                                "{alias}__{key}"
-                                            ));
-                                            let inner =
-                                                self.translate_expr(val_expr, extra)?;
+                                            let v_key = self.fresh_var(&format!("{alias}__{key}"));
+                                            let inner = self.translate_expr(val_expr, extra)?;
                                             let min_agg = AggregateExpression::FunctionCall {
                                                 name: AggregateFunction::Min,
                                                 expr: inner,
@@ -4343,9 +4335,10 @@ fn expr_accesses_deleted_prop(
             expr_accesses_deleted_prop(a, deleted_vars)
                 || expr_accesses_deleted_prop(b, deleted_vars)
         }
-        Expression::Not(e) | Expression::Negate(e) | Expression::IsNull(e) | Expression::IsNotNull(e) => {
-            expr_accesses_deleted_prop(e, deleted_vars)
-        }
+        Expression::Not(e)
+        | Expression::Negate(e)
+        | Expression::IsNull(e)
+        | Expression::IsNotNull(e) => expr_accesses_deleted_prop(e, deleted_vars),
         Expression::List(elems) => elems
             .iter()
             .any(|e| expr_accesses_deleted_prop(e, deleted_vars)),
