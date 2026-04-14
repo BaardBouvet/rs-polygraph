@@ -3,11 +3,10 @@
 /// Tests the full flow: Cypher → SPARQL + ProjectionSchema → map SPARQL
 /// results back to CypherValues.
 use polygraph::{
-    result_mapping::{ColumnKind, CypherValue, ProjectedColumn, RdfTerm, SparqlSolution},
-    target::GenericSparql11,
+    result_mapping::{ColumnKind, CypherValue, RdfTerm, SparqlSolution},
+    sparql_engine::GenericSparql11,
     Transpiler,
 };
-use std::collections::BTreeMap;
 
 const ENGINE: GenericSparql11 = GenericSparql11;
 

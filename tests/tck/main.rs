@@ -27,7 +27,7 @@ use oxigraph::{model::Term, sparql::QueryResults, store::Store};
 use polygraph::{
     ast::cypher::{Clause, Direction, Expression, Literal, PatternElement},
     parser::parse_cypher,
-    target::TargetEngine,
+    sparql_engine::TargetEngine,
     Transpiler,
 };
 

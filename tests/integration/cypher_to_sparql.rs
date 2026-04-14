@@ -3,7 +3,7 @@
 /// Each test calls `Transpiler::cypher_to_sparql` and checks structural
 /// properties of the serialized SPARQL string.
 use polygraph::{
-    target::{GenericSparql11, RdfStar},
+    sparql_engine::{GenericSparql11, RdfStar},
     Transpiler,
 };
 

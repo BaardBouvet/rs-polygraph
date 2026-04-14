@@ -40,3 +40,17 @@ impl TargetEngine for GenericSparql11 {
         false
     }
 }
+
+/// A generic engine with SPARQL-star / RDF-star support.
+#[derive(Default, Debug)]
+pub struct RdfStar;
+
+impl TargetEngine for RdfStar {
+    fn supports_rdf_star(&self) -> bool {
+        true
+    }
+
+    fn supports_federation(&self) -> bool {
+        false
+    }
+}

@@ -6,7 +6,7 @@
 /// is identical to what the Cypher integration tests produce for equivalent
 /// Cypher queries.
 use polygraph::{
-    target::{GenericSparql11, RdfStar},
+    sparql_engine::{GenericSparql11, RdfStar},
     Transpiler,
 };
 
