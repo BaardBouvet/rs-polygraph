@@ -99,7 +99,20 @@ impl Default for TckWorld {
 /// Convert an oxigraph `Term` to a plain string for result comparison.
 fn term_to_string(term: &Term) -> String {
     match term {
-        Term::Literal(lit) => lit.value().to_owned(),
+        Term::Literal(lit) => {
+            // For xsd:double, reformat using Rust's {:?} float style to match
+            // Cypher output expectations ("1.0", "1.5", "1.26e305", "-0.0", "NaN").
+            if lit.datatype().as_str() == "http://www.w3.org/2001/XMLSchema#double" {
+                let v = lit.value();
+                if v.eq_ignore_ascii_case("nan") {
+                    return "NaN".to_owned();
+                }
+                if let Ok(f) = v.parse::<f64>() {
+                    return format!("{f:?}");
+                }
+            }
+            lit.value().to_owned()
+        }
         Term::NamedNode(nn) => nn.as_str().to_owned(),
         Term::BlankNode(bn) => format!("__bnode__{}", bn.as_str()),
         Term::Triple(_) => "<<triple>>".to_owned(),

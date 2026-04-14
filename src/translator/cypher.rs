@@ -3224,6 +3224,7 @@ impl TranslationState {
                 let result_var = if !alias_name.is_empty()
                     && !self.node_vars.contains(alias_name)
                     && !self.edge_map.contains_key(alias_name)
+                    && !expr_references_var(other, alias_name)
                 {
                     Variable::new_unchecked(alias_name.to_string())
                 } else {
@@ -4358,10 +4359,12 @@ impl TranslationState {
                 n.to_string(),
                 NamedNode::new_unchecked(XSD_INTEGER),
             )),
-            Literal::Float(f) => Ok(SparLit::new_typed_literal(
-                format!("{f:e}"),
-                NamedNode::new_unchecked(XSD_DOUBLE),
-            )),
+            Literal::Float(f) => {
+                // Format floats in Cypher/Neo4j style using Rust's {:?} formatter which
+                // produces "1.0", "1.5", "1.2635e305", "-0.0", "NaN" etc.
+                let s = format!("{f:?}");
+                Ok(SparLit::new_typed_literal(s, NamedNode::new_unchecked(XSD_DOUBLE)))
+            }
             Literal::String(s) => Ok(SparLit::new_simple_literal(s.clone())),
             Literal::Boolean(b) => Ok(SparLit::new_typed_literal(
                 b.to_string(),
@@ -4555,6 +4558,46 @@ fn collect_pattern_vars(pattern_list: &crate::ast::cypher::PatternList) -> Vec<S
         }
     }
     vars
+}
+
+/// Returns true if `expr` references a variable with the given name.
+fn expr_references_var(expr: &Expression, name: &str) -> bool {
+    match expr {
+        Expression::Variable(v) => v == name,
+        Expression::Property(base, _) => expr_references_var(base, name),
+        Expression::IsNull(e)
+        | Expression::IsNotNull(e)
+        | Expression::Not(e)
+        | Expression::Negate(e) => expr_references_var(e, name),
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Xor(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b)
+        | Expression::Modulo(a, b)
+        | Expression::Power(a, b)
+        | Expression::Comparison(a, _, b) => {
+            expr_references_var(a, name) || expr_references_var(b, name)
+        }
+        Expression::List(items) => items.iter().any(|e| expr_references_var(e, name)),
+        Expression::Map(pairs) => pairs.iter().any(|(_, v)| expr_references_var(v, name)),
+        Expression::FunctionCall { args, .. } => {
+            args.iter().any(|e| expr_references_var(e, name))
+        }
+        Expression::Aggregate(agg) => match agg {
+            AggregateExpr::Count { expr, .. } => {
+                expr.as_ref().map_or(false, |e| expr_references_var(e, name))
+            }
+            AggregateExpr::Sum { expr, .. }
+            | AggregateExpr::Avg { expr, .. }
+            | AggregateExpr::Min { expr, .. }
+            | AggregateExpr::Max { expr, .. }
+            | AggregateExpr::Collect { expr, .. } => expr_references_var(expr, name),
+        },
+        _ => false,
+    }
 }
 
 /// Returns true if the expression references any variable in `nullable`.
