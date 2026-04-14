@@ -586,6 +586,9 @@ struct TranslationState {
     projected_columns: Vec<ProjectedColumn>,
     /// Whether the last RETURN used DISTINCT.
     return_distinct: bool,
+    /// Variable-length relationship variables with their (lower, upper) hop bounds.
+    /// Used to support `last(r)` / `head(r)` on bounded varlen paths.
+    varlen_rel_scope: std::collections::HashMap<String, (u64, u64)>,
 }
 
 impl TranslationState {
@@ -604,6 +607,7 @@ impl TranslationState {
             node_vars: Default::default(),
             projected_columns: Vec::new(),
             return_distinct: false,
+            varlen_rel_scope: Default::default(),
         }
     }
 
@@ -1869,6 +1873,13 @@ impl TranslationState {
                         eid_var: None,
                     },
                 );
+                // Track varlen bounds for last(r) / head(r) resolution.
+                if let Some(range) = &rel.range {
+                    let lower = range.lower.unwrap_or(0);
+                    let upper = range.upper.unwrap_or(u64::MAX);
+                    self.varlen_rel_scope
+                        .insert(var_name.clone(), (lower, upper));
+                }
             }
             path_patterns.push(path_gp);
             Ok(())
@@ -2570,13 +2581,12 @@ impl TranslationState {
                         let rdf_reifies = NamedNode::new_unchecked(
                             "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
                         );
-                        let edge_term = TermPattern::Triple(Box::new(
-                            spargebra::term::TriplePattern {
+                        let edge_term =
+                            TermPattern::Triple(Box::new(spargebra::term::TriplePattern {
                                 subject: edge.src.clone(),
                                 predicate: pred_pattern,
                                 object: edge.dst.clone(),
-                            },
-                        ));
+                            }));
                         triples.push(spargebra::term::TriplePattern {
                             subject: reif_var.clone().into(),
                             predicate: rdf_reifies.into(),
@@ -2770,13 +2780,12 @@ impl TranslationState {
                         let rdf_reifies = NamedNode::new_unchecked(
                             "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
                         );
-                        let edge_term = TermPattern::Triple(Box::new(
-                            spargebra::term::TriplePattern {
+                        let edge_term =
+                            TermPattern::Triple(Box::new(spargebra::term::TriplePattern {
                                 subject: edge.src.clone(),
                                 predicate: pred_pat,
                                 object: edge.dst.clone(),
-                            },
-                        ));
+                            }));
                         extra.push(spargebra::term::TriplePattern {
                             subject: reif_var.clone().into(),
                             predicate: rdf_reifies.into(),
@@ -3379,11 +3388,39 @@ impl TranslationState {
                 }
             }
             "head" => {
+                // head(r) on a varlen relationship variable with upper ≤ 1 is the same
+                // as last(r): emit forward/backward OPTIONALs and COALESCE.
+                // Otherwise fall back to list head: STRBEFORE(str, " ").
+                if let Some(Expression::Variable(r_name)) = args.first() {
+                    if let Some(&(lower, upper)) = self.varlen_rel_scope.get(r_name.as_str()) {
+                        if upper <= 1 {
+                            if let Some(edge) = self.edge_map.get(r_name.as_str()).cloned() {
+                                use spargebra::term::NamedNodePattern;
+                                let fwd_var = self.fresh_var("__last_r_fwd");
+                                let bwd_var = self.fresh_var("__last_r_bwd");
+                                extra.push(TriplePattern {
+                                    subject: edge.src.clone(),
+                                    predicate: NamedNodePattern::Variable(fwd_var.clone()),
+                                    object: edge.dst.clone(),
+                                });
+                                extra.push(TriplePattern {
+                                    subject: edge.dst.clone(),
+                                    predicate: NamedNodePattern::Variable(bwd_var.clone()),
+                                    object: edge.src.clone(),
+                                });
+                                let _ = lower;
+                                return Ok(SparExpr::Coalesce(vec![
+                                    SparExpr::Variable(fwd_var),
+                                    SparExpr::Variable(bwd_var),
+                                ]));
+                            }
+                        }
+                    }
+                }
                 // head(list) → first element. For collected lists (GROUP_CONCAT),
                 // extract substring before first separator.
                 if let Some(arg) = args.first() {
                     let translated = self.translate_expr(arg, extra)?;
-                    // STRBEFORE(str, " ") gets first space-separated element
                     let sep = SparExpr::Literal(SparLit::new_simple_literal(" "));
                     Ok(SparExpr::FunctionCall(
                         Function::StrBefore,
@@ -3438,6 +3475,45 @@ impl TranslationState {
             | "ltrim" | "rtrim" | "left" | "right" => Err(PolygraphError::UnsupportedFeature {
                 feature: format!("function call: {name}()"),
             }),
+            "last" => {
+                // last(r) / head(r) on a varlen relationship variable (*lower..upper):
+                // Emit two OPTIONAL triple patterns (forward and backward directions)
+                // and return COALESCE(?__last_r_fwd, ?__last_r_bwd).
+                // For bounded varlen (upper ≤ 1), this correctly returns the predicate
+                // IRI of the relationship for 1-hop rows and null for 0-hop rows.
+                if let Some(Expression::Variable(r_name)) = args.first() {
+                    if let Some(&(lower, upper)) = self.varlen_rel_scope.get(r_name.as_str()) {
+                        if upper <= 1 {
+                            if let Some(edge) = self.edge_map.get(r_name.as_str()).cloned() {
+                                use spargebra::term::NamedNodePattern;
+                                let fwd_var = self.fresh_var("__last_r_fwd");
+                                let bwd_var = self.fresh_var("__last_r_bwd");
+                                // Forward direction: ?src ?fwd_var ?dst
+                                extra.push(TriplePattern {
+                                    subject: edge.src.clone(),
+                                    predicate: NamedNodePattern::Variable(fwd_var.clone()),
+                                    object: edge.dst.clone(),
+                                });
+                                // Backward direction: ?dst ?bwd_var ?src
+                                extra.push(TriplePattern {
+                                    subject: edge.dst.clone(),
+                                    predicate: NamedNodePattern::Variable(bwd_var.clone()),
+                                    object: edge.src.clone(),
+                                });
+                                // Return COALESCE(?fwd, ?bwd) – first non-null wins
+                                let _ = lower; // bounds info used for eligibility check only
+                                return Ok(SparExpr::Coalesce(vec![
+                                    SparExpr::Variable(fwd_var),
+                                    SparExpr::Variable(bwd_var),
+                                ]));
+                            }
+                        }
+                    }
+                }
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: format!("function call: {name}()"),
+                })
+            }
             _ => Err(PolygraphError::UnsupportedFeature {
                 feature: format!("function call: {name}()"),
             }),

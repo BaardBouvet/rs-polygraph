@@ -45,11 +45,7 @@ pub fn annotated_triple(
 
 /// Build a `TermPattern::Triple` (the `<<(…)>>` triple term) for use as the
 /// object of a `rdf:reifies` triple pattern.
-pub fn edge_triple_term(
-    src: TermPattern,
-    pred: NamedNodePattern,
-    dst: TermPattern,
-) -> TermPattern {
+pub fn edge_triple_term(src: TermPattern, pred: NamedNodePattern, dst: TermPattern) -> TermPattern {
     let edge_triple = TriplePattern {
         subject: src,
         predicate: pred,
@@ -165,7 +161,13 @@ mod tests {
             (iri("http://ex/weight"), var("weight")),
         ];
         // 1 rdf:reifies + 2 property triples = 3
-        let result = all_property_triples(var("a"), pred("http://ex/KNOWS"), var("b"), &props, svar("__reif"));
+        let result = all_property_triples(
+            var("a"),
+            pred("http://ex/KNOWS"),
+            var("b"),
+            &props,
+            svar("__reif"),
+        );
         assert_eq!(result.len(), 3);
     }
 
@@ -175,9 +177,17 @@ mod tests {
             (iri("http://ex/p1"), var("v1")),
             (iri("http://ex/p2"), var("v2")),
         ];
-        let result = all_property_triples(var("a"), pred("http://ex/KNOWS"), var("b"), &props, svar("__reif"));
+        let result = all_property_triples(
+            var("a"),
+            pred("http://ex/KNOWS"),
+            var("b"),
+            &props,
+            svar("__reif"),
+        );
         // Property triples (index 1, 2) have Variable subject (the reifier)
-        assert!(result[1..].iter().all(|tp| matches!(tp.subject, TermPattern::Variable(_))));
+        assert!(result[1..]
+            .iter()
+            .all(|tp| matches!(tp.subject, TermPattern::Variable(_))));
     }
 
     #[test]
