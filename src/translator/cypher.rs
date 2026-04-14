@@ -611,6 +611,10 @@ struct TranslationState {
     /// that should be applied BEFORE the filter using the bound variable.
     pending_bind_checks: Vec<spargebra::algebra::Expression>,
     pending_bind_targets: Vec<Variable>,
+    /// Variables from UNWIND lists that contained null (UNDEF) values.
+    /// Used to add FILTER(BOUND(?v)) before aggregate GROUP patterns to work
+    /// around an oxigraph bug where MAX/MIN over UNDEF+typed values returns null.
+    unwind_null_vars: std::collections::HashSet<String>,
 }
 
 impl TranslationState {
@@ -635,6 +639,7 @@ impl TranslationState {
             pending_match_filters: Vec::new(),
             pending_bind_checks: Vec::new(),
             pending_bind_targets: Vec::new(),
+            unwind_null_vars: Default::default(),
         }
     }
 
@@ -1114,6 +1119,17 @@ impl TranslationState {
 
                         // Apply aggregation (GROUP BY).
                         if !aggregates.is_empty() {
+                            // Work around oxigraph bug: MAX/MIN/SUM over VALUES with UNDEF
+                            // returns null. Add FILTER(BOUND(?v)) for UNWIND null vars.
+                            if !self.unwind_null_vars.is_empty() {
+                                for null_var_name in self.unwind_null_vars.clone() {
+                                    let bound_var = Variable::new_unchecked(null_var_name);
+                                    current = GraphPattern::Filter {
+                                        inner: Box::new(current),
+                                        expr: SparExpr::Bound(bound_var),
+                                    };
+                                }
+                            }
                             let group_vars: Vec<Variable> = project_vars
                                 .as_ref()
                                 .map(|vs| {
@@ -1309,6 +1325,17 @@ impl TranslationState {
 
                     // Apply aggregation (GROUP BY) if present.
                     if !aggregates.is_empty() {
+                        // Work around oxigraph bug: MAX/MIN/SUM over VALUES with UNDEF
+                        // returns null. Add FILTER(BOUND(?v)) for UNWIND null vars.
+                        if !self.unwind_null_vars.is_empty() {
+                            for null_var_name in self.unwind_null_vars.clone() {
+                                let bound_var = Variable::new_unchecked(null_var_name);
+                                current = GraphPattern::Filter {
+                                    inner: Box::new(current),
+                                    expr: SparExpr::Bound(bound_var),
+                                };
+                            }
+                        }
                         // Group variables = all projected non-aggregate vars that are
                         // not targets of post-group extends either.
                         let group_vars: Vec<Variable> = project_vars
@@ -3720,6 +3747,69 @@ impl TranslationState {
                 self.pending_aggs.push((fresh.clone(), agg_expr));
                 Ok(SparExpr::Variable(fresh))
             }
+            Expression::CaseExpression { operand, whens, else_expr } => {
+                // CASE [operand] WHEN v1 THEN r1 WHEN v2 THEN r2 ... [ELSE default] END
+                // Translate to nested SPARQL IF(..., ..., IF(..., ..., default)).
+                // For simple CASE (with operand): WHEN vi → IF(operand = vi, ri, ...)
+                // For searched CASE (no operand): WHEN pred → IF(pred, ri, ...)
+                let operand_expr = match operand {
+                    Some(op) => Some(self.translate_expr(op, extra)?),
+                    None => None,
+                };
+                let null_var = self.fresh_var("null");
+                let default_expr = match else_expr {
+                    Some(e) => self.translate_expr(e, extra)?,
+                    None => SparExpr::Variable(null_var),
+                };
+                // Build right-to-left: innermost IF is last WHEN, outermost is first WHEN
+                let result = whens.iter().rev().try_fold(
+                    default_expr,
+                    |acc, (when_val, then_expr)| -> Result<SparExpr, PolygraphError> {
+                        let condition = match &operand_expr {
+                            Some(op) => {
+                                let when_translated = self.translate_expr(when_val, extra)?;
+                                SparExpr::Equal(Box::new(op.clone()), Box::new(when_translated))
+                            }
+                            None => self.translate_expr(when_val, extra)?,
+                        };
+                        let then_translated = self.translate_expr(then_expr, extra)?;
+                        Ok(SparExpr::If(Box::new(condition), Box::new(then_translated), Box::new(acc)))
+                    },
+                )?;
+                Ok(result)
+            }
+            Expression::QuantifierExpr { kind, variable, list, predicate } => {
+                // all(x IN list WHERE pred), any(...), none(...), single(...)
+                // For runtime collections, we can't translate statically.
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: format!(
+                        "quantifier expression `{kind:?}(x IN ...)` on runtime collection (Phase C)",
+                    ),
+                })
+            }
+            Expression::Subscript(collection, index) => {
+                // expr[key] — for map subscript with a string literal key,
+                // translate as property access. Otherwise unsupported.
+                if let Expression::Literal(Literal::String(key)) = index.as_ref() {
+                    // Rewrite as property access: collection.key
+                    let prop_expr = Expression::Property(collection.clone(), key.clone());
+                    self.translate_expr(&prop_expr, extra)
+                } else {
+                    Err(PolygraphError::UnsupportedFeature {
+                        feature: "dynamic subscript access with non-literal key (Phase C)".to_string(),
+                    })
+                }
+            }
+            Expression::ListSlice { list: _, start: _, end: _ } => {
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: "list slice expr[n..m] (Phase C)".to_string(),
+                })
+            }
+            Expression::ListComprehension { variable: _, list: _, predicate: _, projection: _ } => {
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: "list comprehension [x IN list WHERE pred | expr] (Phase C)".to_string(),
+                })
+            }
         }
     }
 
@@ -4232,7 +4322,7 @@ impl TranslationState {
                     return Ok(current);
                 }
 
-                let bindings: Result<Vec<Vec<Option<GroundTerm>>>, _> = items
+                let bindings_result: Result<Vec<Vec<Option<GroundTerm>>>, _> = items
                     .iter()
                     .map(|e| match e {
                         Expression::Literal(Literal::Null) => Ok(vec![None]),
@@ -4250,9 +4340,15 @@ impl TranslationState {
                         }
                     })
                     .collect();
+                let has_null = items.iter().any(|e| matches!(e, Expression::Literal(Literal::Null)));
+                if has_null {
+                    // Track this variable as having UNDEF rows to work around oxigraph
+                    // bug where MAX/MIN over VALUES with UNDEF returns null.
+                    self.unwind_null_vars.insert(u.variable.clone());
+                }
                 let values = GraphPattern::Values {
                     variables: vec![var],
-                    bindings: bindings?,
+                    bindings: bindings_result?,
                 };
                 Ok(join_patterns(current, values))
             }
@@ -4415,6 +4511,28 @@ impl TranslationState {
                 Ok(spar_lit.into())
             }
             Expression::Variable(name) => Ok(Variable::new_unchecked(name.clone()).into()),
+            // Handle -N and -F negation directly (common in UNWIND lists)
+            Expression::Negate(inner) => {
+                match inner.as_ref() {
+                    Expression::Literal(Literal::Integer(n)) => {
+                        let neg_lit = SparLit::new_typed_literal(
+                            (-n).to_string(),
+                            NamedNode::new_unchecked(XSD_INTEGER),
+                        );
+                        Ok(SparLit::into(neg_lit))
+                    }
+                    Expression::Literal(Literal::Float(f)) => {
+                        let neg_lit = SparLit::new_typed_literal(
+                            format!("{:?}", -f),
+                            NamedNode::new_unchecked(XSD_DOUBLE),
+                        );
+                        Ok(SparLit::into(neg_lit))
+                    }
+                    _ => Err(PolygraphError::UnsupportedFeature {
+                        feature: "complex negation in UNWIND list".to_string(),
+                    }),
+                }
+            }
             _ => Err(PolygraphError::UnsupportedFeature {
                 feature: "complex expression in inline property map (Phase 4)".to_string(),
             }),
@@ -4658,6 +4776,26 @@ fn expr_uses_nullable(expr: &Expression, nullable: &std::collections::HashSet<St
         Expression::LabelCheck { variable, .. } => nullable.contains(variable),
         Expression::PatternPredicate(_) => false,
         Expression::Aggregate(_) | Expression::Literal(_) | Expression::Map(_) => false,
+        Expression::CaseExpression { operand, whens, else_expr } => {
+            operand.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
+                || whens.iter().any(|(w, t)| expr_uses_nullable(w, nullable) || expr_uses_nullable(t, nullable))
+                || else_expr.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
+        }
+        Expression::QuantifierExpr { list, predicate, .. } => {
+            expr_uses_nullable(list, nullable)
+                || predicate.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
+        }
+        Expression::Subscript(a, b) => expr_uses_nullable(a, nullable) || expr_uses_nullable(b, nullable),
+        Expression::ListSlice { list, start, end } => {
+            expr_uses_nullable(list, nullable)
+                || start.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
+                || end.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
+        }
+        Expression::ListComprehension { list, predicate, projection, .. } => {
+            expr_uses_nullable(list, nullable)
+                || predicate.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
+                || projection.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
+        }
     }
 }
 

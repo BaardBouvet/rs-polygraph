@@ -61,6 +61,14 @@ kw_UNION    = @{ ^"UNION"    ~ !ident_char }
 kw_ALL      = @{ ^"ALL"      ~ !ident_char }
 kw_ASCENDING  = @{ ^"ASCENDING"  ~ !ident_char }
 kw_DESCENDING = @{ ^"DESCENDING" ~ !ident_char }
+kw_CASE  = @{ ^"CASE"  ~ !ident_char }
+kw_WHEN  = @{ ^"WHEN"  ~ !ident_char }
+kw_THEN  = @{ ^"THEN"  ~ !ident_char }
+kw_ELSE  = @{ ^"ELSE"  ~ !ident_char }
+kw_END   = @{ ^"END"   ~ !ident_char }
+kw_ANY   = @{ ^"ANY"   ~ !ident_char }
+kw_NONE  = @{ ^"NONE"  ~ !ident_char }
+kw_SINGLE = @{ ^"SINGLE" ~ !ident_char }
 // Aggregate function keywords
 kw_COUNT    = @{ ^"count"    ~ !ident_char }
 kw_SUM      = @{ ^"sum"      ~ !ident_char }
@@ -77,7 +85,9 @@ keyword = _{
     kw_TRUE | kw_FALSE | kw_IS | kw_IN | kw_CONTAINS | kw_STARTS | kw_ENDS |
     kw_ORDER | kw_BY | kw_SKIP | kw_LIMIT | kw_UNWIND |
     kw_CREATE | kw_MERGE | kw_SET | kw_DELETE | kw_DETACH | kw_REMOVE | kw_CALL |
-    kw_UNION | kw_ALL | kw_ASCENDING | kw_DESCENDING
+    kw_UNION | kw_ALL | kw_ASCENDING | kw_DESCENDING |
+    kw_CASE | kw_WHEN | kw_THEN | kw_ELSE | kw_END |
+    kw_ANY | kw_NONE | kw_SINGLE
 }
 
 // ----- Identifiers & variables ------------------------------
@@ -182,7 +192,9 @@ mul_div_op          = { "*" | "/" | "%" }
 unary_expr          = { unary_minus | power_expr }
 unary_minus         = { "-" ~ unary_expr }
 power_expr          = { prop_expr ~ ("^" ~ unary_expr)? }
-prop_expr           = { atom ~ property_lookup* }
+prop_expr           = { atom ~ (property_lookup | slice_access | subscript_access)* }
+slice_access     = { "[" ~ expression? ~ ".." ~ expression? ~ "]" }
+subscript_access = { "[" ~ expression ~ "]" }
 property_lookup     = { "." ~ prop_name }
 
 atom        = { float_literal
@@ -193,13 +205,27 @@ atom        = { float_literal
               | boolean_literal
               | null_literal
               | aggregate_expr
+              | case_expression
+              | quantifier_expr
               | function_call
               | label_check
+              | list_comprehension
               | list_literal
               | map_literal
               | pattern_predicate
               | "(" ~ expression ~ ")"
               | variable }
+
+// CASE expressions
+case_expression = { kw_CASE ~ expression? ~ case_alternative+ ~ (kw_ELSE ~ expression)? ~ kw_END }
+case_alternative = { kw_WHEN ~ expression ~ kw_THEN ~ expression }
+
+// Quantifier expressions: all(x IN list WHERE pred), any(...), none(...), single(...)
+filter_expression = { variable ~ kw_IN ~ expression ~ (kw_WHERE ~ expression)? }
+quantifier_expr = { (kw_ALL | kw_ANY | kw_NONE | kw_SINGLE) ~ "(" ~ filter_expression ~ ")" }
+
+// List comprehension: [x IN list WHERE pred | projection]
+list_comprehension = { "[" ~ filter_expression ~ ("|" ~ expression)? ~ "]" }
 
 // Pattern predicate in expression context: (a)-[:T]->(b:Label) tests for path existence.
 pattern_predicate = { node_pattern ~ (rel_pattern ~ node_pattern)+ }

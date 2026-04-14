@@ -5,9 +5,9 @@ use pest_derive::Parser;
 use crate::ast::cypher::{
     AggregateExpr, CallClause, Clause, CompOp, CreateClause, CypherQuery, DeleteClause, Direction,
     Expression, Ident, Label, Literal, MapLiteral, MatchClause, MergeClause, NodePattern,
-    OrderByClause, Pattern, PatternElement, PatternList, RangeQuantifier, RelationshipPattern,
-    RemoveClause, RemoveItem, ReturnClause, ReturnItem, ReturnItems, SetClause, SetItem, SortItem,
-    UnwindClause, WhereClause, WithClause,
+    OrderByClause, Pattern, PatternElement, PatternList, QuantifierKind, RangeQuantifier,
+    RelationshipPattern, RemoveClause, RemoveItem, ReturnClause, ReturnItem, ReturnItems,
+    SetClause, SetItem, SortItem, UnwindClause, WhereClause, WithClause,
 };
 use crate::error::PolygraphError;
 
@@ -995,20 +995,55 @@ fn build_power_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
 }
 
 fn build_prop_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    // prop_expr = { atom ~ property_lookup* }
+    // prop_expr = { atom ~ (property_lookup | slice_access | subscript_access)* }
     let mut children = pair.into_inner();
     let atom_pair = children.next().expect("prop_expr has atom");
     let mut acc = build_atom(atom_pair)?;
-    for lookup in children {
-        // property_lookup = { "." ~ prop_name }
-        let key = lookup
-            .into_inner()
-            .find(|p| p.as_rule() == Rule::prop_name)
-            .expect("property_lookup has prop_name")
-            .as_str()
-            .trim_matches('`')
-            .to_string();
-        acc = Expression::Property(Box::new(acc), key);
+    for postfix in children {
+        match postfix.as_rule() {
+            Rule::property_lookup => {
+                // property_lookup = { "." ~ prop_name }
+                let key = postfix
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::prop_name)
+                    .expect("property_lookup has prop_name")
+                    .as_str()
+                    .trim_matches('`')
+                    .to_string();
+                acc = Expression::Property(Box::new(acc), key);
+            }
+            Rule::slice_access => {
+                // slice_access = { "[" ~ expression? ~ ".." ~ expression? ~ "]" }
+                let mut start: Option<Box<Expression>> = None;
+                let mut end: Option<Box<Expression>> = None;
+                let mut seen_first = false;
+                for child in postfix.into_inner() {
+                    if child.as_rule() == Rule::expression {
+                        if !seen_first {
+                            start = Some(Box::new(build_expression(child)?));
+                            seen_first = true;
+                        } else {
+                            end = Some(Box::new(build_expression(child)?));
+                        }
+                    }
+                }
+                acc = Expression::ListSlice {
+                    list: Box::new(acc),
+                    start,
+                    end,
+                };
+            }
+            Rule::subscript_access => {
+                // subscript_access = { "[" ~ expression ~ "]" }
+                let idx_pair = postfix
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::expression)
+                    .expect("subscript_access has expression");
+                let idx = build_expression(idx_pair)?;
+                acc = Expression::Subscript(Box::new(acc), Box::new(idx));
+            }
+            _ => {}
+        }
     }
     Ok(acc)
 }
@@ -1064,8 +1099,11 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
         }
         Rule::null_literal => Ok(Expression::Literal(Literal::Null)),
         Rule::aggregate_expr => build_aggregate_expr(inner),
+        Rule::case_expression => build_case_expression(inner),
+        Rule::quantifier_expr => build_quantifier_expr(inner),
         Rule::function_call => build_function_call(inner),
         Rule::label_check => build_label_check(inner),
+        Rule::list_comprehension => build_list_comprehension(inner),
         Rule::pattern_predicate => {
             // pattern_predicate = { node_pattern ~ (rel_pattern ~ node_pattern)+ }
             // Build elements directly since this rule doesn't use chain_link wrapping.
@@ -1105,6 +1143,120 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn build_case_expression(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
+    // case_expression = { kw_CASE ~ expression? ~ case_alternative+ ~ (kw_ELSE ~ expression)? ~ kw_END }
+    let mut operand: Option<Box<Expression>> = None;
+    let mut whens: Vec<(Expression, Expression)> = Vec::new();
+    let mut else_expr: Option<Box<Expression>> = None;
+    let mut found_else = false;
+    let mut last_was_kw_else = false;
+    for child in pair.into_inner() {
+        match child.as_rule() {
+            Rule::kw_CASE | Rule::kw_END => {}
+            Rule::kw_ELSE => { last_was_kw_else = true; }
+            Rule::case_alternative => {
+                // case_alternative = { kw_WHEN ~ expression ~ kw_THEN ~ expression }
+                let mut exprs: Vec<Expression> = Vec::new();
+                for c in child.into_inner() {
+                    if c.as_rule() == Rule::expression {
+                        exprs.push(build_expression(c)?);
+                    }
+                }
+                if exprs.len() == 2 {
+                    whens.push((exprs.remove(0), exprs.remove(0)));
+                }
+            }
+            Rule::expression => {
+                if last_was_kw_else {
+                    else_expr = Some(Box::new(build_expression(child)?));
+                    found_else = true;
+                } else if whens.is_empty() {
+                    // This is the operand (before any WHEN)
+                    operand = Some(Box::new(build_expression(child)?));
+                }
+                last_was_kw_else = false;
+            }
+            _ => { last_was_kw_else = false; }
+        }
+    }
+    let _ = found_else;
+    Ok(Expression::CaseExpression { operand, whens, else_expr })
+}
+
+fn build_quantifier_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
+    // quantifier_expr = { (kw_ALL | kw_ANY | kw_NONE | kw_SINGLE) ~ "(" ~ filter_expression ~ ")" }
+    let mut kind: Option<QuantifierKind> = None;
+    let mut variable: Option<String> = None;
+    let mut list: Option<Expression> = None;
+    let mut predicate: Option<Box<Expression>> = None;
+    for child in pair.into_inner() {
+        match child.as_rule() {
+            Rule::kw_ALL => kind = Some(QuantifierKind::All),
+            Rule::kw_ANY => kind = Some(QuantifierKind::Any),
+            Rule::kw_NONE => kind = Some(QuantifierKind::None),
+            Rule::kw_SINGLE => kind = Some(QuantifierKind::Single),
+            Rule::filter_expression => {
+                // filter_expression = { variable ~ kw_IN ~ expression ~ (kw_WHERE ~ expression)? }
+                let mut exprs: Vec<Expression> = Vec::new();
+                for c in child.into_inner() {
+                    match c.as_rule() {
+                        Rule::variable => variable = Some(ident_text(&c)),
+                        Rule::expression => exprs.push(build_expression(c)?),
+                        _ => {}
+                    }
+                }
+                if !exprs.is_empty() { list = Some(exprs.remove(0)); }
+                if !exprs.is_empty() { predicate = Some(Box::new(exprs.remove(0))); }
+            }
+            _ => {}
+        }
+    }
+    Ok(Expression::QuantifierExpr {
+        kind: kind.expect("quantifier_expr has kind"),
+        variable: variable.expect("filter_expression has variable"),
+        list: Box::new(list.expect("filter_expression has list")),
+        predicate,
+    })
+}
+
+fn build_list_comprehension(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
+    // list_comprehension = { "[" ~ filter_expression ~ ("|" ~ expression)? ~ "]" }
+    // filter_expression = { variable ~ kw_IN ~ expression ~ (kw_WHERE ~ expression)? }
+    let mut variable: Option<String> = None;
+    let mut list: Option<Expression> = None;
+    let mut predicate: Option<Box<Expression>> = None;
+    let mut projection: Option<Box<Expression>> = None;
+    let mut filter_done = false;
+    for child in pair.into_inner() {
+        match child.as_rule() {
+            Rule::filter_expression => {
+                let mut exprs: Vec<Expression> = Vec::new();
+                for c in child.into_inner() {
+                    match c.as_rule() {
+                        Rule::variable => variable = Some(ident_text(&c)),
+                        Rule::expression => exprs.push(build_expression(c)?),
+                        _ => {}
+                    }
+                }
+                if !exprs.is_empty() { list = Some(exprs.remove(0)); }
+                if !exprs.is_empty() { predicate = Some(Box::new(exprs.remove(0))); }
+                filter_done = true;
+            }
+            Rule::expression if filter_done => {
+                // The | projection expression
+                projection = Some(Box::new(build_expression(child)?));
+            }
+            _ => {}
+        }
+    }
+    Ok(Expression::ListComprehension {
+        variable: variable.expect("list_comprehension has variable"),
+        list: Box::new(list.expect("list_comprehension has list")),
+        predicate,
+        projection,
+    })
+}
 
 fn build_aggregate_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
     // aggregate_expr = { count_expr | agg_call_expr }

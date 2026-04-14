@@ -279,6 +279,43 @@ pub enum Expression {
     /// Pattern predicate in expression context: `(a)-[:T]->(b:Label)`.
     /// Tests for path existence (translates to SPARQL EXISTS).
     PatternPredicate(Pattern),
+    /// CASE expression: `CASE [operand] WHEN val THEN result ... [ELSE default] END`.
+    CaseExpression {
+        operand: Option<Box<Expression>>,
+        whens: Vec<(Expression, Expression)>,
+        else_expr: Option<Box<Expression>>,
+    },
+    /// Quantifier: `all(x IN list WHERE pred)`, `any(...)`, `none(...)`, `single(...)`.
+    QuantifierExpr {
+        kind: QuantifierKind,
+        variable: Ident,
+        list: Box<Expression>,
+        predicate: Option<Box<Expression>>,
+    },
+    /// Subscript access: `expr[index]`.
+    Subscript(Box<Expression>, Box<Expression>),
+    /// List slice: `expr[start..end]` (either bound may be absent).
+    ListSlice {
+        list: Box<Expression>,
+        start: Option<Box<Expression>>,
+        end: Option<Box<Expression>>,
+    },
+    /// List comprehension: `[x IN list WHERE pred | projection]`.
+    ListComprehension {
+        variable: Ident,
+        list: Box<Expression>,
+        predicate: Option<Box<Expression>>,
+        projection: Option<Box<Expression>>,
+    },
+}
+
+/// Quantifier kind for `all / any / none / single` expressions.
+#[derive(Debug, Clone, PartialEq)]
+pub enum QuantifierKind {
+    All,
+    Any,
+    None,
+    Single,
 }
 
 /// Binary comparison operators.
