@@ -1517,9 +1517,9 @@ impl TranslationState {
             };
             let pred_term: spargebra::term::NamedNodePattern = pred_var.clone().into();
 
-            // Build RDF-star annotation triples for inline relationship properties
+            // Build RDF 1.2 reification-based patterns for inline relationship properties
             // (e.g. [r {name: 'r1'}]).  For untyped relationships the predicate is
-            // a variable, so we construct << ?s ?pred ?o >> <prop> val manually.
+            // a variable so the triple term is <<( ?s ?pred ?o )>>.
             let prop_anno = if self.rdf_star {
                 if let Some(ref props) = rel.properties {
                     let mut pairs = Vec::new();
@@ -1535,26 +1535,27 @@ impl TranslationState {
                 Vec::new()
             };
 
-            // Helper: build annotation triple patterns << s pred_var o >> prop val
-            // for a given (subject, object) direction.
+            // Generate a fresh reifier variable once; reused across both UNION branches.
+            // The fresh var is None when there are no properties (skipped).
+            let anno_reif_var = if prop_anno.is_empty() {
+                None
+            } else {
+                Some(self.fresh_var("__rdf12_reif"))
+            };
+
+            // Helper: build RDF 1.2 reification patterns for inline properties.
+            // ?reif rdf:reifies <<( s pred o )>> . ?reif <prop> val . ...
             let anno_triples = |s: &TermPattern, o: &TermPattern| -> Vec<TriplePattern> {
-                if prop_anno.is_empty() {
+                let Some(ref reif_var) = anno_reif_var else {
                     return Vec::new();
-                }
-                let inner = TriplePattern {
-                    subject: s.clone(),
-                    predicate: pred_term.clone(),
-                    object: o.clone(),
                 };
-                let edge_subj = TermPattern::Triple(Box::new(inner));
-                prop_anno
-                    .iter()
-                    .map(|(prop_iri, prop_val)| TriplePattern {
-                        subject: edge_subj.clone(),
-                        predicate: prop_iri.clone().into(),
-                        object: prop_val.clone(),
-                    })
-                    .collect()
+                rdf_mapping::rdf_star::all_property_triples(
+                    s.clone(),
+                    pred_term.clone(),
+                    o.clone(),
+                    &prop_anno,
+                    reif_var.clone(),
+                )
             };
 
             match rel.direction {
@@ -2081,11 +2082,13 @@ impl TranslationState {
                 }
 
                 if self.rdf_star {
+                    let reif_var = self.fresh_var("__rdf12_reif");
                     let extra = rdf_mapping::rdf_star::all_property_triples(
                         src.clone(),
-                        pred.clone(),
+                        spargebra::term::NamedNodePattern::NamedNode(pred.clone()),
                         dst.clone(),
                         &prop_pairs,
+                        reif_var,
                     );
                     triples.extend(extra);
                 } else {
@@ -2562,13 +2565,25 @@ impl TranslationState {
                             Some(pv) => NamedNodePattern::Variable(pv),
                             None => NamedNodePattern::NamedNode(edge.pred.clone()),
                         };
-                        let edge_triple = spargebra::term::TriplePattern {
-                            subject: edge.src.clone(),
-                            predicate: pred_pattern,
-                            object: edge.dst.clone(),
-                        };
+                        // RDF 1.2 reification: ?reif rdf:reifies <<(src pred dst)>>, ?reif <prop> ?result
+                        let reif_var = self.fresh_var(&format!("__rdf12_reif_{key}"));
+                        let rdf_reifies = NamedNode::new_unchecked(
+                            "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
+                        );
+                        let edge_term = TermPattern::Triple(Box::new(
+                            spargebra::term::TriplePattern {
+                                subject: edge.src.clone(),
+                                predicate: pred_pattern,
+                                object: edge.dst.clone(),
+                            },
+                        ));
                         triples.push(spargebra::term::TriplePattern {
-                            subject: spargebra::term::TermPattern::Triple(Box::new(edge_triple)),
+                            subject: reif_var.clone().into(),
+                            predicate: rdf_reifies.into(),
+                            object: edge_term,
+                        });
+                        triples.push(spargebra::term::TriplePattern {
+                            subject: reif_var.into(),
                             predicate: prop_iri.into(),
                             object: result_var.clone().into(),
                         });
@@ -2745,20 +2760,30 @@ impl TranslationState {
                 if let Some(edge) = self.edge_map.get(&var_name).cloned() {
                     let prop_iri = self.iri(key);
                     if self.rdf_star {
-                        // Use pred_var when available (untyped relationship) so the
-                        // annotated triple matches the actual stored predicate.
+                        // RDF 1.2 reification: ?reif rdf:reifies <<(src pred dst)>>, ?reif <prop> fresh
                         use spargebra::term::NamedNodePattern;
                         let pred_pat: NamedNodePattern = match edge.pred_var.clone() {
                             Some(pv) => NamedNodePattern::Variable(pv),
                             None => NamedNodePattern::NamedNode(edge.pred.clone()),
                         };
-                        let edge_triple = spargebra::term::TriplePattern {
-                            subject: edge.src.clone(),
-                            predicate: pred_pat,
-                            object: edge.dst.clone(),
-                        };
+                        let reif_var = self.fresh_var(&format!("__rdf12_reif_{var_name}_{key}"));
+                        let rdf_reifies = NamedNode::new_unchecked(
+                            "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
+                        );
+                        let edge_term = TermPattern::Triple(Box::new(
+                            spargebra::term::TriplePattern {
+                                subject: edge.src.clone(),
+                                predicate: pred_pat,
+                                object: edge.dst.clone(),
+                            },
+                        ));
                         extra.push(spargebra::term::TriplePattern {
-                            subject: spargebra::term::TermPattern::Triple(Box::new(edge_triple)),
+                            subject: reif_var.clone().into(),
+                            predicate: rdf_reifies.into(),
+                            object: edge_term,
+                        });
+                        extra.push(spargebra::term::TriplePattern {
+                            subject: reif_var.into(),
                             predicate: prop_iri.into(),
                             object: fresh.clone().into(),
                         });

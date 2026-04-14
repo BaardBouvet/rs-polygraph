@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use cucumber::{gherkin::Step, given, then, when, World};
-use oxigraph::{model::Term, sparql::QueryResults, store::Store};
+use oxigraph::{model::Term, sparql::{QueryResults, SparqlEvaluator}, store::Store};
 use polygraph::{
     ast::cypher::{Clause, Direction, Expression, Literal, PatternElement},
     parser::parse_cypher,
@@ -413,7 +413,36 @@ async fn executing_query(world: &mut TckWorld, step: &Step) {
     let store = world
         .store
         .get_or_insert_with(|| OxStore(Store::new().unwrap()));
-    match store.0.query(sparql.as_str()) {
+    // Register urn:polygraph:unsupported-pow as a real custom function so that
+    // unknown-custom-function errors don't break the pow null-propagation tests.
+    // When either operand is unbound (Cypher null), spareval returns None before
+    // calling the function, so null propagation still works correctly.
+    #[expect(deprecated)]
+    match store.0.query_opt(
+        sparql.as_str(),
+        SparqlEvaluator::new().with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:unsupported-pow"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let a = match args.first()? {
+                    OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                    _ => return None,
+                };
+                let b = match args.get(1)? {
+                    OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                    _ => return None,
+                };
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_typed_literal(
+                        a.powf(b).to_string(),
+                        oxigraph::model::NamedNode::new_unchecked(
+                            "http://www.w3.org/2001/XMLSchema#double",
+                        ),
+                    ),
+                ))
+            },
+        ),
+    ) {
         Err(e) => {
             world.query_error = Some(e.to_string());
         }
