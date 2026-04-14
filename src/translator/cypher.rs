@@ -706,6 +706,20 @@ impl TranslationState {
         Variable::new_unchecked(format!("__{hint}_{n}"))
     }
 
+    /// Resolve an expression to a literal list of items (for compile-time evaluation).
+    /// Returns Some(items) if the expression is a literal list or a WITH-bound literal list variable.
+    fn resolve_literal_list(&self, expr: &Expression) -> Option<Vec<Expression>> {
+        match expr {
+            Expression::List(items) => Some(items.clone()),
+            Expression::Variable(v) => {
+                self.with_list_vars.get(v.as_str()).and_then(|e| {
+                    if let Expression::List(items) = e { Some(items.clone()) } else { None }
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Build a `<base:local>` IRI.
     fn iri(&self, local: &str) -> NamedNode {
         NamedNode::new_unchecked(format!("{}{}", self.base_iri, local))
@@ -3950,16 +3964,72 @@ impl TranslationState {
                     // Rewrite as property access: collection.key
                     let prop_expr = Expression::Property(collection.clone(), key.clone());
                     self.translate_expr(&prop_expr, extra)
+                } else if let Some(idx) = get_literal_int(index) {
+                    // Integer subscript: try to resolve collection to a literal list.
+                    let items_opt = self.resolve_literal_list(collection);
+                    if let Some(items) = items_opt {
+                        let n = items.len() as i64;
+                        let i = if idx < 0 { n + idx } else { idx };
+                        if i >= 0 && i < n {
+                            self.translate_expr(&items[i as usize], extra)
+                        } else {
+                            // Out of bounds → null
+                            Ok(SparExpr::Variable(self.fresh_var("null")))
+                        }
+                    } else {
+                        Err(PolygraphError::UnsupportedFeature {
+                            feature: "subscript access on non-literal list (Phase C)".to_string(),
+                        })
+                    }
                 } else {
                     Err(PolygraphError::UnsupportedFeature {
                         feature: "dynamic subscript access with non-literal key (Phase C)".to_string(),
                     })
                 }
             }
-            Expression::ListSlice { list: _, start: _, end: _ } => {
-                Err(PolygraphError::UnsupportedFeature {
-                    feature: "list slice expr[n..m] (Phase C)".to_string(),
-                })
+            Expression::ListSlice { list, start, end } => {
+                // Compile-time list slice for literal lists.
+                let items_opt = self.resolve_literal_list(list);
+                if let Some(items) = items_opt {
+                    let n = items.len() as i64;
+                    // Handle null start/end → null result
+                    let start_is_null = start.as_deref().map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
+                    let end_is_null = end.as_deref().map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
+                    if start_is_null || end_is_null {
+                        return Ok(SparExpr::Variable(self.fresh_var("null")));
+                    }
+                    // Resolve start/end indices
+                    let s: i64 = if let Some(start_expr) = start {
+                        match get_literal_int(start_expr) {
+                            Some(i) => if i < 0 { (n + i).max(0) } else { i.min(n) },
+                            None => return Err(PolygraphError::UnsupportedFeature {
+                                feature: "list slice with non-literal start (Phase C)".to_string(),
+                            }),
+                        }
+                    } else { 0 };
+                    let e: i64 = if let Some(end_expr) = end {
+                        match get_literal_int(end_expr) {
+                            Some(i) => if i < 0 { (n + i).max(0) } else { i.min(n) },
+                            None => return Err(PolygraphError::UnsupportedFeature {
+                                feature: "list slice with non-literal end (Phase C)".to_string(),
+                            }),
+                        }
+                    } else { n };
+                    // Slice
+                    let slice_start = s.max(0) as usize;
+                    let slice_end = e.max(0).min(n) as usize;
+                    let sliced: Vec<Expression> = if slice_end > slice_start {
+                        items[slice_start..slice_end].to_vec()
+                    } else {
+                        vec![]
+                    };
+                    let serialized = serialize_list_literal(&sliced);
+                    Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)))
+                } else {
+                    Err(PolygraphError::UnsupportedFeature {
+                        feature: "list slice expr[n..m] (Phase C)".to_string(),
+                    })
+                }
             }
             Expression::ListComprehension { variable, list, predicate, projection } => {
                 // Attempt compile-time evaluation when the list is a literal or a known WITH-bound literal.
@@ -5330,6 +5400,18 @@ fn serialize_list_literal(elems: &[Expression]) -> String {
         })
         .collect();
     format!("[{}]", parts.join(", "))
+}
+
+/// Extract an integer value from a literal integer expression (direct or negated).
+fn get_literal_int(expr: &Expression) -> Option<i64> {
+    match expr {
+        Expression::Literal(Literal::Integer(n)) => Some(*n),
+        Expression::Negate(inner) => match inner.as_ref() {
+            Expression::Literal(Literal::Integer(n)) => Some(-n),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Serialize a single expression as a list element (no outer brackets).
