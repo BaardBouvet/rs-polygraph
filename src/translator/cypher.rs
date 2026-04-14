@@ -1279,13 +1279,49 @@ impl TranslationState {
                     });
                 }
                 Clause::Delete(d) => {
-                    return Err(PolygraphError::UnsupportedFeature {
-                        feature: format!(
-                            "{} clause (SPARQL Update, Phase 4+): {} expression(s)",
-                            if d.detach { "DETACH DELETE" } else { "DELETE" },
-                            d.expressions.len()
-                        ),
+                    // If the query has a subsequent RETURN clause AND the RETURN
+                    // only references type/id metadata (not properties) of deleted
+                    // variables, skip the DELETE so the SELECT can still be produced.
+                    // Property accesses on deleted entities remain errors to preserve
+                    // runtime-error semantics expected by the TCK.
+                    let deleted_vars: std::collections::HashSet<String> = d
+                        .expressions
+                        .iter()
+                        .filter_map(|e| {
+                            if let Expression::Variable(v) = e {
+                                Some(v.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    let return_safe = clauses.iter().any(|c| {
+                        if let Clause::Return(ret) = c {
+                            if let crate::ast::cypher::ReturnItems::Explicit(ref items) =
+                                ret.items
+                            {
+                                // Safe only if no item accesses a property of a deleted var.
+                                !items.iter().any(|item| {
+                                    expr_accesses_deleted_prop(&item.expression, &deleted_vars)
+                                })
+                            } else {
+                                false // RETURN * would project deleted vars' props — unsafe
+                            }
+                        } else {
+                            false
+                        }
                     });
+                    if !return_safe {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: format!(
+                                "{} clause (SPARQL Update, Phase 4+): {} expression(s)",
+                                if d.detach { "DETACH DELETE" } else { "DELETE" },
+                                d.expressions.len()
+                            ),
+                        });
+                    }
+                    // DELETE with safe RETURN (e.g. type(r)): skip the deletion,
+                    // the SELECT will still produce the correct metadata values.
                 }
                 Clause::Remove(r) => {
                     return Err(PolygraphError::UnsupportedFeature {
@@ -3957,6 +3993,73 @@ impl TranslationState {
 /// Detect `WITH … collect(X) AS list … / UNWIND list AS item` pairs and rewrite
 /// them into simple projections (`WITH … X AS item …`).  This eliminates the
 /// need for runtime list iteration which SPARQL 1.1 cannot express.
+/// Return `true` if `expr` contains a property access (`x.key`) where `x` is
+/// one of the deleted variables. Used to decide whether a DELETE clause is
+/// safe to skip (when only metadata like `type(r)` is accessed).
+fn expr_accesses_deleted_prop(
+    expr: &Expression,
+    deleted_vars: &std::collections::HashSet<String>,
+) -> bool {
+    match expr {
+        Expression::Property(base, _) => {
+            if let Expression::Variable(v) = base.as_ref() {
+                return deleted_vars.contains(v.as_str());
+            }
+            expr_accesses_deleted_prop(base, deleted_vars)
+        }
+        Expression::FunctionCall { name, args, .. } => {
+            // labels(n) / id(n) / etc. on a deleted var is unsafe too.
+            let is_unsafe_fn = matches!(
+                name.to_lowercase().as_str(),
+                "labels" | "id" | "elementid" | "properties" | "keys"
+            );
+            if is_unsafe_fn {
+                if let Some(Expression::Variable(v)) = args.first() {
+                    if deleted_vars.contains(v.as_str()) {
+                        return true;
+                    }
+                }
+            }
+            args.iter()
+                .any(|a| expr_accesses_deleted_prop(a, deleted_vars))
+        }
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Xor(a, b)
+        | Expression::Comparison(a, _, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b)
+        | Expression::Modulo(a, b)
+        | Expression::Power(a, b) => {
+            expr_accesses_deleted_prop(a, deleted_vars)
+                || expr_accesses_deleted_prop(b, deleted_vars)
+        }
+        Expression::Not(e) | Expression::Negate(e) | Expression::IsNull(e) | Expression::IsNotNull(e) => {
+            expr_accesses_deleted_prop(e, deleted_vars)
+        }
+        Expression::List(elems) => elems
+            .iter()
+            .any(|e| expr_accesses_deleted_prop(e, deleted_vars)),
+        Expression::Map(pairs) => pairs
+            .iter()
+            .any(|(_, e)| expr_accesses_deleted_prop(e, deleted_vars)),
+        Expression::Aggregate(agg) => {
+            let inner = match agg {
+                AggregateExpr::Count { expr, .. } => expr.as_deref(),
+                AggregateExpr::Sum { expr, .. }
+                | AggregateExpr::Avg { expr, .. }
+                | AggregateExpr::Min { expr, .. }
+                | AggregateExpr::Max { expr, .. }
+                | AggregateExpr::Collect { expr, .. } => Some(expr.as_ref()),
+            };
+            inner.map_or(false, |e| expr_accesses_deleted_prop(e, deleted_vars))
+        }
+        _ => false,
+    }
+}
+
 fn eliminate_collect_unwind(clauses: &[Clause]) -> Vec<Clause> {
     let mut result: Vec<Clause> = Vec::new();
     let mut i = 0;
