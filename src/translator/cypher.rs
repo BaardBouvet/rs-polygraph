@@ -549,6 +549,11 @@ struct EdgeInfo {
     /// BIND'd to a canonical CONCAT(STR(s), "|", STR(p), "|", STR(o)) of the
     /// actual stored triple, so it is direction-invariant for undirected matches.
     eid_var: Option<Variable>,
+    /// The `with_generation` counter at the time this edge was bound.  When the
+    /// second occurrence of a relationship variable is processed, we compare this
+    /// against the current `with_generation`; if equal, no WITH has occurred since
+    /// the edge was first bound and the eid_var is still in scope.
+    binding_generation: u64,
 }
 
 /// One triple "slot" tracking a stored-triple (subject, predicate, object) for isomorphism.
@@ -592,6 +597,15 @@ struct TranslationState {
     /// Virtual map aliases from `head(collect({k: v})) AS alias`.
     /// Maps alias name → {key → SPARQL variable holding the min-aggregated value}.
     map_vars: std::collections::HashMap<String, std::collections::HashMap<String, Variable>>,
+    /// Monotonically increasing counter, incremented on every WITH clause.
+    /// Stored in each EdgeInfo so we can detect whether a WITH has occurred
+    /// between when a relationship was first bound and when it is re-used.
+    with_generation: u64,
+    /// Deferred FILTER expressions accumulated during translate_relationship_pattern
+    /// for re-used edges.  Applied to the combined MATCH pattern in
+    /// translate_match_clause after all path patterns are joined (so the outer
+    /// variables from preceding MATCH clauses are in scope for the FILTER).
+    pending_match_filters: Vec<spargebra::algebra::Expression>,
 }
 
 impl TranslationState {
@@ -612,6 +626,8 @@ impl TranslationState {
             return_distinct: false,
             varlen_rel_scope: Default::default(),
             map_vars: Default::default(),
+            with_generation: 0,
+            pending_match_filters: Vec::new(),
         }
     }
 
@@ -833,6 +849,11 @@ impl TranslationState {
                         let (match_pattern, opt_filter, where_extra) =
                             self.translate_match_clause(m, &mut extra_triples)?;
                         current = join_patterns(current, match_pattern);
+                        // Apply deferred sameTerm filters for re-used relationship variables.
+                        // Applied here (after JOIN) so outer-scope variables from preceding
+                        // MATCH clauses are in scope for the sameTerm comparisons.
+                        let reuse_filters = std::mem::take(&mut self.pending_match_filters);
+                        current = apply_filters(current, reuse_filters.into_iter());
                         // WHERE-clause property-access triples applied as OPTIONAL so
                         // that missing properties evaluate to null (Cypher semantics)
                         // rather than filtering the row out entirely.
@@ -849,6 +870,10 @@ impl TranslationState {
                     }
                 }
                 Clause::With(w) => {
+                    // A new WITH clause increases the generation so that re-used
+                    // relationship variables from MATCH clauses before this WITH are
+                    // not mistakenly treated as still in scope for eid-filter reuse.
+                    self.with_generation += 1;
                     // Flush any pending extra triples.
                     if !extra_triples.is_empty() {
                         let extra = GraphPattern::Bgp {
@@ -1418,6 +1443,11 @@ impl TranslationState {
         let iso_filters = self.generate_iso_filters();
         combined = apply_filters(combined, iso_filters.into_iter());
 
+        // Note: pending_match_filters (for re-used edge sameTerm constraints) are
+        // NOT applied here — they are applied by the Clause::Match handler in
+        // translate_query AFTER joining with the preceding match patterns, so that
+        // outer variables (from previous MATCH clauses) are in scope for the FILTER.
+
         // Use a local buffer for WHERE-clause property-access triples so they can
         // be applied as OPTIONAL LeftJoins by the caller (Cypher null semantics:
         // a missing property evaluates to null rather than filtering the row out).
@@ -1516,7 +1546,89 @@ impl TranslationState {
                         .get(i + 1)
                         .cloned()
                         .unwrap_or_else(|| Variable::new_unchecked("__anon").into());
+                    // Save pending filter count to detect re-use after the call.
+                    let filters_before = self.pending_match_filters.len();
                     self.translate_relationship_pattern(r, &src, &dst, triples, path_patterns)?;
+                    // If a reuse filter was pushed, also add endpoint-exclusion
+                    // filters for adjacent variable-length paths so that the varlen
+                    // traversals do not re-use the specific bound edge r.
+                    if self.pending_match_filters.len() > filters_before {
+                        if let Some(ref var_name) = r.variable {
+                            if let Some(prior) = self.edge_map.get(var_name).cloned() {
+                                let ps = term_to_sparexpr(&prior.src);
+                                let pd = term_to_sparexpr(&prior.dst);
+                                // Left adjacent varlen: elements[i-2] with range Some
+                                let left_outer: Option<TermPattern> = if i >= 2 {
+                                    if let Some(PatternElement::Relationship(lr)) =
+                                        elements.get(i.wrapping_sub(2))
+                                    {
+                                        if lr.range.is_some() {
+                                            node_terms.get(i.wrapping_sub(3)).cloned()
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                                // Right adjacent varlen: elements[i+2] with range Some
+                                let right_outer: Option<TermPattern> = {
+                                    if let Some(PatternElement::Relationship(rr)) =
+                                        elements.get(i + 2)
+                                    {
+                                        if rr.range.is_some() {
+                                            node_terms.get(i + 3).cloned()
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                };
+                                // Emit filters: exclude paths where adjacent varlen endpoint
+                                // pair matches r's src/dst (which would mean the varlen
+                                // traversed the specific bound edge r, violating rel uniqueness).
+                                let mk_exclusion_filter = |a: SparExpr, b: SparExpr| {
+                                    SparExpr::And(
+                                        Box::new(SparExpr::Not(Box::new(SparExpr::And(
+                                            Box::new(SparExpr::SameTerm(
+                                                Box::new(a.clone()),
+                                                Box::new(ps.clone()),
+                                            )),
+                                            Box::new(SparExpr::SameTerm(
+                                                Box::new(b.clone()),
+                                                Box::new(pd.clone()),
+                                            )),
+                                        )))),
+                                        Box::new(SparExpr::Not(Box::new(SparExpr::And(
+                                            Box::new(SparExpr::SameTerm(
+                                                Box::new(a),
+                                                Box::new(pd.clone()),
+                                            )),
+                                            Box::new(SparExpr::SameTerm(
+                                                Box::new(b),
+                                                Box::new(ps.clone()),
+                                            )),
+                                        )))),
+                                    )
+                                };
+                                if let Some(n_term) = left_outer {
+                                    let n_e = term_to_sparexpr(&n_term);
+                                    let a3_e = term_to_sparexpr(&src);
+                                    self.pending_match_filters
+                                        .push(mk_exclusion_filter(n_e, a3_e));
+                                }
+                                if let Some(m_term) = right_outer {
+                                    let a4_e = term_to_sparexpr(&dst);
+                                    let m_e = term_to_sparexpr(&m_term);
+                                    self.pending_match_filters
+                                        .push(mk_exclusion_filter(a4_e, m_e));
+                                }
+                            }
+                        }
+                    }
                     i += 1;
                 }
             }
@@ -1640,6 +1752,22 @@ impl TranslationState {
                 )
             };
 
+            // Check if this relationship variable was already bound in the current
+            // generation (no WITH since first binding).
+            // If so, we use sameTerm endpoint filters to constrain re-use.
+            let reuse_prior: Option<EdgeInfo> = rel.variable.as_ref().and_then(|rv| {
+                self.edge_map.get(rv.as_str()).cloned().and_then(|e| {
+                    if e.binding_generation == self.with_generation {
+                        Some(e)
+                    } else {
+                        None
+                    }
+                })
+            });
+            // Also compute convenience alias for Direction::Both eid detection.
+            let reuse_eid: Option<Variable> =
+                reuse_prior.as_ref().and_then(|e| e.eid_var.clone());
+
             match rel.direction {
                 Direction::Left => {
                     triples.push(TriplePattern {
@@ -1658,10 +1786,105 @@ impl TranslationState {
                     triples.extend(anno_triples(src, dst));
                 }
                 Direction::Both => {
-                    // Undirected: UNION of both directions.
-                    // Use the SAME pred_term for both branches so that the predicate
-                    // variable is bound in both branches of the UNION (required for
-                    // correct top-level relationship-isomorphism FILTERs).
+                    // For re-used edges (same generation, no intervening WITH), emit a
+                    // simple UNION of the two directed triples, and push the endpoint
+                    // sameTerm constraint to pending_match_filters.  The pending filter
+                    // is applied AFTER all path_patterns are joined into the MATCH
+                    // combined pattern, so it is in the OUTER scope where variables from
+                    // preceding MATCH clauses (e.g. ?__anon_0, ?__anon_1) are visible.
+                    // NB: putting the sameTerm FILTER inside the UNION branches does NOT
+                    // work because SPARQL nested-group FILTERs do not see outer variables.
+                    if let Some(ref prior) = reuse_prior {
+                        let constrained_pred: spargebra::term::NamedNodePattern =
+                            if prior.pred_var.is_none() {
+                                // Typed prior: pin the predicate to the known named node.
+                                spargebra::term::NamedNodePattern::NamedNode(prior.pred.clone())
+                            } else {
+                                // Untyped prior: shared r_pred variable name provides constraint.
+                                pred_term.clone()
+                            };
+                        // UNION of forward and backward triples (no inner sameTerm FILTER).
+                        let fwd_bgp = GraphPattern::Bgp {
+                            patterns: vec![TriplePattern {
+                                subject: src.clone(),
+                                predicate: constrained_pred.clone(),
+                                object: dst.clone(),
+                            }],
+                        };
+                        // Backward branch: self-loop guard only.
+                        let bwd_bgp_inner = GraphPattern::Bgp {
+                            patterns: vec![TriplePattern {
+                                subject: dst.clone(),
+                                predicate: constrained_pred,
+                                object: src.clone(),
+                            }],
+                        };
+                        let sl_filter =
+                            if let (TermPattern::Variable(s), TermPattern::Variable(d)) =
+                                (src, dst)
+                            {
+                                Some(SparExpr::Not(Box::new(SparExpr::Equal(
+                                    Box::new(SparExpr::Variable(s.clone())),
+                                    Box::new(SparExpr::Variable(d.clone())),
+                                ))))
+                            } else {
+                                None
+                            };
+                        let bwd_bgp = if let Some(f) = sl_filter {
+                            GraphPattern::Filter {
+                                expr: f,
+                                inner: Box::new(bwd_bgp_inner),
+                            }
+                        } else {
+                            bwd_bgp_inner
+                        };
+                        path_patterns.push(GraphPattern::Union {
+                            left: Box::new(fwd_bgp),
+                            right: Box::new(bwd_bgp),
+                        });
+                        // Push the sameTerm constraint as a deferred outer FILTER.
+                        // (sameTerm works for blank nodes; = works for IRIs too.)
+                        let prior_src_e = term_to_sparexpr(&prior.src);
+                        let prior_dst_e = term_to_sparexpr(&prior.dst);
+                        let cur_src_e = term_to_sparexpr(src);
+                        let cur_dst_e = term_to_sparexpr(dst);
+                        // fwd match: anon3 = prior_src AND anon4 = prior_dst
+                        let fwd_f = SparExpr::And(
+                            Box::new(SparExpr::SameTerm(
+                                Box::new(cur_src_e.clone()),
+                                Box::new(prior_src_e.clone()),
+                            )),
+                            Box::new(SparExpr::SameTerm(
+                                Box::new(cur_dst_e.clone()),
+                                Box::new(prior_dst_e.clone()),
+                            )),
+                        );
+                        // bwd match: anon3 = prior_dst AND anon4 = prior_src (AND != for self-loop)
+                        let bwd_f = SparExpr::And(
+                            Box::new(SparExpr::SameTerm(
+                                Box::new(cur_src_e.clone()),
+                                Box::new(prior_dst_e.clone()),
+                            )),
+                            Box::new(SparExpr::And(
+                                Box::new(SparExpr::SameTerm(
+                                    Box::new(cur_dst_e.clone()),
+                                    Box::new(prior_src_e.clone()),
+                                )),
+                                Box::new(SparExpr::Not(Box::new(SparExpr::SameTerm(
+                                    Box::new(cur_src_e),
+                                    Box::new(cur_dst_e),
+                                )))),
+                            )),
+                        );
+                        self.pending_match_filters.push(SparExpr::Or(
+                            Box::new(fwd_f),
+                            Box::new(bwd_f),
+                        ));
+                        // Do not re-register in edge_map or track iso_hop for re-use.
+                        return Ok(());
+                    }
+
+                    // First binding (normal path): UNION of both directions + eid BIND.
                     let mut fwd_patterns = vec![TriplePattern {
                         subject: src.clone(),
                         predicate: pred_term.clone(),
@@ -1728,23 +1951,27 @@ impl TranslationState {
                 }
             }
             // Register in edge_map so type(r) and r.prop can resolve.
-            if let Some(ref var_name) = rel.variable {
-                let eid = Variable::new_unchecked(format!("__eid_{}", var_name));
-                self.edge_map.insert(
-                    var_name.clone(),
-                    EdgeInfo {
-                        src: src.clone(),
-                        pred: NamedNode::new_unchecked("urn:polygraph:untyped"),
-                        pred_var: Some(pred_var.clone()),
-                        dst: dst.clone(),
-                        reif_var: None,
-                        null_check_var: None,
-                        eid_var: Some(eid),
-                    },
-                );
+            // For re-used edges (reuse_eid is Some), keep the original edge_map entry.
+            if reuse_eid.is_none() {
+                if let Some(ref var_name) = rel.variable {
+                    let eid = Variable::new_unchecked(format!("__eid_{}", var_name));
+                    self.edge_map.insert(
+                        var_name.clone(),
+                        EdgeInfo {
+                            src: src.clone(),
+                            pred: NamedNode::new_unchecked("urn:polygraph:untyped"),
+                            pred_var: Some(pred_var.clone()),
+                            dst: dst.clone(),
+                            reif_var: None,
+                            null_check_var: None,
+                            eid_var: Some(eid),
+                            binding_generation: self.with_generation,
+                        },
+                    );
+                }
             }
-            // Track for pairwise isomorphism filter generation.
-            {
+            // Track for pairwise isomorphism filter generation (skip for re-used edges).
+            if reuse_eid.is_none() {
                 use spargebra::term::NamedNodePattern;
                 let pv = NamedNodePattern::Variable(pred_var);
                 let instances: Vec<EdgeIsoSlot> = match rel.direction {
@@ -1949,6 +2176,7 @@ impl TranslationState {
                         reif_var: None,
                         null_check_var: Some(marker),
                         eid_var: None,
+                        binding_generation: self.with_generation,
                     },
                 );
                 // Track varlen bounds for last(r) / head(r) resolution.
@@ -1995,6 +2223,7 @@ impl TranslationState {
                             reif_var: None,
                             null_check_var: None,
                             eid_var: None,
+                            binding_generation: self.with_generation,
                         },
                     );
                 }
@@ -2157,6 +2386,7 @@ impl TranslationState {
                     reif_var,
                     null_check_var: Some(marker),
                     eid_var: eid,
+                    binding_generation: self.with_generation,
                 },
             );
         }
@@ -3714,6 +3944,16 @@ impl TranslationState {
                         distinct: *distinct,
                     })
                 } else {
+                    // count(path_var) → COUNT(*): path variables are never bound as
+                    // SPARQL variables, so COUNT(?p) would always return 0.
+                    // Substitute COUNT(*) which counts all solution rows instead.
+                    if let Some(Expression::Variable(v)) = expr.as_deref() {
+                        if self.path_hops.contains_key(v.as_str()) {
+                            return Ok(AggregateExpression::CountSolutions {
+                                distinct: *distinct,
+                            });
+                        }
+                    }
                     let e = self.translate_expr(expr.as_ref().unwrap(), extra)?;
                     Ok(AggregateExpression::FunctionCall {
                         name: AggregateFunction::Count,
