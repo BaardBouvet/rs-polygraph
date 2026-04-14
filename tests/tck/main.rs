@@ -673,5 +673,8 @@ async fn runtime_error(world: &mut TckWorld) {
 
 #[tokio::main]
 async fn main() {
-    TckWorld::run("tests/tck/features").await;
+    TckWorld::cucumber()
+        .max_concurrent_scenarios(None) // unlimited — each scenario is isolated (fresh in-memory Store)
+        .run("tests/tck/features")
+        .await;
 }

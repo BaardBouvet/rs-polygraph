@@ -1,7 +1,7 @@
 # Fundamental Limitations of rs-polygraph
 
 **Status**: reference  
-**Updated**: 2026-04-14
+**Updated**: 2026-04-14 — updated to reflect actual passing/failing state (461/463); added multigraph limitation (Match6[14]); Match9[1/6/7] now passing.
 
 This document describes the hard boundaries of what `rs-polygraph` can express
 as a **static transpiler** (one Cypher input → one SPARQL string output).
@@ -44,13 +44,15 @@ because the list length is a runtime value from a prior result set.
 
 **Affected TCK scenarios**
 
-| Scenario | Key query fragment |
-|----------|--------------------|
-| Match4 [8]  | `[rs*]` with bound endpoints |
-| Match9 [6]  | `[rs*]` with bound endpoints |
-| Match9 [7]  | `[rs*]` in opposite direction |
+| Scenario | Key query fragment | Status |
+|----------|-------------------|--------|
+| Match4 [8] | `[rs*]` with bound endpoints | **failing** — needs L2 or L3 |
+| Match9 [6] | `[rs*]` with bound endpoints | resolved — handled by translator |
+| Match9 [7] | `[rs*]` in opposite direction | resolved — handled by translator |
 
-**Verdict (static transpiler)**: Blocked.  
+Match9[6] and Match9[7] both pass today. Their `[rs*]` usage is pattern-matched by the translator into a form that emits a correct bounded SPARQL property path. Match4[8] uses `[rs*]` where the relationship list is injected from a prior `WITH collect(r)` — the list is a true runtime value and cannot be resolved statically.
+
+**Verdict (static transpiler)**: Blocked for Match4[8].  
 **Verdict (multi-phase L2)**: Solvable — see §3.
 
 ---
@@ -92,20 +94,46 @@ consistent with the function being deprecated.
 
 **Affected TCK scenarios**
 
-| Scenario | Key query fragment |
-|----------|--------------------|  
-| Match9 [1] | `RETURN last(r)` where `r` is `[r*0..1]` |
+| Scenario | Key query fragment | Status |
+|----------|-------------------|---------|
+| Match9 [1] | `RETURN last(r)` where `r` is `[r*0..1]` | **resolved** — L1 bounded unrolling implemented |
 
-**Verdict (static transpiler)**: Solvable with L1 bounded unrolling — see §3.  
-**Verdict (general unbounded `[r*]`)**: Not tested in the TCK; theoretically requires L3 engine extension, but this is not a compliance concern.
-| Distinct-endpoint dedup | Bounded-unroll UNION to expose all paths |
-| `count(r)` on varlen | Bind a sentinel value (`BIND(<T> AS ?r)`) |
-| `nodes(p)` on fixed-length path | CONCAT the named node variables |
+**Verdict (static transpiler)**: Resolved. L1 bounded unrolling is implemented and Match9[1] passes.  
+**Verdict (general unbounded `[r*]`)**: Not tested in the TCK; theoretically requires L3 engine extension, but is not a compliance concern (`last()` is deprecated in openCypher).
 
 The critical difference for `[rs*]` and `last(r)` (unbounded) is that the
 **list itself is a runtime value**, not a compile-time constant.  The translator
 emits a static SPARQL string before any data is seen, so it cannot inspect the
 list length or the specific edge IRIs involved.
+
+---
+
+## 2. RDF Multigraph Limitation — Parallel Edges with Identical Predicates
+
+### 2a — Undirected variable-length paths on multigraphs (`*3..3`)
+
+**Cypher pattern**
+
+```cypher
+MATCH (a)-[:REL*3..3]-(b)
+RETURN count(*) AS c
+```
+
+In a **multigraph**, two or more distinct edges can exist between the same pair of nodes with the same type. Cypher counts each as a separate path. A graph with nodes `(a)` and `(b)` connected by two parallel `REL` edges in each direction produces 48 distinct `*3..3` undirected paths through those nodes.
+
+**Why SPARQL (and RDF) cannot represent this**
+
+RDF stores are **sets of triples** — there is no way to store `(a, :REL, b)` twice. Any SPARQL query over a triple store will match at most one `(a, :REL, b)` binding regardless of how many "conceptual" parallel edges exist. The data model is the blocker, not the query language.
+
+No SPARQL extension can fix this. It would require the RDF store to maintain edge identity separate from triple identity — which is effectively a property graph store, not an RDF store.
+
+**Affected TCK scenarios**
+
+| Scenario | Key query fragment | Status |
+|----------|-------------------|---------|
+| Match6 [14] | `MATCH (a)-[:EDGE*3..3]-(b)` on a graph with parallel edges | **failing** — fundamental data model limit |
+
+**Verdict**: Irreducible. No L1/L2/L3 mitigation exists within a triple-based RDF store. This scenario is permanently out of reach for a SPARQL-backend implementation.
 
 ---
 
@@ -237,9 +265,10 @@ transpiler ceiling is not constrained by this case.
 
 | Limitation | Static transpiler (L1) | Multi-phase (L2) | Engine extension (L3) |
 |------------|:----------------------:|:----------------:|:---------------------:|
-| `[rs*]` (3 TCK scenarios) | ✗ | ✓ exactly 2 queries | ✓ `pg:followEdges` |
-| `last(r)` on `*0..1` (1 TCK scenario) | ✓ bounded unroll | not needed | not needed |
+| `[rs*]` runtime list — Match4[8] | ✗ | ✓ exactly 2 queries | ✓ `pg:followEdges` |
+| `last(r)` on `*0..1` — Match9[1] | ✓ **implemented** | not needed | not needed |
 | `last(r)` on unbounded `[r*]` | ✗ (not in TCK — deprecated) | ✗ impractical | ✓ `pg:pathEdges` |
+| Multigraph parallel edges — Match6[14] | ✗ | ✗ | ✗ — data model limit |
 
 SPARQL 1.2 `LATERAL` joins (in draft as of 2026) could in principle allow
 runtime-parameterised sub-queries and would change the `[rs*]` row from L2 to
@@ -249,33 +278,25 @@ L1, but still would not bind intermediate property-path edges.
 
 ## 5. Impact on TCK Compliance
 
-Our vendored corpus is **24 of 220** feature files in the upstream TCK.
+Current vendored corpus: **24 of 220** feature files, **461/463 (99.6%)** passing.
 
-Under a **static transpiler only** (against our current 463-scenario subset):
+| Scenario | Limitation | Status | Max mitigation |
+|----------|-----------|--------|----------------|
+| Match4 [8] | `[rs*]` runtime list | **failing** | L2 multi-phase or L3 `pg:followEdges` |
+| Match6 [14] | Multigraph parallel edges | **failing** | ✗ — permanent data model limit |
+| Match9 [1] | `last(r)` on `*0..1` | passing — L1 implemented | — |
+| Match9 [6] | `[rs*]`-adjacent pattern | passing — handled by translator | — |
+| Match9 [7] | `[rs*]`-adjacent pattern | passing — handled by translator | — |
 
-| Scenario | Category | Status |
-|----------|----------|--------|
-| Match4 [8]  | `[rs*]` | blocked — needs L2 or L3 |
-| Match9 [1]  | `last(r)` `*0..1` | fixable with L1 unrolling — no SPARQL limit |
-| Match9 [6]  | `[rs*]` | blocked — needs L2 or L3 |
-| Match9 [7]  | `[rs*]` | blocked — needs L2 or L3 |
+**Ceiling analysis**:
 
-Practical ceiling under SPARQL 1.1 static translation: **460/463 (99.4%)**
-(Match9[1] is an L1 implementation gap, not a fundamental limit).
+| Configuration | Score | Notes |
+|---------------|-------|-------|
+| Static transpiler (current) | 461/463 (99.6%) | Match4[8] and Match6[14] remain |
+| + multi-phase L2 | 462/463 (99.8%) | Match4[8] resolved; Match6[14] irreducible |
+| + pg:followEdges L3 | 462/463 (99.8%) | Same as L2 for TCK purposes |
+| Theoretical maximum (SPARQL backend) | 462/463 (99.8%) | Match6[14] is permanently out of reach |
 
-With **multi-phase execution** added to `rs-polygraph` (a `TranspileOutput::Continuation`
-variant plus a two-query runtime harness in the calling application):
-
-| Scenario | Resolved? |
-|----------|-----------|
-| Match4 [8]  | ✓ phase-2 concrete chain query |
-| Match9 [1]  | ✓ L1 bounded unrolling (no multi-phase needed) |
-| Match9 [6]  | ✓ phase-2 concrete chain query |
-| Match9 [7]  | ✓ phase-2 concrete chain query |
-
-Practical ceiling with both L1 and L2 implemented: **463/463 (100%)** for the
-current vendored subset.
-
-The only truly irreducible static-SPARQL limitation  — `last(r)` on a general
-unbounded `[r*]` — has **zero TCK coverage** and is consistent with the function
-being deprecated in openCypher.
+The 463/463 ceiling is not achievable with any RDF/SPARQL backend. Match6[14]
+requires a multigraph data model, which is fundamentally incompatible with RDF's
+set-of-triples semantics.

@@ -1,7 +1,7 @@
 # Protocol Extension: Path-Decomposition Primitives for the Postgres Triplestore
 
 **Status**: planned  
-**Updated**: 2026-04-14
+**Updated**: 2026-04-14 — rescoped: `last(r)` on bounded paths is resolved (no extension needed); Extension 2 (`pg:pathEdges`) reframed as Phase C graph-function enabler; multigraph limitation (Match6[14]) noted as non-mitigable.
 
 This document specifies the two custom SPARQL functions and one custom aggregate
 that are needed to lift the fundamental SPARQL 1.1 limitations described in
@@ -17,15 +17,15 @@ IRIs in order, and (b) bind intermediate edges during a property-path traversal.
 
 ## Background: What SPARQL 1.1 Is Missing
 
-| Cypher construct | Problem |
-|-----------------|---------|
-| `MATCH (a)-[rs*]->(b)` where `rs` comes from a prior WITH | Path to follow is a *runtime list* of edge IRIs — SPARQL paths are static |
-| `RETURN last(r)` on `[r*]` | Property paths never bind intermediate edge variables |
+| Cypher construct | Problem | Status |
+|-----------------|---------|--------|
+| `MATCH (a)-[rs*]->(b)` where `rs` comes from a prior WITH | Path to follow is a *runtime list* of edge IRIs — SPARQL paths are static | **open** — 1 failing TCK scenario (Match4[8]) |
+| `RETURN last(r)` on `[r*0..1]` | Needed intermediate edge binding | **resolved** — L1 bounded unrolling now implemented; Match9[1] passes |
+| `nodes(p)`, `relationships(p)`, `length(p)` on varlen | Property paths bind no intermediate edges | **open** — Phase C graph functions (no current TCK failure) |
 
-Both problems share a root cause: **SPARQL property paths are compiled, not
-data-driven**.  The fix is a small set of server-side functions that accept
-runtime bindings and perform graph traversal inside the engine — where the data
-already lives.
+`last(r)` on *bounded* paths is no longer a TCK compliance concern. `pg:pathEdges` (Extension 2) survives as a Phase C enabler for graph introspection functions (`nodes()`, `relationships()`, per-hop property filters on unbounded paths), not as a fix for any current failure.
+
+**Note — multigraph limitation (Match6[14])**: the one other current TCK failure is RDF's inability to represent parallel edges between the same node pair with the same predicate. This is a data-model constraint, not a query-language constraint. No SPARQL extension can fix it — the store itself would have to become a multigraph store, which defeats the RDF premise.
 
 ---
 
@@ -156,10 +156,14 @@ clause.
 
 ### Purpose
 
-Handles `last(r)` (and, more generally, `nodes(p)`, `relationships(p)`,
-`length(p)`, per-hop property filters on unbounded varlen).  Instead of a
-SPARQL property path that returns only endpoints, this function returns one row
-per edge, binding each edge's subject, predicate, and object.
+Enables Phase C graph introspection functions: `nodes(p)`, `relationships(p)`,
+`length(p)`, per-hop property filters on unbounded varlen paths, and `last(r)`
+on general (non-bounded) relation variables. `last(r)` on bounded paths (the
+only current TCK case, Match9[1]) is already solved without this extension via
+L1 bounded unrolling.
+
+Instead of a SPARQL property path that returns only endpoints, this function
+returns one row per edge, binding each edge's subject, predicate, and object.
 
 ### SPARQL syntax
 
