@@ -187,11 +187,11 @@ regex_op            = { "=~" }
 comp_op             = { "=" | "<>" | "<=" | ">=" | "<" | ">" }
 add_sub_expr        = { mul_div_expr ~ (add_sub_op ~ mul_div_expr)* }
 add_sub_op          = { "+" | "-" }
-mul_div_expr        = { unary_expr ~ (mul_div_op ~ unary_expr)* }
+mul_div_expr        = { power_expr ~ (mul_div_op ~ power_expr)* }
 mul_div_op          = { "*" | "/" | "%" }
-unary_expr          = { unary_minus | power_expr }
+power_expr          = { unary_expr ~ ("^" ~ unary_expr)* }
+unary_expr          = { unary_minus | prop_expr }
 unary_minus         = { "-" ~ unary_expr }
-power_expr          = { prop_expr ~ ("^" ~ prop_expr)* }
 prop_expr           = { atom ~ (property_lookup | slice_access | subscript_access)* }
 slice_access     = { "[" ~ expression? ~ ".." ~ expression? ~ "]" }
 subscript_access = { "[" ~ expression ~ "]" }

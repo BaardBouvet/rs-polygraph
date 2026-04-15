@@ -945,14 +945,14 @@ fn build_add_sub_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
 }
 
 fn build_mul_div_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    // mul_div_expr = { unary_expr ~ (mul_div_op ~ unary_expr)* }
+    // mul_div_expr = { power_expr ~ (mul_div_op ~ power_expr)* }
     let mut children = pair.into_inner().peekable();
-    let first = children.next().expect("mul_div_expr has unary_expr");
-    let mut acc = build_unary_expr(first)?;
+    let first = children.next().expect("mul_div_expr has power_expr");
+    let mut acc = build_power_expr(first)?;
 
     while let Some(op_pair) = children.next() {
         let operand_pair = children.next().expect("operator is followed by operand");
-        let rhs = build_unary_expr(operand_pair)?;
+        let rhs = build_power_expr(operand_pair)?;
         acc = match op_pair.as_str() {
             "*" => Expression::Multiply(Box::new(acc), Box::new(rhs)),
             "/" => Expression::Divide(Box::new(acc), Box::new(rhs)),
@@ -964,7 +964,7 @@ fn build_mul_div_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
 }
 
 fn build_unary_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    // unary_expr = { unary_minus | power_expr }
+    // unary_expr = { unary_minus | prop_expr }
     let inner = pair.into_inner().next().expect("unary_expr has child");
     match inner.as_rule() {
         Rule::unary_minus => {
@@ -987,18 +987,18 @@ fn build_unary_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
             }
             Ok(Expression::Negate(Box::new(build_unary_expr(operand)?)))
         }
-        Rule::power_expr => build_power_expr(inner),
+        Rule::prop_expr => build_prop_expr(inner),
         _ => unreachable!(),
     }
 }
 
 fn build_power_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    // power_expr = { prop_expr ~ ("^" ~ prop_expr)* }
+    // power_expr = { unary_expr ~ ("^" ~ unary_expr)* }
     // Left-associative: a^b^c = (a^b)^c
     let mut children = pair.into_inner();
-    let mut acc = build_prop_expr(children.next().expect("power_expr has prop_expr"))?;
+    let mut acc = build_unary_expr(children.next().expect("power_expr has unary_expr"))?;
     for next in children {
-        acc = Expression::Power(Box::new(acc), Box::new(build_prop_expr(next)?));
+        acc = Expression::Power(Box::new(acc), Box::new(build_unary_expr(next)?));
     }
     Ok(acc)
 }

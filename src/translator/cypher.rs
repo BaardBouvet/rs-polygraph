@@ -1352,11 +1352,21 @@ impl TranslationState {
                         Some(items_a)
                     }
                     (Some(mut items_a), None) => {
-                        // b is not a list: try to append as literal/boolean scalar
+                        // b is not a list: try to append as literal/boolean/subscript scalar
                         let b_eval = if matches!(b.as_ref(),
                             Expression::Literal(_) | Expression::Negate(_))
                         {
                             Some(*b.clone())
+                        } else if let Expression::Subscript(coll, idx) = b.as_ref() {
+                            // Evaluate subscript to a scalar element at compile time
+                            if let Some(n) = get_literal_int(idx) {
+                                if let Some(items) = self.resolve_literal_list(coll) {
+                                    let len = items.len() as i64;
+                                    let i = if n < 0 { len + n } else { n };
+                                    if i >= 0 && i < len { Some(items[i as usize].clone()) }
+                                    else { Some(Expression::Literal(Literal::Null)) }
+                                } else { None }
+                            } else { None }
                         } else {
                             try_eval_bool_const(b).map(|opt| match opt {
                                 Some(bv) => Expression::Literal(Literal::Boolean(bv)),
@@ -4784,10 +4794,20 @@ impl TranslationState {
                         return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
                     }
                     (Some(mut items_a), None) => {
-                        // list + scalar: append if b is a literal value or a compile-time bool expr
+                        // list + scalar: append if b is a literal/subscript/bool expr
                         let b_eval: Option<Expression> =
                             if matches!(b.as_ref(), Expression::Literal(_) | Expression::Negate(_)) {
                                 Some(*b.clone())
+                            } else if let Expression::Subscript(coll, idx) = b.as_ref() {
+                                // Evaluate subscript to a scalar element at compile time
+                                if let Some(n) = get_literal_int(idx) {
+                                    if let Some(items) = self.resolve_literal_list(coll) {
+                                        let len = items.len() as i64;
+                                        let i = if n < 0 { len + n } else { n };
+                                        if i >= 0 && i < len { Some(items[i as usize].clone()) }
+                                        else { Some(Expression::Literal(Literal::Null)) }
+                                    } else { None }
+                                } else { None }
                             } else {
                                 try_eval_bool_const(b).map(|opt| match opt {
                                     Some(bv) => Expression::Literal(Literal::Boolean(bv)),
