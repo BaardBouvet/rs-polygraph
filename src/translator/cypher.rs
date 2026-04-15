@@ -3687,6 +3687,35 @@ impl TranslationState {
                 Ok(result)
             }
             Expression::Add(a, b) => {
+                // Compile-time list concatenation / append for literal lists.
+                let a_items = self.try_resolve_to_items(a);
+                let b_items = self.try_resolve_to_items(b);
+                match (a_items, b_items) {
+                    (Some(mut items_a), Some(items_b)) => {
+                        // list + list → concatenate
+                        items_a.extend(items_b);
+                        let serialized = serialize_list_literal(&items_a);
+                        return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
+                    }
+                    (Some(mut items_a), None) => {
+                        // list + scalar: append if b is a literal value
+                        if matches!(b.as_ref(), Expression::Literal(_) | Expression::Negate(_)) {
+                            items_a.push(*b.clone());
+                            let serialized = serialize_list_literal(&items_a);
+                            return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
+                        }
+                    }
+                    (None, Some(items_b)) => {
+                        // scalar + list: prepend if a is a literal value
+                        if matches!(a.as_ref(), Expression::Literal(_) | Expression::Negate(_)) {
+                            let mut items = vec![*a.clone()];
+                            items.extend(items_b);
+                            let serialized = serialize_list_literal(&items);
+                            return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
+                        }
+                    }
+                    (None, None) => {}
+                }
                 // Check if both operands are property accesses — may be list concatenation.
                 // Use runtime type check: IF(STRSTARTS(?a, "["), concat_lists, numeric_add)
                 let is_list_candidate = matches!(a.as_ref(), Expression::Property(..))
