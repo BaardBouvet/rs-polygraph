@@ -104,6 +104,11 @@ fn expr_contains_aggregate(expr: &Expression) -> bool {
         Expression::List(items) => items.iter().any(expr_contains_aggregate),
         Expression::Map(pairs) => pairs.iter().any(|(_, v)| expr_contains_aggregate(v)),
         Expression::FunctionCall { args, .. } => args.iter().any(expr_contains_aggregate),
+        Expression::ListComprehension { list, predicate, projection, .. } => {
+            expr_contains_aggregate(list)
+                || predicate.as_ref().map_or(false, |p| expr_contains_aggregate(p))
+                || projection.as_ref().map_or(false, |p| expr_contains_aggregate(p))
+        }
         Expression::LabelCheck { .. } => false,
         _ => false,
     }
@@ -153,9 +158,115 @@ fn agg_has_nested_aggregate(agg: &AggregateExpr) -> bool {
     }
 }
 
+/// Collect atomic free terms from an expression (variables and property accesses
+/// that are NOT inside an aggregate boundary). Used for AmbiguousAggregation checks.
+fn atomic_free_terms(expr: &Expression) -> Vec<&Expression> {
+    match expr {
+        Expression::Aggregate(_) => vec![],
+        Expression::Variable(_) | Expression::Property(_, _) => vec![expr],
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b)
+        | Expression::Modulo(a, b)
+        | Expression::Power(a, b)
+        | Expression::Comparison(a, _, b) => {
+            let mut r = atomic_free_terms(a);
+            r.extend(atomic_free_terms(b));
+            r
+        }
+        Expression::Not(e) | Expression::Negate(e) | Expression::IsNull(e)
+        | Expression::IsNotNull(e) => atomic_free_terms(e),
+        Expression::FunctionCall { args, .. } => args.iter().flat_map(atomic_free_terms).collect(),
+        _ => vec![],
+    }
+}
+
+/// Returns `true` if `item` has an ambiguous aggregation expression given `non_agg_items`.
+fn is_ambiguous_aggregation<'a>(
+    item: &'a Expression,
+    non_agg_items: &[&'a Expression],
+) -> bool {
+    if non_agg_items.is_empty() {
+        true
+    } else {
+        let free_terms = atomic_free_terms(item);
+        free_terms.iter().any(|ft| !non_agg_items.contains(ft))
+    }
+}
+
+/// Extract the column names from a segment's final RETURN or WITH clause.
+fn segment_columns(seg: &[Clause]) -> Option<Vec<String>> {
+    for clause in seg.iter().rev() {
+        match clause {
+            Clause::Return(r) => {
+                if let ReturnItems::Explicit(items) = &r.items {
+                    return Some(items.iter().map(|i| {
+                        i.alias.clone().or_else(|| {
+                            if let Expression::Variable(v) = &i.expression { Some(v.clone()) } else { None }
+                        }).unwrap_or_default()
+                    }).collect());
+                }
+                return None;
+            }
+            Clause::With(w) => {
+                if let crate::ast::cypher::ReturnItems::Explicit(items) = &w.items {
+                    return Some(items.iter().map(|i| {
+                        i.alias.clone().or_else(|| {
+                            if let Expression::Variable(v) = &i.expression { Some(v.clone()) } else { None }
+                        }).unwrap_or_default()
+                    }).collect());
+                }
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Semantic analysis pass: catches `VariableTypeConflict` and `VariableAlreadyBound`
 /// before translation so openCypher constraints are enforced.
 fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
+    // ── UNION checks (InvalidClauseComposition, DifferentColumnsInUnion) ─────
+    if query.clauses.iter().any(|c| matches!(c, Clause::Union { .. })) {
+        // Split into segments.
+        let mut segments: Vec<Vec<Clause>> = Vec::new();
+        let mut all_flags: Vec<bool> = Vec::new();
+        let mut current_seg: Vec<Clause> = Vec::new();
+        for clause in &query.clauses {
+            if let Clause::Union { all } = clause {
+                segments.push(std::mem::take(&mut current_seg));
+                all_flags.push(*all);
+            } else {
+                current_seg.push(clause.clone());
+            }
+        }
+        segments.push(current_seg);
+
+        // InvalidClauseComposition: mixing UNION and UNION ALL is illegal.
+        let has_union = all_flags.iter().any(|a| !a);
+        let has_union_all = all_flags.iter().any(|a| *a);
+        if has_union && has_union_all {
+            return Err(PolygraphError::Translation {
+                message: "InvalidClauseComposition: cannot mix UNION and UNION ALL".to_string(),
+            });
+        }
+
+        // DifferentColumnsInUnion: all arms must project the same column names.
+        let first_cols = segment_columns(&segments[0]);
+        for seg in segments.iter().skip(1) {
+            let cols = segment_columns(seg);
+            if first_cols != cols {
+                return Err(PolygraphError::Translation {
+                    message: "DifferentColumnsInUnion: UNION arms must return the same column names".to_string(),
+                });
+            }
+        }
+    }
+
     #[derive(Clone, Copy, PartialEq)]
     enum Kind {
         Node,
@@ -184,6 +295,12 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                                 None
                             }
                         });
+                        // NoExpressionAlias: non-variable expressions in WITH must have aliases.
+                        if name.is_none() {
+                            return Err(PolygraphError::Translation {
+                                message: "NoExpressionAlias: expression in WITH must have an alias".to_string(),
+                            });
+                        }
                         if let Some(var) = name {
                             // Always mark as bound (for UndefinedVariable check).
                             bound_vars.insert(var.clone());
@@ -217,6 +334,61 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                             if let Some(k) = binding_kind {
                                 kinds.insert(var, k);
                             }
+                        }
+                    }
+                }
+                // InvalidAggregation: aggregate function in WITH ORDER BY.
+                // Only invalid when the WITH projection itself has no aggregates.
+                if let Some(ob) = &w.order_by {
+                    let projection_has_agg = if let crate::ast::cypher::ReturnItems::Explicit(items) = &w.items {
+                        items.iter().any(|i| expr_contains_aggregate(&i.expression))
+                    } else { false };
+                    if !projection_has_agg {
+                        for sort in &ob.items {
+                            if expr_contains_aggregate(&sort.expression) {
+                                return Err(PolygraphError::Translation {
+                                    message: "InvalidAggregation: aggregate function in ORDER BY".to_string(),
+                                });
+                            }
+                        }
+                    }
+                    // AmbiguousAggregationExpression: aggregate in ORDER BY where the ORDER BY
+                    // item has free terms not covered by non-agg projection items.
+                    if projection_has_agg {
+                        let non_agg_items: Vec<&Expression> = if let crate::ast::cypher::ReturnItems::Explicit(items) = &w.items {
+                            items.iter()
+                                .filter(|i| !expr_contains_aggregate(&i.expression))
+                                .map(|i| &i.expression)
+                                .collect()
+                        } else { vec![] };
+                        for sort in &ob.items {
+                            if expr_contains_aggregate(&sort.expression) && expr_has_free_var_outside_agg(&sort.expression) {
+                                if is_ambiguous_aggregation(&sort.expression, &non_agg_items) {
+                                    return Err(PolygraphError::Translation {
+                                        message: "AmbiguousAggregationExpression: ORDER BY expression is ambiguous".to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                // AmbiguousAggregationExpression in WITH items.
+                if let crate::ast::cypher::ReturnItems::Explicit(items) = &w.items {
+                    let non_agg_items: Vec<&Expression> = items.iter()
+                        .filter(|i| !matches!(&i.expression, Expression::Aggregate(_)))
+                        .filter(|i| !expr_contains_aggregate(&i.expression))
+                        .map(|i| &i.expression)
+                        .collect();
+                    for item in items {
+                        if !matches!(&item.expression, Expression::Aggregate(_))
+                            && expr_contains_aggregate(&item.expression)
+                            && expr_has_free_var_outside_agg(&item.expression)
+                            && is_ambiguous_aggregation(&item.expression, &non_agg_items)
+                        {
+                            return Err(PolygraphError::Translation {
+                                message: "AmbiguousAggregationExpression: mix of aggregate and \
+                                          non-aggregate in WITH expression".to_string(),
+                            });
                         }
                     }
                 }
@@ -260,59 +432,7 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                             && expr_contains_aggregate(&item.expression)
                             && expr_has_free_var_outside_agg(&item.expression)
                         {
-                            // AmbiguousAggregationExpression:
-                            // expression is NOT a pure aggregate but contains an aggregate
-                            // AND has free variables outside aggregates.
-                            // ONLY flag if the free variables are NOT separately returned
-                            // as a non-aggregate GROUP BY item.
-                            // Simple check: if there are OTHER non-aggregate items in RETURN,
-                            // and the free var outside aggregate appears in those items,
-                            // it's a valid grouping key → not ambiguous.
-                            // If no other non-agg items OR the var is not covered → ambiguous.
-                            //
-                            // Improved check: collect the "atomic leaf" expressions
-                            // (property accesses and variables) outside aggregates. If any
-                            // atomic leaf is NOT covered by a standalone non-agg item,
-                            // the expression is ambiguous.
-                            let _ = &non_agg_items;
-                            let ambiguous = if non_agg_items.is_empty() {
-                                true
-                            } else {
-                                // Collect atomic free terms in the mixed expression.
-                                fn atomic_free_terms(expr: &Expression) -> Vec<&Expression> {
-                                    match expr {
-                                        Expression::Aggregate(_) => vec![],
-                                        Expression::Variable(_) | Expression::Property(_, _) => {
-                                            vec![expr]
-                                        }
-                                        Expression::Or(a, b)
-                                        | Expression::And(a, b)
-                                        | Expression::Add(a, b)
-                                        | Expression::Subtract(a, b)
-                                        | Expression::Multiply(a, b)
-                                        | Expression::Divide(a, b)
-                                        | Expression::Modulo(a, b)
-                                        | Expression::Power(a, b)
-                                        | Expression::Comparison(a, _, b) => {
-                                            let mut r = atomic_free_terms(a);
-                                            r.extend(atomic_free_terms(b));
-                                            r
-                                        }
-                                        Expression::Not(e)
-                                        | Expression::Negate(e)
-                                        | Expression::IsNull(e)
-                                        | Expression::IsNotNull(e) => atomic_free_terms(e),
-                                        _ => vec![],
-                                    }
-                                }
-                                let free_terms = atomic_free_terms(&item.expression);
-                                // Check: are all free terms individually covered by non_agg_items?
-                                free_terms.iter().any(|ft| {
-                                    // ft is a free term; check if it matches any non_agg item exactly
-                                    !non_agg_items.contains(ft)
-                                })
-                            };
-                            if ambiguous {
+                            if is_ambiguous_aggregation(&item.expression, &non_agg_items) {
                                 return Err(PolygraphError::Translation {
                                     message: "AmbiguousAggregationExpression: mix of aggregate \
                                               and non-aggregate in RETURN expression"
@@ -370,6 +490,69 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                                         message: format!(
                                             "UndefinedVariable: variable '{v}' not defined"
                                         ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // InvalidAggregation: aggregate in RETURN ORDER BY or in list comprehension.
+                if let ReturnItems::Explicit(items) = &r.items {
+                    fn contains_agg_in_list_comp(expr: &Expression) -> bool {
+                        match expr {
+                            Expression::ListComprehension { projection: Some(p), .. } => {
+                                expr_contains_aggregate(p)
+                            }
+                            Expression::Or(a, b) | Expression::And(a, b)
+                            | Expression::Add(a, b) | Expression::Subtract(a, b)
+                            | Expression::Multiply(a, b) | Expression::Divide(a, b)
+                            | Expression::Comparison(a, _, b) => {
+                                contains_agg_in_list_comp(a) || contains_agg_in_list_comp(b)
+                            }
+                            Expression::Not(e) | Expression::Negate(e)
+                            | Expression::IsNull(e) | Expression::IsNotNull(e) => {
+                                contains_agg_in_list_comp(e)
+                            }
+                            Expression::List(elems) => elems.iter().any(contains_agg_in_list_comp),
+                            Expression::FunctionCall { args, .. } => args.iter().any(contains_agg_in_list_comp),
+                            _ => false,
+                        }
+                    }
+                    for item in items {
+                        if contains_agg_in_list_comp(&item.expression) {
+                            return Err(PolygraphError::Translation {
+                                message: "InvalidAggregation: aggregate inside list comprehension".to_string(),
+                            });
+                        }
+                    }
+                }
+                // InvalidAggregation / AmbiguousAggregation: aggregate in RETURN ORDER BY.
+                if let Some(ob) = &r.order_by {
+                    let projection_has_agg = if let ReturnItems::Explicit(items) = &r.items {
+                        items.iter().any(|i| expr_contains_aggregate(&i.expression))
+                    } else { false };
+                    if !projection_has_agg {
+                        for sort in &ob.items {
+                            if expr_contains_aggregate(&sort.expression) {
+                                return Err(PolygraphError::Translation {
+                                    message: "InvalidAggregation: aggregate function in ORDER BY".to_string(),
+                                });
+                            }
+                        }
+                    }
+                    if projection_has_agg {
+                        let non_agg_items: Vec<&Expression> = if let ReturnItems::Explicit(items) = &r.items {
+                            items.iter()
+                                .filter(|i| !expr_contains_aggregate(&i.expression))
+                                .map(|i| &i.expression)
+                                .collect()
+                        } else { vec![] };
+                        for sort in &ob.items {
+                            if expr_contains_aggregate(&sort.expression) && expr_has_free_var_outside_agg(&sort.expression) {
+                                if is_ambiguous_aggregation(&sort.expression, &non_agg_items) {
+                                    return Err(PolygraphError::Translation {
+                                        message: "AmbiguousAggregationExpression: ORDER BY expression is ambiguous".to_string(),
                                     });
                                 }
                             }
@@ -4960,14 +5143,14 @@ impl TranslationState {
             }
             Expression::List(items) => {
                 // Literal list: expand to VALUES ?var { val1 val2 ... }
-                // Each element is either a ground term or a nested list (encoded as string).
+                // Each element is either a ground term, nested list, or map (encoded as string).
                 let bindings_result: Result<Vec<Vec<Option<GroundTerm>>>, _> = items
                     .iter()
                     .map(|e| match e {
                         Expression::Literal(Literal::Null) => Ok(vec![None]),
-                        Expression::List(inner) => {
-                            // Nested list: encode as serialized string literal.
-                            let encoded = serialize_list_literal(inner);
+                        Expression::List(_) | Expression::Map(_) => {
+                            // Nested list or map literal: encode as serialized string.
+                            let encoded = serialize_list_element(e);
                             Ok(vec![Some(GroundTerm::Literal(
                                 SparLit::new_simple_literal(encoded),
                             ))])
@@ -5792,6 +5975,13 @@ fn serialize_list_element(e: &Expression) -> String {
         Expression::Literal(Literal::Boolean(b)) => b.to_string(),
         Expression::Literal(Literal::Null) => "null".to_string(),
         Expression::List(inner) => serialize_list_literal(inner),
+        Expression::Map(pairs) => {
+            // Serialize map as "{key: value, ...}" string
+            let entries: Vec<String> = pairs.iter().map(|(k, v)| {
+                format!("{k}: {}", serialize_list_element(v))
+            }).collect();
+            format!("{{{}}}", entries.join(", "))
+        }
         Expression::Negate(inner) => match inner.as_ref() {
             Expression::Literal(Literal::Integer(n)) => format!("-{n}"),
             Expression::Literal(Literal::Float(f)) => cypher_float_str(-f),
