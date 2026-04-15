@@ -39,6 +39,7 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
 const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const DEFAULT_BASE: &str = "http://polygraph.example/";
 
 use crate::result_mapping::schema::{ColumnKind, ProjectedColumn, ProjectionSchema};
@@ -104,6 +105,20 @@ fn bool_to_int_for_order(e: SparExpr) -> SparExpr {
         vec![e.clone()],
     );
     SparExpr::If(Box::new(cond), Box::new(cast_to_int), Box::new(e))
+}
+
+/// Returns the number of elements in a compile-time list expression, or `None`
+/// if the expression is not a pure list literal (or concatenation thereof).
+fn count_list_elements(expr: &Expression) -> Option<usize> {
+    match expr {
+        Expression::List(items) => Some(items.len()),
+        Expression::Add(l, r) => {
+            let lc = count_list_elements(l)?;
+            let rc = count_list_elements(r)?;
+            Some(lc + rc)
+        }
+        _ => None,
+    }
 }
 
 /// Returns `true` if `expr` contains any aggregate sub-expression at any depth.
@@ -4961,6 +4976,13 @@ impl TranslationState {
                         };
                         self.pending_aggs.push((fresh.clone(), agg));
                         return Ok(SparExpr::Variable(fresh));
+                    }
+                    // size([a, b, c]) or size([a] + [b, c]) → element count as integer
+                    if let Some(count) = count_list_elements(arg) {
+                        return Ok(SparExpr::Literal(SparLit::new_typed_literal(
+                            count.to_string(),
+                            NamedNode::new_unchecked(XSD_INTEGER),
+                        )));
                     }
                     // size(string) → STRLEN(string)
                     let translated = self.translate_expr(arg, extra)?;

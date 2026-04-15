@@ -768,3 +768,4 @@ fn debug_with_orderby_limit() {
     println!("SPARQL:\n{}", output.sparql);
     assert!(output.sparql.len() > 0);
 }
+
