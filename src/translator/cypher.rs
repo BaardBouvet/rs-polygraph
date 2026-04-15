@@ -3526,11 +3526,21 @@ impl TranslationState {
                 Ok(SparExpr::Variable(fresh))
             }
             Expression::Or(a, b) => {
+                if is_definitely_non_boolean(a) || is_definitely_non_boolean(b) {
+                    return Err(PolygraphError::Translation {
+                        message: "Type error: OR requires boolean operands".to_string(),
+                    });
+                }
                 let la = self.translate_expr(a, extra)?;
                 let rb = self.translate_expr(b, extra)?;
                 Ok(SparExpr::Or(Box::new(la), Box::new(rb)))
             }
             Expression::Xor(a, b) => {
+                if is_definitely_non_boolean(a) || is_definitely_non_boolean(b) {
+                    return Err(PolygraphError::Translation {
+                        message: "Type error: XOR requires boolean operands".to_string(),
+                    });
+                }
                 // XOR = (A OR B) AND NOT (A AND B)
                 let la1 = self.translate_expr(a, extra)?;
                 let rb1 = self.translate_expr(b, extra)?;
@@ -3544,11 +3554,21 @@ impl TranslationState {
                 ))
             }
             Expression::And(a, b) => {
+                if is_definitely_non_boolean(a) || is_definitely_non_boolean(b) {
+                    return Err(PolygraphError::Translation {
+                        message: "Type error: AND requires boolean operands".to_string(),
+                    });
+                }
                 let la = self.translate_expr(a, extra)?;
                 let rb = self.translate_expr(b, extra)?;
                 Ok(SparExpr::And(Box::new(la), Box::new(rb)))
             }
             Expression::Not(inner) => {
+                if is_definitely_non_boolean(inner) {
+                    return Err(PolygraphError::Translation {
+                        message: "Type error: NOT requires a boolean operand".to_string(),
+                    });
+                }
                 let e = self.translate_expr(inner, extra)?;
                 Ok(SparExpr::Not(Box::new(e)))
             }
@@ -3619,6 +3639,12 @@ impl TranslationState {
                 }
                 // Special case: IN with a list literal rhs → SparExpr::In(lhs, [items...])
                 if matches!(op, CompOp::In) {
+                    // Type check: IN requires a list/null on the RHS. Reject known non-list literals.
+                    if is_definitely_non_list(rhs) {
+                        return Err(PolygraphError::Translation {
+                            message: "Type error: IN requires a list operand on the right-hand side".to_string(),
+                        });
+                    }
                     // Try to resolve rhs to a list of items at compile time
                     let items_opt = self.try_resolve_to_items(rhs);
                     if let Some(items) = items_opt {
@@ -5547,6 +5573,33 @@ fn try_const_fold_pow(base: &SparExpr, exp: &SparExpr) -> Option<SparExpr> {
         format!("{result:?}"),
         NamedNode::new_unchecked(XSD_DOUBLE),
     )))
+}
+
+/// Returns true if the expression is statically known to be a non-boolean value.
+/// Used to detect compile-time type errors for boolean operators (AND/OR/XOR/NOT).
+/// Null is excluded because `NOT null` → null in 3VL and is valid.
+fn is_definitely_non_boolean(expr: &Expression) -> bool {
+    matches!(
+        expr,
+        Expression::Literal(Literal::Integer(_))
+            | Expression::Literal(Literal::Float(_))
+            | Expression::Literal(Literal::String(_))
+            | Expression::List(_)
+            | Expression::Map(_)
+    )
+}
+
+/// Returns true if the expression is statically known to be a non-list value,
+/// which is invalid as the RHS of an IN expression.
+fn is_definitely_non_list(expr: &Expression) -> bool {
+    matches!(
+        expr,
+        Expression::Literal(Literal::Boolean(_))
+            | Expression::Literal(Literal::Integer(_))
+            | Expression::Literal(Literal::Float(_))
+            | Expression::Literal(Literal::String(_))
+            | Expression::Map(_)
+    )
 }
 
 /// Extract an integer value from a literal integer expression (direct or negated).

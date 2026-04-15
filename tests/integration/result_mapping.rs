@@ -164,3 +164,4 @@ fn output_contains_sparql_and_schema() {
     assert!(output.sparql.contains("SELECT"));
     assert_eq!(output.schema.columns.len(), 1);
 }
+
