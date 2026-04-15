@@ -80,6 +80,32 @@ pub fn translate(
     })
 }
 
+/// Wraps a SPARQL expression so ordering comparison (`<`, `<=`, `>`, `>=`) works
+/// correctly for `xsd:boolean` operands. Oxigraph does not support ordering comparison
+/// between different boolean values, so we cast booleans to integer (false→0, true→1).
+///
+/// Emits: `IF(isLiteral(e) && datatype(e) = xsd:boolean, xsd:integer(e), e)`.
+fn bool_to_int_for_order(e: SparExpr) -> SparExpr {
+    let cond = SparExpr::And(
+        Box::new(SparExpr::FunctionCall(
+            spargebra::algebra::Function::IsLiteral,
+            vec![e.clone()],
+        )),
+        Box::new(SparExpr::Equal(
+            Box::new(SparExpr::FunctionCall(
+                spargebra::algebra::Function::Datatype,
+                vec![e.clone()],
+            )),
+            Box::new(SparExpr::NamedNode(NamedNode::new_unchecked(XSD_BOOLEAN))),
+        )),
+    );
+    let cast_to_int = SparExpr::FunctionCall(
+        spargebra::algebra::Function::Custom(NamedNode::new_unchecked(XSD_INTEGER)),
+        vec![e.clone()],
+    );
+    SparExpr::If(Box::new(cond), Box::new(cast_to_int), Box::new(e))
+}
+
 /// Returns `true` if `expr` contains any aggregate sub-expression at any depth.
 fn expr_contains_aggregate(expr: &Expression) -> bool {
     match expr {
@@ -3717,12 +3743,16 @@ impl TranslationState {
                         expr: quoted,
                         distinct: *distinct,
                     };
-                    // Wrap: CONCAT("[", gc_var, "]")
+                    // Wrap: CONCAT("[", COALESCE(gc_var, ""), "]")
+                    // COALESCE handles the case where GROUP_CONCAT returns UNDEF (empty input).
                     let wrap_expr = SparExpr::FunctionCall(
                         spargebra::algebra::Function::Concat,
                         vec![
                             SparExpr::Literal(SparLit::new_simple_literal("[")),
-                            SparExpr::Variable(gc_var.clone()),
+                            SparExpr::Coalesce(vec![
+                                SparExpr::Variable(gc_var.clone()),
+                                SparExpr::Literal(SparLit::new_simple_literal("")),
+                            ]),
                             SparExpr::Literal(SparLit::new_simple_literal("]")),
                         ],
                     );
@@ -4121,10 +4151,22 @@ impl TranslationState {
                     CompOp::Ne => {
                         SparExpr::Not(Box::new(SparExpr::Equal(Box::new(l), Box::new(r))))
                     }
-                    CompOp::Lt => SparExpr::Less(Box::new(l), Box::new(r)),
-                    CompOp::Le => SparExpr::LessOrEqual(Box::new(l), Box::new(r)),
-                    CompOp::Gt => SparExpr::Greater(Box::new(l), Box::new(r)),
-                    CompOp::Ge => SparExpr::GreaterOrEqual(Box::new(l), Box::new(r)),
+                    CompOp::Lt => SparExpr::Less(
+                        Box::new(bool_to_int_for_order(l)),
+                        Box::new(bool_to_int_for_order(r)),
+                    ),
+                    CompOp::Le => SparExpr::LessOrEqual(
+                        Box::new(bool_to_int_for_order(l)),
+                        Box::new(bool_to_int_for_order(r)),
+                    ),
+                    CompOp::Gt => SparExpr::Greater(
+                        Box::new(bool_to_int_for_order(l)),
+                        Box::new(bool_to_int_for_order(r)),
+                    ),
+                    CompOp::Ge => SparExpr::GreaterOrEqual(
+                        Box::new(bool_to_int_for_order(l)),
+                        Box::new(bool_to_int_for_order(r)),
+                    ),
                     CompOp::In => {
                         // `n.foo IN [a, b, c]` — the rhs was already translated.
                         // For a proper list literal we should have a vec of expressions.
