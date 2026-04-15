@@ -1013,12 +1013,15 @@ fn build_prop_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
                 // slice_access = { "[" ~ expression? ~ ".." ~ expression? ~ "]" }
                 let mut start: Option<Box<Expression>> = None;
                 let mut end: Option<Box<Expression>> = None;
-                let mut seen_first = false;
+                // Use the source span to distinguish start (before "..") from
+                // end (after ".."). For "[..x]" the single expression is the end;
+                // for "[x..]" it is the start; for "[x..y]" both are present.
+                let dotdot_abs = postfix.as_span().start()
+                    + postfix.as_str().find("..").unwrap_or(0);
                 for child in postfix.into_inner() {
                     if child.as_rule() == Rule::expression {
-                        if !seen_first {
+                        if child.as_span().start() < dotdot_abs {
                             start = Some(Box::new(build_expression(child)?));
-                            seen_first = true;
                         } else {
                             end = Some(Box::new(build_expression(child)?));
                         }
