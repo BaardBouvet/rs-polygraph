@@ -3913,6 +3913,9 @@ impl TranslationState {
                                 if *b { "true" } else { "false" },
                             )));
                         }
+                        Expression::Literal(Literal::Null) => {
+                            concat_pieces.push(SparExpr::Literal(SparLit::new_simple_literal("null")));
+                        }
                         _ => {
                             let translated = self.translate_expr(val_expr, extra)?;
                             // COALESCE(STR(...), "") prevents CONCAT from returning null
@@ -4333,11 +4336,26 @@ impl TranslationState {
                 Ok(SparExpr::FunctionCall(Function::StrLen, vec![arg]))
             }
             "substring" | "substr" => {
-                let mut sargs: Vec<SparExpr> = Vec::new();
-                for a in args {
-                    sargs.push(self.translate_expr(a, extra)?);
+                // Cypher substring(str, start[, length]) uses 0-based indexing.
+                // SPARQL SUBSTR(str, start[, length]) uses 1-based indexing.
+                // Adjust: add 1 to the start position.
+                if args.is_empty() {
+                    return Err(PolygraphError::UnsupportedFeature {
+                        feature: "substring() requires at least 2 arguments".to_string(),
+                    });
                 }
-                Ok(SparExpr::FunctionCall(Function::SubStr, sargs))
+                let str_arg = self.translate_expr(&args[0], extra)?;
+                let start_cypher = self.translate_expr(&args[1], extra)?;
+                let one = SparExpr::Literal(SparLit::new_typed_literal(
+                    "1", NamedNode::new_unchecked(XSD_INTEGER),
+                ));
+                let start_sparql = SparExpr::Add(Box::new(start_cypher), Box::new(one));
+                if args.len() >= 3 {
+                    let len_arg = self.translate_expr(&args[2], extra)?;
+                    Ok(SparExpr::FunctionCall(Function::SubStr, vec![str_arg, start_sparql, len_arg]))
+                } else {
+                    Ok(SparExpr::FunctionCall(Function::SubStr, vec![str_arg, start_sparql]))
+                }
             }
             "replace" => {
                 let mut sargs: Vec<SparExpr> = Vec::new();
