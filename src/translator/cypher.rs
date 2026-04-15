@@ -1342,11 +1342,31 @@ impl TranslationState {
                 }
             }
             // List concatenation: resolve both operands and concatenate for IN/slice.
+            // Also handles list + scalar append when one side is a compile-time scalar.
             Expression::Add(a, b) => {
-                let mut items_a = self.try_resolve_to_items(a)?;
-                let items_b = self.try_resolve_to_items(b)?;
-                items_a.extend(items_b);
-                Some(items_a)
+                let items_a_opt = self.try_resolve_to_items(a);
+                let items_b_opt = self.try_resolve_to_items(b);
+                match (items_a_opt, items_b_opt) {
+                    (Some(mut items_a), Some(items_b)) => {
+                        items_a.extend(items_b);
+                        Some(items_a)
+                    }
+                    (Some(mut items_a), None) => {
+                        // b is not a list: try to append as literal/boolean scalar
+                        let b_eval = if matches!(b.as_ref(),
+                            Expression::Literal(_) | Expression::Negate(_))
+                        {
+                            Some(*b.clone())
+                        } else {
+                            try_eval_bool_const(b).map(|opt| match opt {
+                                Some(bv) => Expression::Literal(Literal::Boolean(bv)),
+                                None => Expression::Literal(Literal::Null),
+                            })
+                        };
+                        b_eval.map(|elem| { items_a.push(elem); items_a })
+                    }
+                    _ => None,
+                }
             }
             Expression::ListSlice { list, start, end } => {
                 let items = self.resolve_literal_list(list)?;
@@ -4456,17 +4476,35 @@ impl TranslationState {
                         return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
                     }
                     (Some(mut items_a), None) => {
-                        // list + scalar: append if b is a literal value
-                        if matches!(b.as_ref(), Expression::Literal(_) | Expression::Negate(_)) {
-                            items_a.push(*b.clone());
+                        // list + scalar: append if b is a literal value or a compile-time bool expr
+                        let b_eval: Option<Expression> =
+                            if matches!(b.as_ref(), Expression::Literal(_) | Expression::Negate(_)) {
+                                Some(*b.clone())
+                            } else {
+                                try_eval_bool_const(b).map(|opt| match opt {
+                                    Some(bv) => Expression::Literal(Literal::Boolean(bv)),
+                                    None => Expression::Literal(Literal::Null),
+                                })
+                            };
+                        if let Some(b_lit) = b_eval {
+                            items_a.push(b_lit);
                             let serialized = serialize_list_literal(&items_a);
                             return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
                         }
                     }
                     (None, Some(items_b)) => {
-                        // scalar + list: prepend if a is a literal value
-                        if matches!(a.as_ref(), Expression::Literal(_) | Expression::Negate(_)) {
-                            let mut items = vec![*a.clone()];
+                        // scalar + list: prepend if a is a literal value or a compile-time bool expr
+                        let a_eval: Option<Expression> =
+                            if matches!(a.as_ref(), Expression::Literal(_) | Expression::Negate(_)) {
+                                Some(*a.clone())
+                            } else {
+                                try_eval_bool_const(a).map(|opt| match opt {
+                                    Some(bv) => Expression::Literal(Literal::Boolean(bv)),
+                                    None => Expression::Literal(Literal::Null),
+                                })
+                            };
+                        if let Some(a_lit) = a_eval {
+                            let mut items = vec![a_lit];
                             items.extend(items_b);
                             let serialized = serialize_list_literal(&items);
                             return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
@@ -6491,6 +6529,38 @@ fn tval_and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
         (Some(false), _) | (_, Some(false)) => Some(false),
         (Some(true), Some(true)) => Some(true),
         _ => None, // null AND true = null, null AND null = null
+    }
+}
+
+/// Evaluate a compile-time constant boolean expression (for use in list-append context).
+/// Returns Some(Some(bool)) for definite true/false, Some(None) for null, None if not evaluable.
+fn try_eval_bool_const(expr: &Expression) -> Option<Option<bool>> {
+    match expr {
+        Expression::Literal(Literal::Boolean(b)) => Some(Some(*b)),
+        Expression::Literal(Literal::Null) => Some(None),
+        Expression::Comparison(lhs, CompOp::In, rhs) => {
+            if let Expression::List(items) = rhs.as_ref() {
+                let mut found_null = false;
+                for item in items {
+                    match try_eval_literal_eq(lhs, item) {
+                        Some(Some(true)) => return Some(Some(true)),
+                        Some(None) => found_null = true,
+                        _ => {}
+                    }
+                }
+                Some(if found_null { None } else { Some(false) })
+            } else {
+                None
+            }
+        }
+        Expression::Comparison(lhs, CompOp::Eq, rhs) => try_eval_literal_eq(lhs, rhs),
+        Expression::Comparison(lhs, CompOp::Ne, rhs) => {
+            try_eval_literal_eq(lhs, rhs).map(|r| r.map(|b| !b))
+        }
+        Expression::Not(inner) => {
+            try_eval_bool_const(inner).map(|r| r.map(|b| !b))
+        }
+        _ => None,
     }
 }
 
