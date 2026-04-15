@@ -221,6 +221,35 @@ fn is_complex_tck_value(s: &str) -> bool {
 }
 
 /// Convert an `Expression` (from a CREATE property value) to a SPARQL literal string.
+fn expr_to_sparql_lit_with_bindings(
+    expr: &Expression,
+    bindings: &HashMap<String, &Expression>,
+) -> Option<String> {
+    match expr {
+        // Resolve variable references via bindings first.
+        Expression::Variable(v) => {
+            if let Some(bound) = bindings.get(v.as_str()) {
+                return expr_to_sparql_lit_with_bindings(bound, bindings);
+            }
+            None
+        }
+        Expression::Negate(inner) => {
+            // -n for creating negative literal values
+            if let Expression::Literal(Literal::Integer(n)) = inner.as_ref() {
+                return Some((-n).to_string());
+            }
+            if let Expression::Literal(Literal::Float(f)) = inner.as_ref() {
+                return Some(format!(
+                    "\"{}\"^^<http://www.w3.org/2001/XMLSchema#double>",
+                    -f
+                ));
+            }
+            None
+        }
+        _ => expr_to_sparql_lit(expr),
+    }
+}
+
 fn expr_to_sparql_lit(expr: &Expression) -> Option<String> {
     match expr {
         Expression::Literal(Literal::Integer(n)) => Some(n.to_string()),
@@ -302,6 +331,16 @@ fn emit_create_pattern(
     node_map: &mut HashMap<String, String>,
     counter: &mut usize,
 ) {
+    emit_create_pattern_with_bindings(pattern, triples, node_map, counter, &Default::default());
+}
+
+fn emit_create_pattern_with_bindings(
+    pattern: &polygraph::ast::cypher::Pattern,
+    triples: &mut Vec<String>,
+    node_map: &mut HashMap<String, String>,
+    counter: &mut usize,
+    bindings: &HashMap<String, &Expression>,
+) {
     let elements = &pattern.elements;
     let node_bnodes = assign_node_bnodes(elements, node_map, counter);
 
@@ -317,7 +356,7 @@ fn emit_create_pattern(
                 }
                 if let Some(props) = &n.properties {
                     for (key, val_expr) in props {
-                        if let Some(lit) = expr_to_sparql_lit(val_expr) {
+                        if let Some(lit) = expr_to_sparql_lit_with_bindings(val_expr, bindings) {
                             triples.push(format!("{bnode} <{BASE}{key}> {lit} ."));
                             has_triple = true;
                         }
@@ -347,7 +386,7 @@ fn emit_create_pattern(
                             // Emit RDF-star annotated triples for relationship properties.
                             if let Some(props) = &rel.properties {
                                 for (key, val_expr) in props {
-                                    if let Some(lit) = expr_to_sparql_lit(val_expr) {
+                                    if let Some(lit) = expr_to_sparql_lit_with_bindings(val_expr, bindings) {
                                         triples.push(format!(
                                             "<< {s} <{BASE}{rt}> {o} >> <{BASE}{key}> {lit} ."
                                         ));
@@ -372,39 +411,69 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
     let mut counter: usize = 0;
     let mut node_map: HashMap<String, String> = HashMap::new();
 
-    // Track UNWIND range(N, M) AS var for loop expansion in CREATE setup.
-    let mut loop_count: usize = 1;
+    // Track UNWIND variable and values for loop expansion in CREATE setup.
+    let mut loop_values: Vec<Expression> = vec![Expression::Literal(Literal::Null)];
+    let mut unwind_var_name: Option<String> = None;
 
     for clause in &query.clauses {
         match clause {
             Clause::Unwind(u) => {
-                // Expand UNWIND range(start, end) AS var into loop_count iterations.
-                if let Expression::FunctionCall { name, args, .. } = &u.expression {
-                    if name.eq_ignore_ascii_case("range") && args.len() >= 2 {
+                // Expand UNWIND range(start, end) AS var or UNWIND [v1, v2, ...] AS var.
+                match &u.expression {
+                    Expression::FunctionCall { name, args, .. }
+                        if name.eq_ignore_ascii_case("range") && args.len() >= 2 =>
+                    {
                         if let (
                             Expression::Literal(Literal::Integer(start)),
                             Expression::Literal(Literal::Integer(end)),
                         ) = (&args[0], &args[1])
                         {
-                            loop_count = (*end - *start + 1).max(0) as usize;
+                            let step = if let Some(Expression::Literal(Literal::Integer(s))) = args.get(2) { *s } else { 1 };
+                            let mut vals = Vec::new();
+                            let mut i = *start;
+                            while (step > 0 && i <= *end) || (step < 0 && i >= *end) {
+                                vals.push(Expression::Literal(Literal::Integer(i)));
+                                i += step;
+                            }
+                            loop_values = vals;
+                            unwind_var_name = Some(u.variable.clone());
                         }
                     }
+                    Expression::List(items) => {
+                        loop_values = items.clone();
+                        unwind_var_name = Some(u.variable.clone());
+                    }
+                    _ => {}
                 }
             }
             Clause::Create(c) => {
-                for _iter in 0..loop_count {
-                    // For UNWIND+CREATE iterations, reset the named-variable map so
-                    // each loop iteration creates fresh nodes.  For plain CREATE (no
-                    // UNWIND), *preserve* the map so that variable references in
-                    // subsequent CREATE clauses resolve to the same blank nodes.
+                let loop_count = loop_values.len();
+                for iter in 0..loop_count {
+                    // Reset the named-variable map for each loop iteration so
+                    // each iteration creates fresh nodes.
                     if loop_count > 1 {
                         node_map.clear();
                     }
+                    // Build bindings for the current UNWIND iteration.
+                    let mut bindings: HashMap<String, &Expression> = HashMap::new();
+                    if let Some(ref var) = unwind_var_name {
+                        if let Some(val) = loop_values.get(iter) {
+                            bindings.insert(var.clone(), val);
+                        }
+                    }
                     for pattern in &c.pattern.0 {
-                        emit_create_pattern(pattern, &mut triples, &mut node_map, &mut counter);
+                        emit_create_pattern_with_bindings(
+                            pattern,
+                            &mut triples,
+                            &mut node_map,
+                            &mut counter,
+                            &bindings,
+                        );
                     }
                 }
-                loop_count = 1; // reset after each CREATE
+                // Reset loop state after each CREATE.
+                loop_values = vec![Expression::Literal(Literal::Null)];
+                unwind_var_name = None;
             }
             _ => {}
         }
