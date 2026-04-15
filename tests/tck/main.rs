@@ -224,12 +224,13 @@ fn is_complex_tck_value(s: &str) -> bool {
 fn expr_to_sparql_lit_with_bindings(
     expr: &Expression,
     bindings: &HashMap<String, &Expression>,
+    node_props: &HashMap<String, HashMap<String, Expression>>,
 ) -> Option<String> {
     match expr {
         // Resolve variable references via bindings first.
         Expression::Variable(v) => {
             if let Some(bound) = bindings.get(v.as_str()) {
-                return expr_to_sparql_lit_with_bindings(bound, bindings);
+                return expr_to_sparql_lit_with_bindings(bound, bindings, node_props);
             }
             None
         }
@@ -243,6 +244,17 @@ fn expr_to_sparql_lit_with_bindings(
                     "\"{}\"^^<http://www.w3.org/2001/XMLSchema#double>",
                     -f
                 ));
+            }
+            None
+        }
+        // Resolve named-node property references, e.g. `a.id` in CREATE (:B {num: a.id}).
+        Expression::Property(object, key) => {
+            if let Expression::Variable(v) = object.as_ref() {
+                if let Some(props) = node_props.get(v.as_str()) {
+                    if let Some(val_expr) = props.get(key.as_str()) {
+                        return expr_to_sparql_lit_with_bindings(val_expr, bindings, node_props);
+                    }
+                }
             }
             None
         }
@@ -330,13 +342,16 @@ fn assign_node_bnodes(
 }
 
 /// Emit SPARQL triples for one CREATE pattern into `triples`.
+#[allow(dead_code)]
 fn emit_create_pattern(
     pattern: &polygraph::ast::cypher::Pattern,
     triples: &mut Vec<String>,
     node_map: &mut HashMap<String, String>,
     counter: &mut usize,
 ) {
-    emit_create_pattern_with_bindings(pattern, triples, node_map, counter, &Default::default());
+    emit_create_pattern_with_bindings(
+        pattern, triples, node_map, counter, &Default::default(), &Default::default(),
+    );
 }
 
 fn emit_create_pattern_with_bindings(
@@ -345,6 +360,7 @@ fn emit_create_pattern_with_bindings(
     node_map: &mut HashMap<String, String>,
     counter: &mut usize,
     bindings: &HashMap<String, &Expression>,
+    node_props: &HashMap<String, HashMap<String, Expression>>,
 ) {
     let elements = &pattern.elements;
     let node_bnodes = assign_node_bnodes(elements, node_map, counter);
@@ -361,7 +377,7 @@ fn emit_create_pattern_with_bindings(
                 }
                 if let Some(props) = &n.properties {
                     for (key, val_expr) in props {
-                        if let Some(lit) = expr_to_sparql_lit_with_bindings(val_expr, bindings) {
+                        if let Some(lit) = expr_to_sparql_lit_with_bindings(val_expr, bindings, node_props) {
                             triples.push(format!("{bnode} <{BASE}{key}> {lit} ."));
                             has_triple = true;
                         }
@@ -391,7 +407,7 @@ fn emit_create_pattern_with_bindings(
                             // Emit RDF-star annotated triples for relationship properties.
                             if let Some(props) = &rel.properties {
                                 for (key, val_expr) in props {
-                                    if let Some(lit) = expr_to_sparql_lit_with_bindings(val_expr, bindings) {
+                                    if let Some(lit) = expr_to_sparql_lit_with_bindings(val_expr, bindings, node_props) {
                                         triples.push(format!(
                                             "<< {s} <{BASE}{rt}> {o} >> <{BASE}{key}> {lit} ."
                                         ));
@@ -466,6 +482,27 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                             bindings.insert(var.clone(), val);
                         }
                     }
+                    // Pre-pass: collect named-node literal properties so later patterns
+                    // can resolve cross-references like `(:B {num: a.id})` where `a` was
+                    // defined earlier in the same CREATE clause.
+                    let mut node_literal_props: HashMap<String, HashMap<String, Expression>> =
+                        HashMap::new();
+                    for pattern in &c.pattern.0 {
+                        for elem in &pattern.elements {
+                            if let PatternElement::Node(n) = elem {
+                                if let Some(var) = &n.variable {
+                                    if let Some(props) = &n.properties {
+                                        let entry = node_literal_props
+                                            .entry(var.clone())
+                                            .or_default();
+                                        for (k, v) in props {
+                                            entry.insert(k.clone(), v.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     for pattern in &c.pattern.0 {
                         emit_create_pattern_with_bindings(
                             pattern,
@@ -473,6 +510,7 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                             &mut node_map,
                             &mut counter,
                             &bindings,
+                            &node_literal_props,
                         );
                     }
                 }
