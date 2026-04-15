@@ -4961,24 +4961,6 @@ impl TranslationState {
             Expression::List(items) => {
                 // Literal list: expand to VALUES ?var { val1 val2 ... }
                 // Each element is either a ground term or a nested list (encoded as string).
-                //
-                // If ALL elements are lists (list-of-lists), register the flattened
-                // contents in with_list_vars so a subsequent UNWIND can expand it.
-                // Don't emit VALUES for the outer variable; the next UNWIND will
-                // expand the flattened list directly.
-                let all_inner_lists: bool = items.iter().all(|e| matches!(e, Expression::List(_)));
-                if all_inner_lists && !items.is_empty() {
-                    let mut flattened = Vec::new();
-                    for e in items {
-                        if let Expression::List(inner) = e {
-                            flattened.extend(inner.clone());
-                        }
-                    }
-                    self.with_list_vars
-                        .insert(u.variable.clone(), Expression::List(flattened));
-                    return Ok(current);
-                }
-
                 let bindings_result: Result<Vec<Vec<Option<GroundTerm>>>, _> = items
                     .iter()
                     .map(|e| match e {
