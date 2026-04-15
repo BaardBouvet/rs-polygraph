@@ -1977,7 +1977,7 @@ impl TranslationState {
                         // Project to WITH output variables.
                         // For conflicting renames, project the fresh var.
                         if let Some(ref vars) = project_vars {
-                            let inner_vars: Vec<Variable> = vars
+                            let mut inner_vars: Vec<Variable> = vars
                                 .iter()
                                 .map(|v| {
                                     outer_renames
@@ -1987,71 +1987,159 @@ impl TranslationState {
                                         .unwrap_or_else(|| v.clone())
                                 })
                                 .collect();
-                            current = GraphPattern::Project {
-                                inner: Box::new(current),
-                                variables: inner_vars,
-                            };
-                        }
-
-                        // Apply outer renames after the sub-select.
-                        for (alias, fresh) in &outer_renames {
-                            current = GraphPattern::Extend {
-                                inner: Box::new(current),
-                                variable: alias.clone(),
-                                expression: SparExpr::Variable(fresh.clone()),
-                            };
-                        }
-                        // Build property substitutions for ORDER BY expressions:
-                        // properties that were already projected in this WITH can be
-                        // looked up by their output variable instead of re-fetching them
-                        // (which would fail because the base node var is no longer in scope).
-                        if w.order_by.is_some() {
-                            if let (
-                                crate::ast::cypher::ReturnItems::Explicit(ref ti),
-                                Some(ref pvars),
-                            ) = (&as_return.items, &project_vars)
-                            {
-                                for (item, pvar) in ti.iter().zip(pvars.iter()) {
-                                    if let Expression::Property(base, key) = &item.expression {
-                                        if let Expression::Variable(base_var) = base.as_ref() {
-                                            self.with_prop_subst.insert(
-                                                (base_var.clone(), key.clone()),
-                                                pvar.clone(),
-                                            );
+                            // Pre-translate ORDER BY edge-property accesses BEFORE the WITH
+                            // sub-SELECT so that RDF-star reification triples are inside the
+                            // sub-SELECT where src/dst variables are in scope.
+                            // The result variable is added to inner_vars so it's projected,
+                            // and stored in with_prop_subst for apply_order_skip_limit to reuse.
+                            let original_inner_vars = inner_vars.clone();
+                            if w.order_by.is_some() {
+                                if let Some(ob) = w.order_by.as_ref() {
+                                    for sort_item in &ob.items {
+                                        if let Expression::Property(base_expr, key) =
+                                            &sort_item.expression
+                                        {
+                                            if let Expression::Variable(var_name) =
+                                                base_expr.as_ref()
+                                            {
+                                                if self.edge_map.contains_key(var_name.as_str())
+                                                    && !self.with_prop_subst.contains_key(&(
+                                                        var_name.clone(),
+                                                        key.clone(),
+                                                    ))
+                                                {
+                                                    let mut ob_extra = Vec::new();
+                                                    match self.translate_expr(
+                                                        &sort_item.expression,
+                                                        &mut ob_extra,
+                                                    ) {
+                                                        Ok(SparExpr::Variable(prop_v)) => {
+                                                            for tp in ob_extra {
+                                                                current = GraphPattern::LeftJoin {
+                                                                    left: Box::new(current),
+                                                                    right: Box::new(
+                                                                        GraphPattern::Bgp {
+                                                                            patterns: vec![tp],
+                                                                        },
+                                                                    ),
+                                                                    expression: None,
+                                                                };
+                                                            }
+                                                            self.with_prop_subst.insert(
+                                                                (var_name.clone(), key.clone()),
+                                                                prop_v.clone(),
+                                                            );
+                                                            inner_vars.push(prop_v);
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
+                            let with_needs_outer_project =
+                                inner_vars.len() > original_inner_vars.len();
+                            current = GraphPattern::Project {
+                                inner: Box::new(current),
+                                variables: inner_vars,
+                            };
+                            // Apply outer renames after the sub-select.
+                            for (alias, fresh) in &outer_renames {
+                                current = GraphPattern::Extend {
+                                    inner: Box::new(current),
+                                    variable: alias.clone(),
+                                    expression: SparExpr::Variable(fresh.clone()),
+                                };
+                            }
+                            // Build property substitutions for ORDER BY expressions:
+                            // properties that were already projected in this WITH can be
+                            // looked up by their output variable instead of re-fetching them.
+                            if w.order_by.is_some() {
+                                if let crate::ast::cypher::ReturnItems::Explicit(ref ti) =
+                                    as_return.items
+                                {
+                                    for (item, pvar) in ti.iter().zip(vars.iter()) {
+                                        if let Expression::Property(base, key) = &item.expression {
+                                            if let Expression::Variable(base_var) = base.as_ref()
+                                            {
+                                                self.with_prop_subst.insert(
+                                                    (base_var.clone(), key.clone()),
+                                                    pvar.clone(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Collect extra_triples count before ORDER BY.
+                            let extra_before_ob = extra_triples.len();
+                            // Apply ORDER BY / SKIP / LIMIT from WITH clause.
+                            current = self.apply_order_skip_limit(
+                                current,
+                                w.order_by.as_ref(),
+                                w.skip.as_ref(),
+                                w.limit.as_ref(),
+                                &mut extra_triples,
+                            )?;
+                            // Flush any property-access triples from ORDER BY as OPTIONAL
+                            // LeftJoins. This handles `WITH a ORDER BY a.x LIMIT n`.
+                            let ob_triples: Vec<TriplePattern> =
+                                extra_triples.drain(extra_before_ob..).collect();
+                            for tp in ob_triples {
+                                current = GraphPattern::LeftJoin {
+                                    left: Box::new(current),
+                                    right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
+                                    expression: None,
+                                };
+                            }
+                            // Clear ORDER BY property/aggregate substitutions.
+                            self.with_prop_subst.clear();
+                            self.agg_orderby_subst.clear();
+                            // If ORDER BY edge-property vars were added to the inner sub-SELECT,
+                            // wrap with an outer Project to hide them from the WITH output scope.
+                            if with_needs_outer_project {
+                                current = GraphPattern::Project {
+                                    inner: Box::new(current),
+                                    variables: original_inner_vars,
+                                };
+                            }
+                        } else {
+                            current = GraphPattern::Project {
+                                inner: Box::new(current),
+                                variables: Vec::new(), // no vars — filtered by outer scope
+                            };
+                            // Apply outer renames after the sub-select.
+                            for (alias, fresh) in &outer_renames {
+                                current = GraphPattern::Extend {
+                                    inner: Box::new(current),
+                                    variable: alias.clone(),
+                                    expression: SparExpr::Variable(fresh.clone()),
+                                };
+                            }
+                            // Collect extra_triples count before ORDER BY.
+                            let extra_before_ob = extra_triples.len();
+                            current = self.apply_order_skip_limit(
+                                current,
+                                w.order_by.as_ref(),
+                                w.skip.as_ref(),
+                                w.limit.as_ref(),
+                                &mut extra_triples,
+                            )?;
+                            let ob_triples: Vec<TriplePattern> =
+                                extra_triples.drain(extra_before_ob..).collect();
+                            for tp in ob_triples {
+                                current = GraphPattern::LeftJoin {
+                                    left: Box::new(current),
+                                    right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
+                                    expression: None,
+                                };
+                            }
+                            self.with_prop_subst.clear();
+                            self.agg_orderby_subst.clear();
                         }
                     }
-
-                    // Collect extra_triples count before ORDER BY so we can flush only
-                    // the NEW triples added by ORDER BY property accesses.
-                    let extra_before_ob = extra_triples.len();
-                    // Apply ORDER BY / SKIP / LIMIT from WITH clause.
-                    current = self.apply_order_skip_limit(
-                        current,
-                        w.order_by.as_ref(),
-                        w.skip.as_ref(),
-                        w.limit.as_ref(),
-                        &mut extra_triples,
-                    )?;
-                    // Flush any property-access triples generated by ORDER BY expressions
-                    // as OPTIONAL LeftJoins AFTER the Slice/OrderBy. This handles cases
-                    // like `WITH a ORDER BY a.x LIMIT n` where the property triple must
-                    // not escape into the next clause as a required join (which would
-                    // reduce the row count incorrectly).
-                    let ob_triples: Vec<TriplePattern> = extra_triples.drain(extra_before_ob..).collect();
-                    for tp in ob_triples {
-                        current = GraphPattern::LeftJoin {
-                            left: Box::new(current),
-                            right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
-                            expression: None,
-                        };
-                    }
-                    // Clear ORDER BY property/aggregate substitutions.
-                    self.with_prop_subst.clear();
-                    self.agg_orderby_subst.clear();
                     // NOTE: WITH's WHERE clause is now handled BEFORE the projection above,
                     // so old-scope variables are still accessible. No action needed here.
                     // Update nullable_vars based on WITH output items.
@@ -2244,7 +2332,9 @@ impl TranslationState {
                         };
                     }
 
-                    if let Some(vars) = project_vars {
+                    // Track vars for outer Project wrap (needed when ORDER BY uses edge props).
+                    let mut needs_outer_project: Option<Vec<Variable>> = None;
+                    if let Some(mut vars) = project_vars {
                         // Build property and aggregate substitutions for ORDER BY before projection.
                         if r.order_by.is_some() {
                             if let crate::ast::cypher::ReturnItems::Explicit(ref items) = r.items {
@@ -2264,6 +2354,55 @@ impl TranslationState {
                                     }
                                 }
                             }
+                        }
+                        // Pre-translate ORDER BY edge-property accesses BEFORE the Project
+                        // so that RDF-star reification triples (?reif rdf:reifies << src pred dst >>)
+                        // are emitted inside the sub-SELECT where ?src and ?dst are still in scope.
+                        // The resulting variable is stored in with_prop_subst so that
+                        // apply_order_skip_limit reuses it without re-emitting extra triples.
+                        let original_vars = vars.clone();
+                        if let Some(ob) = r.order_by.as_ref() {
+                            for sort_item in &ob.items {
+                                if let Expression::Property(base_expr, key) =
+                                    &sort_item.expression
+                                {
+                                    if let Expression::Variable(var_name) = base_expr.as_ref() {
+                                        if self.edge_map.contains_key(var_name.as_str())
+                                            && !self.with_prop_subst.contains_key(&(
+                                                var_name.clone(),
+                                                key.clone(),
+                                            ))
+                                        {
+                                            let mut ob_extra = Vec::new();
+                                            match self.translate_expr(
+                                                &sort_item.expression,
+                                                &mut ob_extra,
+                                            ) {
+                                                Ok(SparExpr::Variable(prop_v)) => {
+                                                    for tp in ob_extra {
+                                                        current = GraphPattern::LeftJoin {
+                                                            left: Box::new(current),
+                                                            right: Box::new(GraphPattern::Bgp {
+                                                                patterns: vec![tp],
+                                                            }),
+                                                            expression: None,
+                                                        };
+                                                    }
+                                                    self.with_prop_subst.insert(
+                                                        (var_name.clone(), key.clone()),
+                                                        prop_v.clone(),
+                                                    );
+                                                    vars.push(prop_v);
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if vars.len() > original_vars.len() {
+                            needs_outer_project = Some(original_vars);
                         }
                         current = GraphPattern::Project {
                             inner: Box::new(current),
@@ -2286,6 +2425,14 @@ impl TranslationState {
                     // Clear ORDER BY property/aggregate substitutions.
                     self.with_prop_subst.clear();
                     self.agg_orderby_subst.clear();
+                    // If ORDER BY edge-property vars were added to the inner Project,
+                    // wrap with an outer Project to hide them from the final result set.
+                    if let Some(outer_vars) = needs_outer_project {
+                        current = GraphPattern::Project {
+                            inner: Box::new(current),
+                            variables: outer_vars,
+                        };
+                    }
                 }
                 Clause::Unwind(u) => {
                     // UNWIND expr AS var → VALUES ?var { values... }
@@ -3930,10 +4077,24 @@ impl TranslationState {
                 // rather than the plain edge name (which is unbound in SPARQL).  This allows
                 // subsequent MATCH clauses to join on the same predicate variable and thus
                 // correctly constrain the edge type to the originally-matched relationship.
-                if let Some(edge) = self.edge_map.get(name.as_str()) {
+                if let Some(edge) = self.edge_map.get(name.as_str()).cloned() {
                     if let Some(pred_var) = edge.pred_var.clone() {
                         let alias_str = item.alias.as_deref().unwrap_or(name.as_str());
                         let expected_pred = format!("{alias_str}_pred");
+                        // Register the alias in edge_map so that property accesses
+                        // like `rel.id` in ORDER BY resolve via the aliased pred_var.
+                        let aliased_pred = Variable::new_unchecked(expected_pred.clone());
+                        let new_edge = EdgeInfo {
+                            src: edge.src.clone(),
+                            pred: edge.pred.clone(),
+                            pred_var: Some(aliased_pred),
+                            dst: edge.dst.clone(),
+                            reif_var: edge.reif_var.clone(),
+                            null_check_var: edge.null_check_var.clone(),
+                            eid_var: edge.eid_var.clone(),
+                            binding_generation: self.with_generation,
+                        };
+                        self.edge_map.insert(alias_str.to_string(), new_edge);
                         if pred_var.as_str() == expected_pred {
                             // Alias matches the generated pred_var name — project it directly.
                             return Ok((pred_var, None, None));
