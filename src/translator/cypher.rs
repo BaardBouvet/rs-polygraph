@@ -1850,6 +1850,31 @@ impl TranslationState {
                             };
                         }
 
+                        // Apply WITH WHERE clause BEFORE projection so that both old-scope
+                        // variables (e.g. ?a from MATCH) and newly-bound aliases (from Extends)
+                        // are in scope. After Project, old variables are no longer visible.
+                        if let Some(ref wc) = w.where_ {
+                            let filter_expr =
+                                self.translate_expr(&wc.expression, &mut extra_triples)?;
+                            // Apply any property-access triples needed by WHERE as OPTIONAL joins.
+                            if !extra_triples.is_empty() {
+                                for tp in extra_triples.drain(..) {
+                                    current = GraphPattern::LeftJoin {
+                                        left: Box::new(current),
+                                        right: Box::new(GraphPattern::Bgp {
+                                            patterns: vec![tp],
+                                        }),
+                                        expression: None,
+                                    };
+                                }
+                            }
+                            current = self.apply_pending_binds(current);
+                            current = GraphPattern::Filter {
+                                inner: Box::new(current),
+                                expr: filter_expr,
+                            };
+                        }
+
                         if need_distinct {
                             current = GraphPattern::Distinct {
                                 inner: Box::new(current),
@@ -1933,14 +1958,8 @@ impl TranslationState {
                     }
                     // Clear ORDER BY property substitutions.
                     self.with_prop_subst.clear();
-                    // Translate WITH's WHERE if present.
-                    if let Some(wc) = &w.where_ {
-                        let filter_expr =
-                            self.translate_expr(&wc.expression, &mut extra_triples)?;
-                        // Apply any pending BIND extends from IsNull/IsNotNull on complex exprs.
-                        current = self.apply_pending_binds(current);
-                        pending_filters.push(filter_expr);
-                    }
+                    // NOTE: WITH's WHERE clause is now handled BEFORE the projection above,
+                    // so old-scope variables are still accessible. No action needed here.
                     // Update nullable_vars based on WITH output items.
                     {
                         let mut new_nullable: std::collections::HashSet<String> =
