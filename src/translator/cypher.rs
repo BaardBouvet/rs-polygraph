@@ -497,7 +497,42 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                     }
                 }
 
-                // AmbiguousAggregation and NestedAggregation.
+                // InvalidArgumentType / UnexpectedSyntax: size() with invalid arg.
+                if let ReturnItems::Explicit(items) = &r.items {
+                    fn scan_invalid_size(expr: &Expression, kinds: &std::collections::HashMap<String, Kind>) -> Option<&'static str> {
+                        match expr {
+                            Expression::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("size") => {
+                                if let Some(arg) = args.first() {
+                                    match arg {
+                                        Expression::PatternPredicate(_) => return Some("UnexpectedSyntax"),
+                                        Expression::Variable(v) if matches!(kinds.get(v.as_str()), Some(Kind::Path)) => return Some("InvalidArgumentType"),
+                                        _ => {}
+                                    }
+                                }
+                                None
+                            }
+                            Expression::FunctionCall { args, .. } => {
+                                args.iter().find_map(|a| scan_invalid_size(a, kinds))
+                            }
+                            Expression::Or(a, b) | Expression::And(a, b) | Expression::Add(a, b)
+                            | Expression::Subtract(a, b) | Expression::Multiply(a, b)
+                            | Expression::Divide(a, b) | Expression::Comparison(a, _, b) => {
+                                scan_invalid_size(a, kinds).or_else(|| scan_invalid_size(b, kinds))
+                            }
+                            Expression::Not(e) | Expression::Negate(e)
+                            | Expression::IsNull(e) | Expression::IsNotNull(e) => scan_invalid_size(e, kinds),
+                            _ => None,
+                        }
+                    }
+                    for item in items {
+                        if let Some(err) = scan_invalid_size(&item.expression, &kinds) {
+                            return Err(PolygraphError::Translation {
+                                message: format!("{err}: invalid argument to size()"),
+                            });
+                        }
+                    }
+                }
+
                 if let ReturnItems::Explicit(items) = &r.items {
                     // Collect the set of non-aggregate return expressions for grouping check.
                     let non_agg_items: Vec<&Expression> = items
