@@ -533,8 +533,8 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                 }
 
                 // UndefinedVariable: RETURN references a variable not bound in MATCH/WITH/UNWIND.
-                // Only check when there has been at least one MATCH clause (seen_match).
-                if seen_match {
+                // Check when we have some scope context established.
+                if seen_match || !bound_vars.is_empty() {
                     if let ReturnItems::Explicit(items) = &r.items {
                         fn collect_free_vars(expr: &Expression, vars: &mut Vec<String>) {
                             match expr {
@@ -800,6 +800,42 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                                 }
                             }
                         }
+                    }
+                }
+
+                // UndefinedVariable: WHERE clause references an undefined variable.
+                // This check runs AFTER pattern elements are registered.
+                if let Some(wc) = &m.where_ {
+                    fn check_undef_where(expr: &Expression, bound: &std::collections::HashSet<String>, kinds: &std::collections::HashMap<String, Kind>, found: &mut Option<String>) {
+                        if found.is_some() { return; }
+                        match expr {
+                            Expression::Variable(v) => {
+                                if !bound.contains(v) && !kinds.contains_key(v.as_str()) {
+                                    *found = Some(v.clone());
+                                }
+                            }
+                            Expression::Property(base, _) => check_undef_where(base, bound, kinds, found),
+                            Expression::Or(a, b) | Expression::And(a, b) | Expression::Xor(a, b)
+                            | Expression::Add(a, b) | Expression::Subtract(a, b)
+                            | Expression::Multiply(a, b) | Expression::Divide(a, b)
+                            | Expression::Comparison(a, _, b) => {
+                                check_undef_where(a, bound, kinds, found);
+                                check_undef_where(b, bound, kinds, found);
+                            }
+                            Expression::Not(e) | Expression::Negate(e)
+                            | Expression::IsNull(e) | Expression::IsNotNull(e) => check_undef_where(e, bound, kinds, found),
+                            Expression::FunctionCall { args, .. } => {
+                                for a in args { check_undef_where(a, bound, kinds, found); }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let mut found_undef: Option<String> = None;
+                    check_undef_where(&wc.expression, &bound_vars, &kinds, &mut found_undef);
+                    if let Some(v) = found_undef {
+                        return Err(PolygraphError::Translation {
+                            message: format!("UndefinedVariable: variable '{v}' not defined"),
+                        });
                     }
                 }
             }
