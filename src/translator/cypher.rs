@@ -287,6 +287,10 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
         match clause {
             Clause::With(w) => {
                 if let crate::ast::cypher::ReturnItems::Explicit(items) = &w.items {
+                    // Collect the projected variable names for scope replacement.
+                    let mut projected_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    let mut projected_kinds: std::collections::HashMap<String, Kind> = std::collections::HashMap::new();
+
                     for item in items {
                         let name = item.alias.clone().or_else(|| {
                             if let Expression::Variable(v) = &item.expression {
@@ -302,8 +306,7 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                             });
                         }
                         if let Some(var) = name {
-                            // Always mark as bound (for UndefinedVariable check).
-                            bound_vars.insert(var.clone());
+                            projected_names.insert(var.clone());
                             let binding_kind = match &item.expression {
                                 // Primitive scalars → definitely not node/rel/path
                                 Expression::Literal(Literal::Integer(_))
@@ -332,75 +335,160 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                                 _ => None, // unknown type — don't constrain
                             };
                             if let Some(k) = binding_kind {
-                                kinds.insert(var, k);
+                                projected_kinds.insert(var, k);
                             }
                         }
                     }
-                }
-                // InvalidAggregation: aggregate function in WITH ORDER BY.
-                // Only invalid when the WITH projection itself has no aggregates.
-                if let Some(ob) = &w.order_by {
-                    let projection_has_agg = if let crate::ast::cypher::ReturnItems::Explicit(items) = &w.items {
-                        items.iter().any(|i| expr_contains_aggregate(&i.expression))
-                    } else { false };
-                    if !projection_has_agg {
-                        for sort in &ob.items {
-                            if expr_contains_aggregate(&sort.expression) {
-                                return Err(PolygraphError::Translation {
-                                    message: "InvalidAggregation: aggregate function in ORDER BY".to_string(),
-                                });
+
+                    let projection_has_agg = items.iter().any(|i| expr_contains_aggregate(&i.expression));
+
+                    // UndefinedVariable check in ORDER BY (using pre-projection scope).
+                    if let Some(ob) = &w.order_by {
+                        if seen_match {
+                            fn collect_free_vars_ob(expr: &Expression, vars: &mut Vec<String>) {
+                                match expr {
+                                    Expression::Variable(v) => vars.push(v.clone()),
+                                    Expression::Property(base, _) => collect_free_vars_ob(base, vars),
+                                    Expression::Aggregate(_) => {}
+                                    Expression::Or(a, b) | Expression::And(a, b) | Expression::Xor(a, b)
+                                    | Expression::Add(a, b) | Expression::Subtract(a, b)
+                                    | Expression::Multiply(a, b) | Expression::Divide(a, b)
+                                    | Expression::Modulo(a, b) | Expression::Power(a, b)
+                                    | Expression::Comparison(a, _, b) => {
+                                        collect_free_vars_ob(a, vars);
+                                        collect_free_vars_ob(b, vars);
+                                    }
+                                    Expression::Not(e) | Expression::Negate(e)
+                                    | Expression::IsNull(e) | Expression::IsNotNull(e) => collect_free_vars_ob(e, vars),
+                                    Expression::FunctionCall { args, .. } => {
+                                        for a in args { collect_free_vars_ob(a, vars); }
+                                    }
+                                    _ => {}
+                                }
                             }
-                        }
-                    }
-                    // AmbiguousAggregationExpression: aggregate in ORDER BY where the ORDER BY
-                    // item has free terms not covered by non-agg projection items.
-                    if projection_has_agg {
-                        let non_agg_items: Vec<&Expression> = if let crate::ast::cypher::ReturnItems::Explicit(items) = &w.items {
-                            items.iter()
+                            // Build the set of valid references for ORDER BY.
+                            // When projection_has_agg: only projected items (expressions+aliases) are valid.
+                            // When no aggregation: any current bound_var is valid.
+                            let proj_aliases: std::collections::HashSet<&str> = items.iter()
+                                .filter_map(|i| i.alias.as_deref())
+                                .collect();
+                            let non_agg_exprs: Vec<&Expression> = items.iter()
                                 .filter(|i| !expr_contains_aggregate(&i.expression))
                                 .map(|i| &i.expression)
-                                .collect()
-                        } else { vec![] };
-                        for sort in &ob.items {
-                            if expr_contains_aggregate(&sort.expression) && expr_has_free_var_outside_agg(&sort.expression) {
-                                if is_ambiguous_aggregation(&sort.expression, &non_agg_items) {
+                                .collect();
+
+                            for sort in &ob.items {
+                                // For non-agg ORDER BY expressions: check free vars are in scope
+                                if !expr_contains_aggregate(&sort.expression) {
+                                    let mut sort_free = Vec::new();
+                                    collect_free_vars_ob(&sort.expression, &mut sort_free);
+                                    for v in sort_free {
+                                        let covered = if projection_has_agg {
+                                            // With aggregation: only projected non-agg items or aliases are valid
+                                            proj_aliases.contains(v.as_str())
+                                            || non_agg_exprs.iter().any(|e| {
+                                                matches!(e, Expression::Variable(ev) if *ev == v)
+                                                || matches!(e, Expression::Property(bx, _) if {
+                                                    if let Expression::Variable(bv) = bx.as_ref() {
+                                                        *bv == v
+                                                    } else { false }
+                                                })
+                                            })
+                                        } else {
+                                            // No aggregation: any bound var is valid
+                                            bound_vars.contains(&v) || projected_names.contains(&v) || proj_aliases.contains(v.as_str())
+                                        };
+                                        if !covered {
+                                            return Err(PolygraphError::Translation {
+                                                message: format!("UndefinedVariable: variable '{v}' not defined in ORDER BY"),
+                                            });
+                                        }
+                                    }
+                                }
+                                // For aggregate ORDER BY expressions: check they're in the projection.
+                                // (Handled by InvalidAggregation/AmbiguousAggregation checks below)
+                            }
+                        }
+                    }
+
+                    // InvalidAggregation: aggregate function in WITH ORDER BY.
+                    // Only invalid when the WITH projection itself has no aggregates.
+                    if let Some(ob) = &w.order_by {
+                        if !projection_has_agg {
+                            for sort in &ob.items {
+                                if expr_contains_aggregate(&sort.expression) {
                                     return Err(PolygraphError::Translation {
-                                        message: "AmbiguousAggregationExpression: ORDER BY expression is ambiguous".to_string(),
+                                        message: "InvalidAggregation: aggregate function in ORDER BY".to_string(),
                                     });
                                 }
                             }
                         }
-                    }
-                }
-                // AmbiguousAggregationExpression in WITH items.
-                if let crate::ast::cypher::ReturnItems::Explicit(items) = &w.items {
-                    let non_agg_items: Vec<&Expression> = items.iter()
-                        .filter(|i| !matches!(&i.expression, Expression::Aggregate(_)))
-                        .filter(|i| !expr_contains_aggregate(&i.expression))
-                        .map(|i| &i.expression)
-                        .collect();
-                    for item in items {
-                        if !matches!(&item.expression, Expression::Aggregate(_))
-                            && expr_contains_aggregate(&item.expression)
-                            && expr_has_free_var_outside_agg(&item.expression)
-                            && is_ambiguous_aggregation(&item.expression, &non_agg_items)
-                        {
-                            return Err(PolygraphError::Translation {
-                                message: "AmbiguousAggregationExpression: mix of aggregate and \
-                                          non-aggregate in WITH expression".to_string(),
-                            });
+                        // AmbiguousAggregationExpression: aggregate in ORDER BY where the ORDER BY
+                        // item has free terms not covered by non-agg projection items or aliases.
+                        if projection_has_agg {
+                            let all_items_w: Vec<_> = items.iter().collect();
+                            let non_agg_exprs: Vec<&Expression> = all_items_w.iter()
+                                .filter(|i| !expr_contains_aggregate(&i.expression))
+                                .map(|i| &i.expression)
+                                .collect();
+                            // Aliases from any projection item (e.g. count(*) AS cnt → "cnt" is valid)
+                            let proj_aliases: std::collections::HashSet<&str> = all_items_w.iter()
+                                .filter_map(|i| i.alias.as_deref())
+                                .collect();
+                            for sort in &ob.items {
+                                if expr_contains_aggregate(&sort.expression) && expr_has_free_var_outside_agg(&sort.expression) {
+                                    let free_terms = atomic_free_terms(&sort.expression);
+                                    let ambiguous = free_terms.iter().any(|ft| {
+                                        if non_agg_exprs.contains(ft) { return false; }
+                                        if let Expression::Variable(v) = ft {
+                                            if proj_aliases.contains(v.as_str()) { return false; }
+                                        }
+                                        true
+                                    });
+                                    if ambiguous {
+                                        return Err(PolygraphError::Translation {
+                                            message: "AmbiguousAggregationExpression: ORDER BY expression is ambiguous".to_string(),
+                                        });
+                                    }
+                                }
+                            }
                         }
+                    }
+                    // AmbiguousAggregationExpression in WITH items.
+                    {
+                        let non_agg_items: Vec<&Expression> = items.iter()
+                            .filter(|i| !matches!(&i.expression, Expression::Aggregate(_)))
+                            .filter(|i| !expr_contains_aggregate(&i.expression))
+                            .map(|i| &i.expression)
+                            .collect();
+                        for item in items {
+                            if !matches!(&item.expression, Expression::Aggregate(_))
+                                && expr_contains_aggregate(&item.expression)
+                                && expr_has_free_var_outside_agg(&item.expression)
+                                && is_ambiguous_aggregation(&item.expression, &non_agg_items)
+                            {
+                                return Err(PolygraphError::Translation {
+                                    message: "AmbiguousAggregationExpression: mix of aggregate and \
+                                              non-aggregate in WITH expression".to_string(),
+                                });
+                            }
+                        }
+                    }
+
+                    // Scope replacement: after WITH, only projected variables are in scope.
+                    // Always replace (even before MATCH) to handle WITH ... MATCH patterns.
+                    bound_vars = projected_names;
+                    kinds.retain(|k, _| projected_kinds.contains_key(k));
+                    for (k, v) in projected_kinds {
+                        kinds.insert(k, v);
                     }
                 }
             }
             Clause::Return(r) => {
-                // NoVariablesInScope: RETURN * with no bound graph variables from MATCH.
+                // NoVariablesInScope: RETURN * with no bound variables from MATCH/WITH/UNWIND.
                 // Only fire when there was at least one MATCH clause (tracked by seen_match).
                 if matches!(&r.items, ReturnItems::All) && seen_match {
-                    let has_graph_var = kinds
-                        .values()
-                        .any(|k| matches!(k, Kind::Node | Kind::Rel | Kind::Path));
-                    if !has_graph_var {
+                    if bound_vars.is_empty() {
                         return Err(PolygraphError::Translation {
                             message: "NoVariablesInScope: RETURN * with no variables in scope"
                                 .to_string(),
@@ -542,15 +630,27 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         }
                     }
                     if projection_has_agg {
-                        let non_agg_items: Vec<&Expression> = if let ReturnItems::Explicit(items) = &r.items {
-                            items.iter()
-                                .filter(|i| !expr_contains_aggregate(&i.expression))
-                                .map(|i| &i.expression)
-                                .collect()
+                        let all_items_r: Vec<_> = if let ReturnItems::Explicit(items) = &r.items {
+                            items.iter().collect()
                         } else { vec![] };
+                        let non_agg_exprs: Vec<&Expression> = all_items_r.iter()
+                            .filter(|i| !expr_contains_aggregate(&i.expression))
+                            .map(|i| &i.expression)
+                            .collect();
+                        let proj_aliases: std::collections::HashSet<&str> = all_items_r.iter()
+                            .filter_map(|i| i.alias.as_deref())
+                            .collect();
                         for sort in &ob.items {
                             if expr_contains_aggregate(&sort.expression) && expr_has_free_var_outside_agg(&sort.expression) {
-                                if is_ambiguous_aggregation(&sort.expression, &non_agg_items) {
+                                let free_terms = atomic_free_terms(&sort.expression);
+                                let ambiguous = free_terms.iter().any(|ft| {
+                                    if non_agg_exprs.contains(ft) { return false; }
+                                    if let Expression::Variable(v) = ft {
+                                        if proj_aliases.contains(v.as_str()) { return false; }
+                                    }
+                                    true
+                                });
+                                if ambiguous {
                                     return Err(PolygraphError::Translation {
                                         message: "AmbiguousAggregationExpression: ORDER BY expression is ambiguous".to_string(),
                                     });
