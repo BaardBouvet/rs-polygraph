@@ -3745,13 +3745,14 @@ impl TranslationState {
                 Ok(SparExpr::UnaryMinus(Box::new(li)))
             }
             Expression::Power(a, b) => {
-                // SPARQL has no standard exponentiation operator.
-                // Evaluate subexpressions for side-effects (extra triples), then emit
-                // a custom function that Oxigraph does not recognise.  Unknown custom
-                // functions return null in spareval, which matches Cypher's behaviour
-                // when either operand is null (the only use-case in the TCK suite).
+                // Attempt compile-time evaluation for literal operands.
                 let la = self.translate_expr(a, extra)?;
                 let rb = self.translate_expr(b, extra)?;
+                if let Some(f) = try_const_fold_pow(&la, &rb) {
+                    return Ok(f);
+                }
+                // Runtime: emit as custom function (returns null in Oxigraph for unknown IRIs).
+                // This handles null-propagation correctly for the few dynamic cases.
                 Ok(SparExpr::FunctionCall(
                     spargebra::algebra::Function::Custom(NamedNode::new_unchecked(
                         "urn:polygraph:unsupported-pow",
@@ -5400,6 +5401,24 @@ fn serialize_list_literal(elems: &[Expression]) -> String {
         })
         .collect();
     format!("[{}]", parts.join(", "))
+}
+
+/// Constant-fold `base ^ exponent` when both are numeric literals.
+/// Power in Cypher always returns double.
+fn try_const_fold_pow(base: &SparExpr, exp: &SparExpr) -> Option<SparExpr> {
+    let (bv, bd) = extract_lit_num(base)?;
+    let (ev, _ed) = extract_lit_num(exp)?;
+    let b: f64 = bv.parse().ok()?;
+    let e: f64 = ev.parse().ok()?;
+    let result = b.powf(e);
+    if !result.is_finite() {
+        return None;
+    }
+    let _ = bd; // suppress unused variable
+    Some(SparExpr::Literal(SparLit::new_typed_literal(
+        format!("{result:?}"),
+        NamedNode::new_unchecked(XSD_DOUBLE),
+    )))
 }
 
 /// Extract an integer value from a literal integer expression (direct or negated).

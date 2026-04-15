@@ -981,17 +981,14 @@ fn build_unary_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
 }
 
 fn build_power_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    // power_expr = { prop_expr ~ ("^" ~ unary_expr)? }
+    // power_expr = { prop_expr ~ ("^" ~ prop_expr)* }
+    // Left-associative: a^b^c = (a^b)^c
     let mut children = pair.into_inner();
-    let base = build_prop_expr(children.next().expect("power_expr has prop_expr"))?;
-    if let Some(exponent_pair) = children.next() {
-        Ok(Expression::Power(
-            Box::new(base),
-            Box::new(build_unary_expr(exponent_pair)?),
-        ))
-    } else {
-        Ok(base)
+    let mut acc = build_prop_expr(children.next().expect("power_expr has prop_expr"))?;
+    for next in children {
+        acc = Expression::Power(Box::new(acc), Box::new(build_prop_expr(next)?));
     }
+    Ok(acc)
 }
 
 fn build_prop_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
