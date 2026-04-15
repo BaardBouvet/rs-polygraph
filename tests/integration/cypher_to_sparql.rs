@@ -821,3 +821,10 @@ fn debug_oxigraph_undef_groupby() {
         }
     }
 }
+
+#[test]
+fn debug_min_int() {
+    let q = "RETURN -9223372036854775808 AS literal";
+    let s = transpile(q);
+    println!("SPARQL:\n{}", s);
+}

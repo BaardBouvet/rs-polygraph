@@ -973,6 +973,18 @@ fn build_unary_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
                 .into_inner()
                 .next()
                 .expect("unary_minus has unary_expr");
+            // Special case: -2^63 = i64::MIN.  The literal 2^63 overflows i64 by itself,
+            // but when negated it is exactly representable as i64::MIN.
+            let raw = operand.as_str().trim();
+            const MIN_INT_MAG: u64 = i64::MAX as u64 + 1;
+            let is_min_int = raw.parse::<u64>().map(|n| n == MIN_INT_MAG).unwrap_or(false)
+                || raw.starts_with("0x").then(|| u64::from_str_radix(&raw[2..], 16).map(|n| n == MIN_INT_MAG).unwrap_or(false)).unwrap_or(false)
+                || raw.starts_with("0X").then(|| u64::from_str_radix(&raw[2..], 16).map(|n| n == MIN_INT_MAG).unwrap_or(false)).unwrap_or(false)
+                || raw.starts_with("0o").then(|| u64::from_str_radix(&raw[2..], 8).map(|n| n == MIN_INT_MAG).unwrap_or(false)).unwrap_or(false)
+                || raw.starts_with("0O").then(|| u64::from_str_radix(&raw[2..], 8).map(|n| n == MIN_INT_MAG).unwrap_or(false)).unwrap_or(false);
+            if is_min_int {
+                return Ok(Expression::Literal(Literal::Integer(i64::MIN)));
+            }
             Ok(Expression::Negate(Box::new(build_unary_expr(operand)?)))
         }
         Rule::power_expr => build_power_expr(inner),
