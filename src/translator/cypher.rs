@@ -474,23 +474,38 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                                 .map(|i| &i.expression)
                                 .collect();
                             // Aliases from any projection item (e.g. count(*) AS cnt → "cnt" is valid)
-                            let proj_aliases: std::collections::HashSet<&str> = all_items_w.iter()
+                            let proj_aliases_w: std::collections::HashSet<&str> = all_items_w.iter()
                                 .filter_map(|i| i.alias.as_deref())
                                 .collect();
                             for sort in &ob.items {
-                                if expr_contains_aggregate(&sort.expression) && expr_has_free_var_outside_agg(&sort.expression) {
-                                    let free_terms = atomic_free_terms(&sort.expression);
-                                    let ambiguous = free_terms.iter().any(|ft| {
-                                        if non_agg_exprs.contains(ft) { return false; }
-                                        if let Expression::Variable(v) = ft {
-                                            if proj_aliases.contains(v.as_str()) { return false; }
-                                        }
-                                        true
-                                    });
-                                    if ambiguous {
-                                        return Err(PolygraphError::Translation {
-                                            message: "AmbiguousAggregationExpression: ORDER BY expression is ambiguous".to_string(),
+                                if expr_contains_aggregate(&sort.expression) {
+                                    if expr_has_free_var_outside_agg(&sort.expression) {
+                                        let free_terms = atomic_free_terms(&sort.expression);
+                                        let ambiguous = free_terms.iter().any(|ft| {
+                                            if non_agg_exprs.contains(ft) { return false; }
+                                            if let Expression::Variable(v) = ft {
+                                                if proj_aliases_w.contains(v.as_str()) { return false; }
+                                            }
+                                            true
                                         });
+                                        if ambiguous {
+                                            return Err(PolygraphError::Translation {
+                                                message: "AmbiguousAggregationExpression: ORDER BY expression is ambiguous".to_string(),
+                                            });
+                                        }
+                                    } else {
+                                        // Aggregate in ORDER BY with no free vars outside agg
+                                        // (pure aggregate like sum(x)). Must match a projected
+                                        // expression or alias, otherwise UndefinedVariable.
+                                        let alias_covers = if let Expression::Variable(v) = &sort.expression {
+                                            proj_aliases_w.contains(v.as_str())
+                                        } else { false };
+                                        let expr_in_proj = all_items_w.iter().any(|pi| pi.expression == sort.expression);
+                                        if !alias_covers && !expr_in_proj {
+                                            return Err(PolygraphError::Translation {
+                                                message: "UndefinedVariable: aggregate in ORDER BY is not in the projection".to_string(),
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -609,45 +624,55 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                 }
 
                 // UndefinedVariable: RETURN references a variable not bound in MATCH/WITH/UNWIND.
-                // Check when we have some scope context established.
-                if seen_match || !bound_vars.is_empty() {
-                    if let ReturnItems::Explicit(items) = &r.items {
-                        fn collect_free_vars(expr: &Expression, vars: &mut Vec<String>) {
-                            match expr {
-                                Expression::Variable(v) => vars.push(v.clone()),
-                                Expression::Property(base, _) => collect_free_vars(base, vars),
-                                Expression::Aggregate(_) => {}
-                                Expression::Or(a, b)
-                                | Expression::And(a, b)
-                                | Expression::Xor(a, b)
-                                | Expression::Add(a, b)
-                                | Expression::Subtract(a, b)
-                                | Expression::Multiply(a, b)
-                                | Expression::Divide(a, b)
-                                | Expression::Modulo(a, b)
-                                | Expression::Power(a, b)
-                                | Expression::Comparison(a, _, b) => {
-                                    collect_free_vars(a, vars);
-                                    collect_free_vars(b, vars);
+                // Check when we have some scope context established, OR when the expression
+                // contains variable references that would require a scope to be valid.
+                if let ReturnItems::Explicit(items) = &r.items {
+                    fn collect_free_vars(expr: &Expression, vars: &mut Vec<String>) {
+                        match expr {
+                            Expression::Variable(v) => vars.push(v.clone()),
+                            Expression::Property(base, _) => collect_free_vars(base, vars),
+                            Expression::Aggregate(_) => {}
+                            Expression::Map(pairs) => {
+                                for (_, v) in pairs {
+                                    collect_free_vars(v, vars);
                                 }
-                                Expression::Not(e)
-                                | Expression::Negate(e)
-                                | Expression::IsNull(e)
-                                | Expression::IsNotNull(e) => collect_free_vars(e, vars),
-                                Expression::LabelCheck { variable, .. } => {
-                                    vars.push(variable.clone())
-                                }
-                                Expression::FunctionCall { args, .. } => {
-                                    for a in args {
-                                        collect_free_vars(a, vars);
-                                    }
-                                }
-                                _ => {}
                             }
+                            Expression::Or(a, b)
+                            | Expression::And(a, b)
+                            | Expression::Xor(a, b)
+                            | Expression::Add(a, b)
+                            | Expression::Subtract(a, b)
+                            | Expression::Multiply(a, b)
+                            | Expression::Divide(a, b)
+                            | Expression::Modulo(a, b)
+                            | Expression::Power(a, b)
+                            | Expression::Comparison(a, _, b) => {
+                                collect_free_vars(a, vars);
+                                collect_free_vars(b, vars);
+                            }
+                            Expression::Not(e)
+                            | Expression::Negate(e)
+                            | Expression::IsNull(e)
+                            | Expression::IsNotNull(e) => collect_free_vars(e, vars),
+                            Expression::LabelCheck { variable, .. } => {
+                                vars.push(variable.clone())
+                            }
+                            Expression::FunctionCall { args, .. } => {
+                                for a in args {
+                                    collect_free_vars(a, vars);
+                                }
+                            }
+                            _ => {}
                         }
-                        for item in items {
-                            let mut free_vars = Vec::new();
-                            collect_free_vars(&item.expression, &mut free_vars);
+                    }
+                    for item in items {
+                        let mut free_vars = Vec::new();
+                        collect_free_vars(&item.expression, &mut free_vars);
+                        if free_vars.is_empty() {
+                            continue;
+                        }
+                        // Only check undefined vars when we have context OR the expr has vars
+                        if seen_match || !bound_vars.is_empty() || !free_vars.is_empty() {
                             for v in free_vars {
                                 // Check both kinds (from MATCH) and bound_vars (from WITH/UNWIND).
                                 if !kinds.contains_key(&v) && !bound_vars.contains(&v) {
