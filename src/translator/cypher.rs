@@ -589,6 +589,10 @@ struct TranslationState {
     node_vars: std::collections::HashSet<String>,
     /// Projected columns collected during RETURN translation.
     projected_columns: Vec<ProjectedColumn>,
+    /// Property expression substitutions active during WITH ORDER BY processing.
+    /// Maps (base_var_name, property_key) → SPARQL variable that holds that property value.
+    /// Populated before ORDER BY translation, cleared after.
+    with_prop_subst: std::collections::HashMap<(String, String), Variable>,
     /// Whether the last RETURN used DISTINCT.
     return_distinct: bool,
     /// Variable-length relationship variables with their (lower, upper) hop bounds.
@@ -632,6 +636,7 @@ impl TranslationState {
             path_node_vars: Default::default(),
             node_vars: Default::default(),
             projected_columns: Vec::new(),
+            with_prop_subst: Default::default(),
             return_distinct: false,
             varlen_rel_scope: Default::default(),
             map_vars: Default::default(),
@@ -1321,6 +1326,28 @@ impl TranslationState {
                                 expression: SparExpr::Variable(fresh.clone()),
                             };
                         }
+                        // Build property substitutions for ORDER BY expressions:
+                        // properties that were already projected in this WITH can be
+                        // looked up by their output variable instead of re-fetching them
+                        // (which would fail because the base node var is no longer in scope).
+                        if w.order_by.is_some() {
+                            if let (
+                                crate::ast::cypher::ReturnItems::Explicit(ref ti),
+                                Some(ref pvars),
+                            ) = (&as_return.items, &project_vars)
+                            {
+                                for (item, pvar) in ti.iter().zip(pvars.iter()) {
+                                    if let Expression::Property(base, key) = &item.expression {
+                                        if let Expression::Variable(base_var) = base.as_ref() {
+                                            self.with_prop_subst.insert(
+                                                (base_var.clone(), key.clone()),
+                                                pvar.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Collect extra_triples count before ORDER BY so we can flush only
@@ -1347,6 +1374,8 @@ impl TranslationState {
                             expression: None,
                         };
                     }
+                    // Clear ORDER BY property substitutions.
+                    self.with_prop_subst.clear();
                     // Translate WITH's WHERE if present.
                     if let Some(wc) = &w.where_ {
                         let filter_expr =
@@ -3474,6 +3503,12 @@ impl TranslationState {
                         return Ok(SparExpr::Variable(v));
                     }
                 }
+                // Check if this property was already projected by the surrounding WITH clause.
+                // This substitution prevents ORDER BY from emitting a new property triple
+                // after the WITH projection has hidden the base node variable.
+                if let Some(subst_var) = self.with_prop_subst.get(&(var_name.clone(), key.clone())).cloned() {
+                    return Ok(SparExpr::Variable(subst_var));
+                }
                 let fresh = self.fresh_var(&format!("{}_{}", var_name, key));
                 // Check if `base_var` is a relationship variable (edge_map hit).
                 if let Some(edge) = self.edge_map.get(&var_name).cloned() {
@@ -3742,13 +3777,22 @@ impl TranslationState {
                     }
                     (None, None) => {}
                 }
+                // Check if either operand is a string literal → CONCAT semantics.
+                let a_is_string = matches!(a.as_ref(), Expression::Literal(Literal::String(_)));
+                let b_is_string = matches!(b.as_ref(), Expression::Literal(Literal::String(_)));
                 // Check if both operands are property accesses — may be list concatenation.
                 // Use runtime type check: IF(STRSTARTS(?a, "["), concat_lists, numeric_add)
                 let is_list_candidate = matches!(a.as_ref(), Expression::Property(..))
                     && matches!(b.as_ref(), Expression::Property(..));
                 let la = self.translate_expr(a, extra)?;
                 let lb = self.translate_expr(b, extra)?;
-                if is_list_candidate {
+                if a_is_string || b_is_string {
+                    // String concatenation: CONCAT(STR(?a), STR(?b))
+                    use spargebra::algebra::Function;
+                    let str_la = SparExpr::FunctionCall(Function::Str, vec![la]);
+                    let str_lb = SparExpr::FunctionCall(Function::Str, vec![lb]);
+                    return Ok(SparExpr::FunctionCall(Function::Concat, vec![str_la, str_lb]));
+                } else if is_list_candidate {
                     // List concat: CONCAT(SUBSTR(?a, 1, STRLEN(?a)-1), ", ", SUBSTR(?b, 2))
                     use spargebra::algebra::Function;
                     let one = SparExpr::Literal(SparLit::new_typed_literal(
