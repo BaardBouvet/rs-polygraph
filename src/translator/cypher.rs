@@ -5239,9 +5239,69 @@ impl TranslationState {
                     feature: "keys() on non-literal map".to_string(),
                 })
             }
-            "labels" | "relationships" | "reverse" | "split" => {
+            "labels" | "relationships" => {
                 Err(PolygraphError::UnsupportedFeature {
                     feature: format!("function call: {name}()"),
+                })
+            }
+            "reverse" => {
+                // reverse(string) — only supported for constant string literals.
+                if let Some(Expression::Literal(Literal::String(s))) = args.first() {
+                    let reversed: String = s.chars().rev().collect();
+                    return Ok(SparExpr::Literal(SparLit::new_simple_literal(reversed)));
+                }
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: "reverse() on non-literal or non-string".to_string(),
+                })
+            }
+            "split" => {
+                // split(string, delimiter) — supported for constant string literals.
+                // Returns a list string like ['a', 'b'] that can be used in UNWIND.
+                if let (Some(Expression::Literal(Literal::String(s))),
+                        Some(Expression::Literal(Literal::String(delim)))) =
+                       (args.first(), args.get(1))
+                {
+                    let parts: Vec<String> = if delim.is_empty() {
+                        s.chars().map(|c| format!("'{c}'")).collect()
+                    } else {
+                        s.split(delim.as_str()).map(|p| format!("'{p}'")).collect()
+                    };
+                    let serialized = format!("[{}]", parts.join(", "));
+                    return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
+                }
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: "split() on non-literal arguments".to_string(),
+                })
+            }
+            "sqrt" => {
+                // SPARQL has no built-in sqrt; use compile-time constant folding for literals.
+                if let Some(arg) = args.first() {
+                    if let Some(f) = try_eval_to_float(arg) {
+                        let result = f.sqrt();
+                        if result.is_nan() || result.is_infinite() {
+                            return Err(PolygraphError::UnsupportedFeature {
+                                feature: "sqrt() of negative number".to_string(),
+                            });
+                        }
+                        let lit = SparLit::new_typed_literal(
+                            cypher_float_str(result),
+                            NamedNode::new_unchecked(XSD_DOUBLE),
+                        );
+                        return Ok(SparExpr::Literal(lit));
+                    }
+                }
+                // For non-constant arguments, use a custom function (like pow).
+                if let Some(arg_expr) = args.first() {
+                    let arg = self.translate_expr(arg_expr, extra)?;
+                    return Ok(SparExpr::FunctionCall(
+                        spargebra::algebra::Function::Custom(NamedNode::new_unchecked(
+                            "urn:polygraph:sqrt",
+                        )),
+                        vec![arg],
+                    ));
+                }
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: "sqrt() requires an argument".to_string(),
                 })
             }
             "trim" => {
@@ -5636,9 +5696,34 @@ impl TranslationState {
                     feature: "UNWIND of non-literal expression".to_string(),
                 })
             }
-            _ => Err(PolygraphError::UnsupportedFeature {
-                feature: "UNWIND of non-literal expression".to_string(),
-            }),
+            _ => {
+                // Try to evaluate as a compile-time constant list (e.g. split('a,b', ',')).
+                if let Expression::FunctionCall { name, args, .. } = &u.expression {
+                    if name.eq_ignore_ascii_case("split") {
+                        if let (Some(Expression::Literal(Literal::String(s))),
+                                Some(Expression::Literal(Literal::String(d)))) =
+                               (args.first(), args.get(1))
+                        {
+                            let parts: Vec<Expression> = if d.is_empty() {
+                                s.chars().map(|c| Expression::Literal(Literal::String(c.to_string()))).collect()
+                            } else {
+                                s.split(d.as_str()).map(|p| Expression::Literal(Literal::String(p.to_string()))).collect()
+                            };
+                            return self.translate_unwind_clause(
+                                &crate::ast::cypher::UnwindClause {
+                                    expression: Expression::List(parts),
+                                    variable: u.variable.clone(),
+                                },
+                                current,
+                                extra,
+                            );
+                        }
+                    }
+                }
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: "UNWIND of non-literal expression".to_string(),
+                })
+            }
         }
     }
 
