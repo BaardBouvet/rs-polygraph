@@ -716,6 +716,85 @@ impl TranslationState {
                     if let Expression::List(items) = e { Some(items.clone()) } else { None }
                 })
             }
+            Expression::Subscript(coll, idx) => {
+                // Recursively resolve: list[n] where the element is itself a list
+                if let Some(n) = get_literal_int(idx) {
+                    let items = self.resolve_literal_list(coll)?;
+                    let len = items.len() as i64;
+                    let i = if n < 0 { len + n } else { n };
+                    if i >= 0 && i < len {
+                        if let Expression::List(inner) = &items[i as usize] {
+                            Some(inner.clone())
+                        } else {
+                            None // element is not a list
+                        }
+                    } else {
+                        None // out of bounds
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to resolve an expression to a Vec<Expression> for use with IN.
+    /// Handles List, Variable (with_list_vars), Subscript, and ListSlice.
+    fn try_resolve_to_items(&self, expr: &Expression) -> Option<Vec<Expression>> {
+        match expr {
+            Expression::List(items) => Some(items.clone()),
+            Expression::Variable(v) => {
+                self.with_list_vars.get(v.as_str()).and_then(|e| {
+                    if let Expression::List(items) = e { Some(items.clone()) } else { None }
+                })
+            }
+            Expression::Subscript(coll, idx) => {
+                if let Some(n) = get_literal_int(idx) {
+                    let items = self.resolve_literal_list(coll)?;
+                    let len = items.len() as i64;
+                    let i = if n < 0 { len + n } else { n };
+                    if i >= 0 && i < len {
+                        if let Expression::List(inner) = &items[i as usize] {
+                            Some(inner.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Expression::ListSlice { list, start, end } => {
+                let items = self.resolve_literal_list(list)?;
+                let n = items.len() as i64;
+                let start_is_null = start.as_deref().map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
+                let end_is_null = end.as_deref().map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
+                if start_is_null || end_is_null {
+                    return None; // null range → null, not a list
+                }
+                let s: i64 = if let Some(start_expr) = start {
+                    match get_literal_int(start_expr) {
+                        Some(i) => if i < 0 { (n + i).max(0) } else { i.min(n) },
+                        None => return None,
+                    }
+                } else { 0 };
+                let e: i64 = if let Some(end_expr) = end {
+                    match get_literal_int(end_expr) {
+                        Some(i) => if i < 0 { (n + i).max(0) } else { i.min(n) },
+                        None => return None,
+                    }
+                } else { n };
+                let slice_start = s.max(0) as usize;
+                let slice_end = e.max(0).min(n) as usize;
+                if slice_end > slice_start {
+                    Some(items[slice_start..slice_end].to_vec())
+                } else {
+                    Some(vec![]) // empty list
+                }
+            }
             _ => None,
         }
     }
@@ -3540,7 +3619,9 @@ impl TranslationState {
                 }
                 // Special case: IN with a list literal rhs → SparExpr::In(lhs, [items...])
                 if matches!(op, CompOp::In) {
-                    if let Expression::List(items) = rhs.as_ref() {
+                    // Try to resolve rhs to a list of items at compile time
+                    let items_opt = self.try_resolve_to_items(rhs);
+                    if let Some(items) = items_opt {
                         let l = self.translate_expr(lhs, extra)?;
                         let members: Result<Vec<_>, _> = items
                             .iter()
