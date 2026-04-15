@@ -2305,7 +2305,18 @@ impl TranslationState {
                         }
                         // Work around oxigraph bug: MAX/MIN/SUM over VALUES with UNDEF
                         // returns null. Add FILTER(BOUND(?v)) for UNWIND null vars.
-                        if !self.unwind_null_vars.is_empty() {
+                        // Exception: GROUP_CONCAT (collect()) naturally ignores UNDEF;
+                        // skip FILTER to avoid 0-row input triggering a different bug.
+                        let only_groupconcat = aggregates.iter().all(|(_, ae)| {
+                            matches!(
+                                ae,
+                                AggregateExpression::FunctionCall {
+                                    name: AggregateFunction::GroupConcat { .. },
+                                    ..
+                                }
+                            )
+                        });
+                        if !only_groupconcat && !self.unwind_null_vars.is_empty() {
                             for null_var_name in self.unwind_null_vars.clone() {
                                 let bound_var = Variable::new_unchecked(null_var_name);
                                 current = GraphPattern::Filter {
