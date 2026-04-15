@@ -14,3 +14,11 @@ fn main() {
         }
     }
 }
+
+fn check_orderby_count() {
+    let q = "MATCH (n) RETURN n.division, count(*) ORDER BY count(*) DESC, n.division ASC";
+    match polygraph::Transpiler::cypher_to_sparql(q, &ENGINE) {
+        Ok(r) => println!("SPARQL:\n{}", r.sparql),
+        Err(e) => println!("Err: {}", e),
+    }
+}

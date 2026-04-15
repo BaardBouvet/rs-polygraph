@@ -1150,6 +1150,10 @@ struct TranslationState {
     /// Maps (base_var_name, property_key) → SPARQL variable that holds that property value.
     /// Populated before ORDER BY translation, cleared after.
     with_prop_subst: std::collections::HashMap<(String, String), Variable>,
+    /// Aggregate expression → output variable mapping, populated during RETURN/WITH
+    /// processing so that ORDER BY can reuse the same variables instead of creating
+    /// new (unbound) fresh variables for aggregate expressions like count(*).
+    agg_orderby_subst: std::collections::HashMap<String, Variable>,
     /// Whether the last RETURN used DISTINCT.
     return_distinct: bool,
     /// Variable-length relationship variables with their (lower, upper) hop bounds.
@@ -1194,6 +1198,7 @@ impl TranslationState {
             node_vars: Default::default(),
             projected_columns: Vec::new(),
             with_prop_subst: Default::default(),
+            agg_orderby_subst: Default::default(),
             return_distinct: false,
             varlen_rel_scope: Default::default(),
             map_vars: Default::default(),
@@ -1956,8 +1961,9 @@ impl TranslationState {
                             expression: None,
                         };
                     }
-                    // Clear ORDER BY property substitutions.
+                    // Clear ORDER BY property/aggregate substitutions.
                     self.with_prop_subst.clear();
+                    self.agg_orderby_subst.clear();
                     // NOTE: WITH's WHERE clause is now handled BEFORE the projection above,
                     // so old-scope variables are still accessible. No action needed here.
                     // Update nullable_vars based on WITH output items.
@@ -2128,7 +2134,7 @@ impl TranslationState {
                     }
 
                     if let Some(vars) = project_vars {
-                        // Build property substitutions for ORDER BY before projection.
+                        // Build property and aggregate substitutions for ORDER BY before projection.
                         if r.order_by.is_some() {
                             if let crate::ast::cypher::ReturnItems::Explicit(ref items) = r.items {
                                 for (item, pvar) in items.iter().zip(vars.iter()) {
@@ -2139,6 +2145,11 @@ impl TranslationState {
                                                 pvar.clone(),
                                             );
                                         }
+                                    }
+                                    // Also map aggregate expressions so ORDER BY can reuse them.
+                                    if let Expression::Aggregate(agg_expr) = &item.expression {
+                                        let key = agg_expr_key(agg_expr);
+                                        self.agg_orderby_subst.insert(key, pvar.clone());
                                     }
                                 }
                             }
@@ -2161,8 +2172,9 @@ impl TranslationState {
                         r.limit.as_ref(),
                         &mut extra_triples,
                     )?;
-                    // Clear ORDER BY property substitutions.
+                    // Clear ORDER BY property/aggregate substitutions.
                     self.with_prop_subst.clear();
+                    self.agg_orderby_subst.clear();
                 }
                 Clause::Unwind(u) => {
                     // UNWIND expr AS var → VALUES ?var { values... }
@@ -4701,6 +4713,12 @@ impl TranslationState {
                 Ok(SparExpr::Exists(Box::new(combined)))
             }
             Expression::Aggregate(agg) => {
+                // Check if this aggregate was already computed (e.g. in RETURN with ORDER BY).
+                // If so, reuse the existing variable instead of creating a new unbound one.
+                let key = agg_expr_key(agg);
+                if let Some(existing_var) = self.agg_orderby_subst.get(&key) {
+                    return Ok(SparExpr::Variable(existing_var.clone()));
+                }
                 // Aggregates in expressions (e.g. HAVING) are not yet handled; they
                 // are handled at the RETURN level via translate_aggregate_expr.
                 let fresh = self.fresh_var("agg");
@@ -6305,6 +6323,36 @@ fn cypher_float_str(f: f64) -> String {
         return format!("{s}.0");
     }
     s
+}
+
+/// Generate a canonical string key for an aggregate expression, used to
+/// match ORDER BY aggregate expressions to already-computed RETURN aggregates.
+fn agg_expr_key(agg: &crate::ast::cypher::AggregateExpr) -> String {
+    use crate::ast::cypher::{AggregateExpr, Expression, Literal};
+    fn expr_key(e: &Expression) -> String {
+        match e {
+            Expression::Variable(v) => v.clone(),
+            Expression::Literal(Literal::Integer(n)) => n.to_string(),
+            Expression::Literal(Literal::String(s)) => format!("'{s}'"),
+            _ => format!("{e:?}"),
+        }
+    }
+    match agg {
+        AggregateExpr::Count { distinct, expr: None } =>
+            format!("count_{}", if *distinct { "d_star" } else { "star" }),
+        AggregateExpr::Count { distinct, expr: Some(e) } =>
+            format!("count_{}{}", if *distinct { "d_" } else { "" }, expr_key(e)),
+        AggregateExpr::Sum { distinct, expr } =>
+            format!("sum_{}{}", if *distinct { "d_" } else { "" }, expr_key(expr)),
+        AggregateExpr::Avg { distinct, expr } =>
+            format!("avg_{}{}", if *distinct { "d_" } else { "" }, expr_key(expr)),
+        AggregateExpr::Min { distinct, expr } =>
+            format!("min_{}{}", if *distinct { "d_" } else { "" }, expr_key(expr)),
+        AggregateExpr::Max { distinct, expr } =>
+            format!("max_{}{}", if *distinct { "d_" } else { "" }, expr_key(expr)),
+        AggregateExpr::Collect { distinct, expr } =>
+            format!("collect_{}{}", if *distinct { "d_" } else { "" }, expr_key(expr)),
+    }
 }
 
 /// Serialize a list of expressions to a string like `[1, 2, 'foo']`.
