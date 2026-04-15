@@ -1302,6 +1302,13 @@ impl TranslationState {
                     None
                 }
             }
+            // List concatenation: resolve both operands as lists and concatenate.
+            Expression::Add(a, b) => {
+                let mut items_a = self.resolve_literal_list(a)?;
+                let items_b = self.resolve_literal_list(b)?;
+                items_a.extend(items_b);
+                Some(items_a)
+            }
             _ => None,
         }
     }
@@ -1333,6 +1340,13 @@ impl TranslationState {
                 } else {
                     None
                 }
+            }
+            // List concatenation: resolve both operands and concatenate for IN/slice.
+            Expression::Add(a, b) => {
+                let mut items_a = self.try_resolve_to_items(a)?;
+                let items_b = self.try_resolve_to_items(b)?;
+                items_a.extend(items_b);
+                Some(items_a)
             }
             Expression::ListSlice { list, start, end } => {
                 let items = self.resolve_literal_list(list)?;
@@ -6500,6 +6514,21 @@ fn try_eval_literal_eq(lhs: &Expression, rhs: &Expression) -> Option<Option<bool
         }
         (Expression::Literal(Literal::Boolean(a)), Expression::Literal(Literal::Boolean(b))) => {
             Some(Some(a == b))
+        }
+        // Numeric cross-type: Integer == Float (Cypher promotes numerics for equality)
+        (Expression::Literal(Literal::Integer(a)), Expression::Literal(Literal::Float(b))) => {
+            if b.is_nan() {
+                Some(None) // NaN comparisons → null
+            } else {
+                Some(Some((*a as f64) == *b))
+            }
+        }
+        (Expression::Literal(Literal::Float(a)), Expression::Literal(Literal::Integer(b))) => {
+            if a.is_nan() {
+                Some(None) // NaN comparisons → null
+            } else {
+                Some(Some(*a == (*b as f64)))
+            }
         }
         // Different scalar types (no nulls) → false
         (Expression::Literal(_), Expression::Literal(_)) => Some(Some(false)),
