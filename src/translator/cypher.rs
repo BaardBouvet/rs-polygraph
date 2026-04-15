@@ -647,6 +647,46 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                     }
                 }
 
+                // UndefinedVariable: DISTINCT RETURN can only ORDER BY projected expressions.
+                // `RETURN DISTINCT a.name ORDER BY a.age` → a.age not projected, a not projected → error.
+                // But `RETURN DISTINCT b ORDER BY b.name` → b is projected, so b.name is OK.
+                if r.distinct {
+                    if let (ReturnItems::Explicit(items), Some(ob)) = (&r.items, &r.order_by) {
+                        let proj_aliases: std::collections::HashSet<&str> = items.iter()
+                            .filter_map(|i| i.alias.as_deref())
+                            .collect();
+                        let proj_exprs: Vec<&Expression> = items.iter()
+                            .map(|i| &i.expression)
+                            .collect();
+                        // Projected variable names (directly projected, not through property)
+                        let proj_vars: std::collections::HashSet<&str> = items.iter()
+                            .filter_map(|i| if let Expression::Variable(v) = &i.expression { Some(v.as_str()) } else { None })
+                            .chain(proj_aliases.iter().copied())
+                            .collect();
+                        for sort in &ob.items {
+                            let is_projected = proj_exprs.iter().any(|pe| *pe == &sort.expression)
+                                || if let Expression::Variable(v) = &sort.expression {
+                                    proj_vars.contains(v.as_str())
+                                } else { false };
+                            if !is_projected {
+                                if let Expression::Property(base, _) = &sort.expression {
+                                    if let Expression::Variable(v) = base.as_ref() {
+                                        // Only error if the base variable is NOT projected directly
+                                        // (i.e., `b` not in projection, and `b.property` is used)
+                                        if !proj_vars.contains(v.as_str()) {
+                                            if kinds.contains_key(v.as_str()) || bound_vars.contains(v.as_str()) {
+                                                return Err(PolygraphError::Translation {
+                                                    message: format!("UndefinedVariable: variable '{v}' not defined"),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // InvalidAggregation: aggregate in RETURN ORDER BY or in list comprehension.
                 if let ReturnItems::Explicit(items) = &r.items {
                     fn contains_agg_in_list_comp(expr: &Expression) -> bool {

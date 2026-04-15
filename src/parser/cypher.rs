@@ -1080,6 +1080,11 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
                 span: inner.as_str().to_string(),
                 message: "float literal out of range".to_string(),
             })?;
+            if f.is_infinite() {
+                return Err(PolygraphError::Translation {
+                    message: "FloatingPointOverflow: float literal value is too large".to_string(),
+                });
+            }
             Ok(Expression::Literal(Literal::Float(f)))
         }
         Rule::string_literal => {
