@@ -3644,6 +3644,20 @@ impl TranslationState {
                 }
             }
             Expression::Comparison(lhs, op, rhs) => {
+                // Handle chained ordering comparisons: a < b < c → (a < b) AND (b < c).
+                // Only applies to strict ordering operators on both sides (not = or <>).
+                if matches!(op, CompOp::Lt | CompOp::Le | CompOp::Gt | CompOp::Ge) {
+                    if let Expression::Comparison(mid, op2, rhs2) = rhs.as_ref() {
+                        if matches!(op2, CompOp::Lt | CompOp::Le | CompOp::Gt | CompOp::Ge) {
+                            // Expand to (lhs op mid) AND (mid op2 rhs2).
+                            let left_cmp = Expression::Comparison(lhs.clone(), op.clone(), mid.clone());
+                            let right_cmp = Expression::Comparison(mid.clone(), op2.clone(), rhs2.clone());
+                            let left_s = self.translate_expr(&left_cmp, extra)?;
+                            let right_s = self.translate_expr(&right_cmp, extra)?;
+                            return Ok(SparExpr::And(Box::new(left_s), Box::new(right_s)));
+                        }
+                    }
+                }
                 // Special case: relationship identity comparison (r = r2 or r <> r2).
                 // When both sides are relationship variables with eid_var, compare
                 // the synthetic edge-identity variables instead of the raw pattern vars.
@@ -4727,7 +4741,19 @@ impl TranslationState {
                 };
                 let start = args.first().and_then(get_int);
                 let end_val = args.get(1).and_then(get_int);
-                let step = args.get(2).and_then(get_int).unwrap_or(1);
+                // Step: if provided and not a valid integer literal, return an error.
+                let step = if let Some(step_arg) = args.get(2) {
+                    match get_int(step_arg) {
+                        Some(n) => n,
+                        None => {
+                            return Err(PolygraphError::Translation {
+                                message: "range() step argument must be an integer".to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    1
+                };
                 if let (Some(s), Some(e)) = (start, end_val) {
                     if step == 0 {
                         return Err(PolygraphError::UnsupportedFeature {
