@@ -258,7 +258,12 @@ fn expr_to_sparql_lit(expr: &Expression) -> Option<String> {
             f
         )),
         Expression::Literal(Literal::String(s)) => {
-            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped = s
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t");
             Some(format!("\"{}\"", escaped))
         }
         Expression::Literal(Literal::Boolean(b)) => {
