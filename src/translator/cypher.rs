@@ -119,7 +119,9 @@ fn try_eval_to_float(expr: &Expression) -> Option<f64> {
         Expression::Multiply(a, b) => Some(try_eval_to_float(a)? * try_eval_to_float(b)?),
         Expression::Divide(a, b) => {
             let d = try_eval_to_float(b)?;
-            if d == 0.0 { return None; }
+            if d == 0.0 {
+                return None;
+            }
             Some(try_eval_to_float(a)? / d)
         }
         Expression::FunctionCall { name, args, .. } => {
@@ -158,7 +160,7 @@ fn try_eval_to_usize(expr: &Expression) -> Option<usize> {
     match expr {
         Expression::Literal(Literal::Integer(n)) if *n >= 0 => Some(*n as usize),
         Expression::Literal(Literal::Integer(_)) => None, // negative integer — let it error
-        Expression::Literal(Literal::Float(_)) => None,  // float literal — must error as InvalidArgumentType
+        Expression::Literal(Literal::Float(_)) => None, // float literal — must error as InvalidArgumentType
         Expression::Negate(e) => {
             // Negation of a pure integer that produces a non-negative value (rare, skip for now).
             let _ = e;
@@ -182,7 +184,9 @@ fn try_eval_to_usize(expr: &Expression) -> Option<usize> {
         Expression::Divide(a, b) => {
             let av = try_eval_to_usize(a)?;
             let bv = try_eval_to_usize(b)?;
-            if bv == 0 { return None; }
+            if bv == 0 {
+                return None;
+            }
             Some(av / bv)
         }
         Expression::FunctionCall { name, args, .. } => {
@@ -241,10 +245,19 @@ fn expr_contains_aggregate(expr: &Expression) -> bool {
         Expression::List(items) => items.iter().any(expr_contains_aggregate),
         Expression::Map(pairs) => pairs.iter().any(|(_, v)| expr_contains_aggregate(v)),
         Expression::FunctionCall { args, .. } => args.iter().any(expr_contains_aggregate),
-        Expression::ListComprehension { list, predicate, projection, .. } => {
+        Expression::ListComprehension {
+            list,
+            predicate,
+            projection,
+            ..
+        } => {
             expr_contains_aggregate(list)
-                || predicate.as_ref().map_or(false, |p| expr_contains_aggregate(p))
-                || projection.as_ref().map_or(false, |p| expr_contains_aggregate(p))
+                || predicate
+                    .as_ref()
+                    .map_or(false, |p| expr_contains_aggregate(p))
+                || projection
+                    .as_ref()
+                    .map_or(false, |p| expr_contains_aggregate(p))
         }
         Expression::LabelCheck { .. } => false,
         _ => false,
@@ -314,7 +327,9 @@ fn atomic_free_terms(expr: &Expression) -> Vec<&Expression> {
             r.extend(atomic_free_terms(b));
             r
         }
-        Expression::Not(e) | Expression::Negate(e) | Expression::IsNull(e)
+        Expression::Not(e)
+        | Expression::Negate(e)
+        | Expression::IsNull(e)
         | Expression::IsNotNull(e) => atomic_free_terms(e),
         Expression::FunctionCall { args, .. } => args.iter().flat_map(atomic_free_terms).collect(),
         _ => vec![],
@@ -322,10 +337,7 @@ fn atomic_free_terms(expr: &Expression) -> Vec<&Expression> {
 }
 
 /// Returns `true` if `item` has an ambiguous aggregation expression given `non_agg_items`.
-fn is_ambiguous_aggregation<'a>(
-    item: &'a Expression,
-    non_agg_items: &[&'a Expression],
-) -> bool {
+fn is_ambiguous_aggregation<'a>(item: &'a Expression, non_agg_items: &[&'a Expression]) -> bool {
     if non_agg_items.is_empty() {
         true
     } else {
@@ -340,21 +352,45 @@ fn segment_columns(seg: &[Clause]) -> Option<Vec<String>> {
         match clause {
             Clause::Return(r) => {
                 if let ReturnItems::Explicit(items) = &r.items {
-                    return Some(items.iter().map(|i| {
-                        i.alias.clone().or_else(|| {
-                            if let Expression::Variable(v) = &i.expression { Some(v.clone()) } else { None }
-                        }).unwrap_or_default()
-                    }).collect());
+                    return Some(
+                        items
+                            .iter()
+                            .map(|i| {
+                                i.alias
+                                    .clone()
+                                    .or_else(|| {
+                                        if let Expression::Variable(v) = &i.expression {
+                                            Some(v.clone())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or_default()
+                            })
+                            .collect(),
+                    );
                 }
                 return None;
             }
             Clause::With(w) => {
                 if let crate::ast::cypher::ReturnItems::Explicit(items) = &w.items {
-                    return Some(items.iter().map(|i| {
-                        i.alias.clone().or_else(|| {
-                            if let Expression::Variable(v) = &i.expression { Some(v.clone()) } else { None }
-                        }).unwrap_or_default()
-                    }).collect());
+                    return Some(
+                        items
+                            .iter()
+                            .map(|i| {
+                                i.alias
+                                    .clone()
+                                    .or_else(|| {
+                                        if let Expression::Variable(v) = &i.expression {
+                                            Some(v.clone())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or_default()
+                            })
+                            .collect(),
+                    );
                 }
                 return None;
             }
@@ -368,7 +404,11 @@ fn segment_columns(seg: &[Clause]) -> Option<Vec<String>> {
 /// before translation so openCypher constraints are enforced.
 fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
     // ── UNION checks (InvalidClauseComposition, DifferentColumnsInUnion) ─────
-    if query.clauses.iter().any(|c| matches!(c, Clause::Union { .. })) {
+    if query
+        .clauses
+        .iter()
+        .any(|c| matches!(c, Clause::Union { .. }))
+    {
         // Split into segments.
         let mut segments: Vec<Vec<Clause>> = Vec::new();
         let mut all_flags: Vec<bool> = Vec::new();
@@ -398,7 +438,9 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
             let cols = segment_columns(seg);
             if first_cols != cols {
                 return Err(PolygraphError::Translation {
-                    message: "DifferentColumnsInUnion: UNION arms must return the same column names".to_string(),
+                    message:
+                        "DifferentColumnsInUnion: UNION arms must return the same column names"
+                            .to_string(),
                 });
             }
         }
@@ -425,8 +467,10 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
             Clause::With(w) => {
                 if let crate::ast::cypher::ReturnItems::Explicit(items) = &w.items {
                     // Collect the projected variable names for scope replacement.
-                    let mut projected_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-                    let mut projected_kinds: std::collections::HashMap<String, Kind> = std::collections::HashMap::new();
+                    let mut projected_names: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    let mut projected_kinds: std::collections::HashMap<String, Kind> =
+                        std::collections::HashMap::new();
 
                     for item in items {
                         let name = item.alias.clone().or_else(|| {
@@ -439,7 +483,8 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         // NoExpressionAlias: non-variable expressions in WITH must have aliases.
                         if name.is_none() {
                             return Err(PolygraphError::Translation {
-                                message: "NoExpressionAlias: expression in WITH must have an alias".to_string(),
+                                message: "NoExpressionAlias: expression in WITH must have an alias"
+                                    .to_string(),
                             });
                         }
                         if let Some(var) = name {
@@ -477,7 +522,8 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         }
                     }
 
-                    let projection_has_agg = items.iter().any(|i| expr_contains_aggregate(&i.expression));
+                    let projection_has_agg =
+                        items.iter().any(|i| expr_contains_aggregate(&i.expression));
 
                     // UndefinedVariable check in ORDER BY (using pre-projection scope).
                     // Always check when bound_vars is non-empty (we have some scope context).
@@ -486,20 +532,31 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                             fn collect_free_vars_ob(expr: &Expression, vars: &mut Vec<String>) {
                                 match expr {
                                     Expression::Variable(v) => vars.push(v.clone()),
-                                    Expression::Property(base, _) => collect_free_vars_ob(base, vars),
+                                    Expression::Property(base, _) => {
+                                        collect_free_vars_ob(base, vars)
+                                    }
                                     Expression::Aggregate(_) => {}
-                                    Expression::Or(a, b) | Expression::And(a, b) | Expression::Xor(a, b)
-                                    | Expression::Add(a, b) | Expression::Subtract(a, b)
-                                    | Expression::Multiply(a, b) | Expression::Divide(a, b)
-                                    | Expression::Modulo(a, b) | Expression::Power(a, b)
+                                    Expression::Or(a, b)
+                                    | Expression::And(a, b)
+                                    | Expression::Xor(a, b)
+                                    | Expression::Add(a, b)
+                                    | Expression::Subtract(a, b)
+                                    | Expression::Multiply(a, b)
+                                    | Expression::Divide(a, b)
+                                    | Expression::Modulo(a, b)
+                                    | Expression::Power(a, b)
                                     | Expression::Comparison(a, _, b) => {
                                         collect_free_vars_ob(a, vars);
                                         collect_free_vars_ob(b, vars);
                                     }
-                                    Expression::Not(e) | Expression::Negate(e)
-                                    | Expression::IsNull(e) | Expression::IsNotNull(e) => collect_free_vars_ob(e, vars),
+                                    Expression::Not(e)
+                                    | Expression::Negate(e)
+                                    | Expression::IsNull(e)
+                                    | Expression::IsNotNull(e) => collect_free_vars_ob(e, vars),
                                     Expression::FunctionCall { args, .. } => {
-                                        for a in args { collect_free_vars_ob(a, vars); }
+                                        for a in args {
+                                            collect_free_vars_ob(a, vars);
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -507,10 +564,10 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                             // Build the set of valid references for ORDER BY.
                             // When projection_has_agg: only projected items (expressions+aliases) are valid.
                             // When no aggregation: any current bound_var is valid.
-                            let proj_aliases: std::collections::HashSet<&str> = items.iter()
-                                .filter_map(|i| i.alias.as_deref())
-                                .collect();
-                            let non_agg_exprs: Vec<&Expression> = items.iter()
+                            let proj_aliases: std::collections::HashSet<&str> =
+                                items.iter().filter_map(|i| i.alias.as_deref()).collect();
+                            let non_agg_exprs: Vec<&Expression> = items
+                                .iter()
                                 .filter(|i| !expr_contains_aggregate(&i.expression))
                                 .map(|i| &i.expression)
                                 .collect();
@@ -534,7 +591,9 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                                             })
                                         } else {
                                             // No aggregation: any bound var is valid
-                                            bound_vars.contains(&v) || projected_names.contains(&v) || proj_aliases.contains(v.as_str())
+                                            bound_vars.contains(&v)
+                                                || projected_names.contains(&v)
+                                                || proj_aliases.contains(v.as_str())
                                         };
                                         if !covered {
                                             return Err(PolygraphError::Translation {
@@ -556,7 +615,9 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                             for sort in &ob.items {
                                 if expr_contains_aggregate(&sort.expression) {
                                     return Err(PolygraphError::Translation {
-                                        message: "InvalidAggregation: aggregate function in ORDER BY".to_string(),
+                                        message:
+                                            "InvalidAggregation: aggregate function in ORDER BY"
+                                                .to_string(),
                                     });
                                 }
                             }
@@ -565,12 +626,14 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         // item has free terms not covered by non-agg projection items or aliases.
                         if projection_has_agg {
                             let all_items_w: Vec<_> = items.iter().collect();
-                            let non_agg_exprs: Vec<&Expression> = all_items_w.iter()
+                            let non_agg_exprs: Vec<&Expression> = all_items_w
+                                .iter()
                                 .filter(|i| !expr_contains_aggregate(&i.expression))
                                 .map(|i| &i.expression)
                                 .collect();
                             // Aliases from any projection item (e.g. count(*) AS cnt → "cnt" is valid)
-                            let proj_aliases_w: std::collections::HashSet<&str> = all_items_w.iter()
+                            let proj_aliases_w: std::collections::HashSet<&str> = all_items_w
+                                .iter()
                                 .filter_map(|i| i.alias.as_deref())
                                 .collect();
                             for sort in &ob.items {
@@ -578,9 +641,13 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                                     if expr_has_free_var_outside_agg(&sort.expression) {
                                         let free_terms = atomic_free_terms(&sort.expression);
                                         let ambiguous = free_terms.iter().any(|ft| {
-                                            if non_agg_exprs.contains(ft) { return false; }
+                                            if non_agg_exprs.contains(ft) {
+                                                return false;
+                                            }
                                             if let Expression::Variable(v) = ft {
-                                                if proj_aliases_w.contains(v.as_str()) { return false; }
+                                                if proj_aliases_w.contains(v.as_str()) {
+                                                    return false;
+                                                }
                                             }
                                             true
                                         });
@@ -593,10 +660,15 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                                         // Aggregate in ORDER BY with no free vars outside agg
                                         // (pure aggregate like sum(x)). Must match a projected
                                         // expression or alias, otherwise UndefinedVariable.
-                                        let alias_covers = if let Expression::Variable(v) = &sort.expression {
-                                            proj_aliases_w.contains(v.as_str())
-                                        } else { false };
-                                        let expr_in_proj = all_items_w.iter().any(|pi| pi.expression == sort.expression);
+                                        let alias_covers =
+                                            if let Expression::Variable(v) = &sort.expression {
+                                                proj_aliases_w.contains(v.as_str())
+                                            } else {
+                                                false
+                                            };
+                                        let expr_in_proj = all_items_w
+                                            .iter()
+                                            .any(|pi| pi.expression == sort.expression);
                                         if !alias_covers && !expr_in_proj {
                                             return Err(PolygraphError::Translation {
                                                 message: "UndefinedVariable: aggregate in ORDER BY is not in the projection".to_string(),
@@ -609,7 +681,8 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                     }
                     // AmbiguousAggregationExpression in WITH items.
                     {
-                        let non_agg_items: Vec<&Expression> = items.iter()
+                        let non_agg_items: Vec<&Expression> = items
+                            .iter()
                             .filter(|i| !matches!(&i.expression, Expression::Aggregate(_)))
                             .filter(|i| !expr_contains_aggregate(&i.expression))
                             .map(|i| &i.expression)
@@ -621,8 +694,10 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                                 && is_ambiguous_aggregation(&item.expression, &non_agg_items)
                             {
                                 return Err(PolygraphError::Translation {
-                                    message: "AmbiguousAggregationExpression: mix of aggregate and \
-                                              non-aggregate in WITH expression".to_string(),
+                                    message:
+                                        "AmbiguousAggregationExpression: mix of aggregate and \
+                                              non-aggregate in WITH expression"
+                                            .to_string(),
                                 });
                             }
                         }
@@ -651,13 +726,27 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
 
                 // InvalidArgumentType / UnexpectedSyntax: size() with invalid arg.
                 if let ReturnItems::Explicit(items) = &r.items {
-                    fn scan_invalid_size(expr: &Expression, kinds: &std::collections::HashMap<String, Kind>) -> Option<&'static str> {
+                    fn scan_invalid_size(
+                        expr: &Expression,
+                        kinds: &std::collections::HashMap<String, Kind>,
+                    ) -> Option<&'static str> {
                         match expr {
-                            Expression::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("size") => {
+                            Expression::FunctionCall { name, args, .. }
+                                if name.eq_ignore_ascii_case("size") =>
+                            {
                                 if let Some(arg) = args.first() {
                                     match arg {
-                                        Expression::PatternPredicate(_) => return Some("UnexpectedSyntax"),
-                                        Expression::Variable(v) if matches!(kinds.get(v.as_str()), Some(Kind::Path)) => return Some("InvalidArgumentType"),
+                                        Expression::PatternPredicate(_) => {
+                                            return Some("UnexpectedSyntax")
+                                        }
+                                        Expression::Variable(v)
+                                            if matches!(
+                                                kinds.get(v.as_str()),
+                                                Some(Kind::Path)
+                                            ) =>
+                                        {
+                                            return Some("InvalidArgumentType")
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -666,13 +755,19 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                             Expression::FunctionCall { args, .. } => {
                                 args.iter().find_map(|a| scan_invalid_size(a, kinds))
                             }
-                            Expression::Or(a, b) | Expression::And(a, b) | Expression::Add(a, b)
-                            | Expression::Subtract(a, b) | Expression::Multiply(a, b)
-                            | Expression::Divide(a, b) | Expression::Comparison(a, _, b) => {
+                            Expression::Or(a, b)
+                            | Expression::And(a, b)
+                            | Expression::Add(a, b)
+                            | Expression::Subtract(a, b)
+                            | Expression::Multiply(a, b)
+                            | Expression::Divide(a, b)
+                            | Expression::Comparison(a, _, b) => {
                                 scan_invalid_size(a, kinds).or_else(|| scan_invalid_size(b, kinds))
                             }
-                            Expression::Not(e) | Expression::Negate(e)
-                            | Expression::IsNull(e) | Expression::IsNotNull(e) => scan_invalid_size(e, kinds),
+                            Expression::Not(e)
+                            | Expression::Negate(e)
+                            | Expression::IsNull(e)
+                            | Expression::IsNotNull(e) => scan_invalid_size(e, kinds),
                             _ => None,
                         }
                     }
@@ -750,9 +845,7 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                             | Expression::Negate(e)
                             | Expression::IsNull(e)
                             | Expression::IsNotNull(e) => collect_free_vars(e, vars),
-                            Expression::LabelCheck { variable, .. } => {
-                                vars.push(variable.clone())
-                            }
+                            Expression::LabelCheck { variable, .. } => vars.push(variable.clone()),
                             Expression::FunctionCall { args, .. } => {
                                 for a in args {
                                     collect_free_vars(a, vars);
@@ -788,29 +881,38 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                 // But `RETURN DISTINCT b ORDER BY b.name` → b is projected, so b.name is OK.
                 if r.distinct {
                     if let (ReturnItems::Explicit(items), Some(ob)) = (&r.items, &r.order_by) {
-                        let proj_aliases: std::collections::HashSet<&str> = items.iter()
-                            .filter_map(|i| i.alias.as_deref())
-                            .collect();
-                        let proj_exprs: Vec<&Expression> = items.iter()
-                            .map(|i| &i.expression)
-                            .collect();
+                        let proj_aliases: std::collections::HashSet<&str> =
+                            items.iter().filter_map(|i| i.alias.as_deref()).collect();
+                        let proj_exprs: Vec<&Expression> =
+                            items.iter().map(|i| &i.expression).collect();
                         // Projected variable names (directly projected, not through property)
-                        let proj_vars: std::collections::HashSet<&str> = items.iter()
-                            .filter_map(|i| if let Expression::Variable(v) = &i.expression { Some(v.as_str()) } else { None })
+                        let proj_vars: std::collections::HashSet<&str> = items
+                            .iter()
+                            .filter_map(|i| {
+                                if let Expression::Variable(v) = &i.expression {
+                                    Some(v.as_str())
+                                } else {
+                                    None
+                                }
+                            })
                             .chain(proj_aliases.iter().copied())
                             .collect();
                         for sort in &ob.items {
                             let is_projected = proj_exprs.iter().any(|pe| *pe == &sort.expression)
                                 || if let Expression::Variable(v) = &sort.expression {
                                     proj_vars.contains(v.as_str())
-                                } else { false };
+                                } else {
+                                    false
+                                };
                             if !is_projected {
                                 if let Expression::Property(base, _) = &sort.expression {
                                     if let Expression::Variable(v) = base.as_ref() {
                                         // Only error if the base variable is NOT projected directly
                                         // (i.e., `b` not in projection, and `b.property` is used)
                                         if !proj_vars.contains(v.as_str()) {
-                                            if kinds.contains_key(v.as_str()) || bound_vars.contains(v.as_str()) {
+                                            if kinds.contains_key(v.as_str())
+                                                || bound_vars.contains(v.as_str())
+                                            {
                                                 return Err(PolygraphError::Translation {
                                                     message: format!("UndefinedVariable: variable '{v}' not defined"),
                                                 });
@@ -827,28 +929,35 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                 if let ReturnItems::Explicit(items) = &r.items {
                     fn contains_agg_in_list_comp(expr: &Expression) -> bool {
                         match expr {
-                            Expression::ListComprehension { projection: Some(p), .. } => {
-                                expr_contains_aggregate(p)
-                            }
-                            Expression::Or(a, b) | Expression::And(a, b)
-                            | Expression::Add(a, b) | Expression::Subtract(a, b)
-                            | Expression::Multiply(a, b) | Expression::Divide(a, b)
+                            Expression::ListComprehension {
+                                projection: Some(p),
+                                ..
+                            } => expr_contains_aggregate(p),
+                            Expression::Or(a, b)
+                            | Expression::And(a, b)
+                            | Expression::Add(a, b)
+                            | Expression::Subtract(a, b)
+                            | Expression::Multiply(a, b)
+                            | Expression::Divide(a, b)
                             | Expression::Comparison(a, _, b) => {
                                 contains_agg_in_list_comp(a) || contains_agg_in_list_comp(b)
                             }
-                            Expression::Not(e) | Expression::Negate(e)
-                            | Expression::IsNull(e) | Expression::IsNotNull(e) => {
-                                contains_agg_in_list_comp(e)
-                            }
+                            Expression::Not(e)
+                            | Expression::Negate(e)
+                            | Expression::IsNull(e)
+                            | Expression::IsNotNull(e) => contains_agg_in_list_comp(e),
                             Expression::List(elems) => elems.iter().any(contains_agg_in_list_comp),
-                            Expression::FunctionCall { args, .. } => args.iter().any(contains_agg_in_list_comp),
+                            Expression::FunctionCall { args, .. } => {
+                                args.iter().any(contains_agg_in_list_comp)
+                            }
                             _ => false,
                         }
                     }
                     for item in items {
                         if contains_agg_in_list_comp(&item.expression) {
                             return Err(PolygraphError::Translation {
-                                message: "InvalidAggregation: aggregate inside list comprehension".to_string(),
+                                message: "InvalidAggregation: aggregate inside list comprehension"
+                                    .to_string(),
                             });
                         }
                     }
@@ -857,12 +966,15 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                 if let Some(ob) = &r.order_by {
                     let projection_has_agg = if let ReturnItems::Explicit(items) = &r.items {
                         items.iter().any(|i| expr_contains_aggregate(&i.expression))
-                    } else { false };
+                    } else {
+                        false
+                    };
                     if !projection_has_agg {
                         for sort in &ob.items {
                             if expr_contains_aggregate(&sort.expression) {
                                 return Err(PolygraphError::Translation {
-                                    message: "InvalidAggregation: aggregate function in ORDER BY".to_string(),
+                                    message: "InvalidAggregation: aggregate function in ORDER BY"
+                                        .to_string(),
                                 });
                             }
                         }
@@ -870,21 +982,31 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                     if projection_has_agg {
                         let all_items_r: Vec<_> = if let ReturnItems::Explicit(items) = &r.items {
                             items.iter().collect()
-                        } else { vec![] };
-                        let non_agg_exprs: Vec<&Expression> = all_items_r.iter()
+                        } else {
+                            vec![]
+                        };
+                        let non_agg_exprs: Vec<&Expression> = all_items_r
+                            .iter()
                             .filter(|i| !expr_contains_aggregate(&i.expression))
                             .map(|i| &i.expression)
                             .collect();
-                        let proj_aliases: std::collections::HashSet<&str> = all_items_r.iter()
+                        let proj_aliases: std::collections::HashSet<&str> = all_items_r
+                            .iter()
                             .filter_map(|i| i.alias.as_deref())
                             .collect();
                         for sort in &ob.items {
-                            if expr_contains_aggregate(&sort.expression) && expr_has_free_var_outside_agg(&sort.expression) {
+                            if expr_contains_aggregate(&sort.expression)
+                                && expr_has_free_var_outside_agg(&sort.expression)
+                            {
                                 let free_terms = atomic_free_terms(&sort.expression);
                                 let ambiguous = free_terms.iter().any(|ft| {
-                                    if non_agg_exprs.contains(ft) { return false; }
+                                    if non_agg_exprs.contains(ft) {
+                                        return false;
+                                    }
                                     if let Expression::Variable(v) = ft {
-                                        if proj_aliases.contains(v.as_str()) { return false; }
+                                        if proj_aliases.contains(v.as_str()) {
+                                            return false;
+                                        }
                                     }
                                     true
                                 });
@@ -1043,26 +1165,43 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                 // UndefinedVariable: WHERE clause references an undefined variable.
                 // This check runs AFTER pattern elements are registered.
                 if let Some(wc) = &m.where_ {
-                    fn check_undef_where(expr: &Expression, bound: &std::collections::HashSet<String>, kinds: &std::collections::HashMap<String, Kind>, found: &mut Option<String>) {
-                        if found.is_some() { return; }
+                    fn check_undef_where(
+                        expr: &Expression,
+                        bound: &std::collections::HashSet<String>,
+                        kinds: &std::collections::HashMap<String, Kind>,
+                        found: &mut Option<String>,
+                    ) {
+                        if found.is_some() {
+                            return;
+                        }
                         match expr {
                             Expression::Variable(v) => {
                                 if !bound.contains(v) && !kinds.contains_key(v.as_str()) {
                                     *found = Some(v.clone());
                                 }
                             }
-                            Expression::Property(base, _) => check_undef_where(base, bound, kinds, found),
-                            Expression::Or(a, b) | Expression::And(a, b) | Expression::Xor(a, b)
-                            | Expression::Add(a, b) | Expression::Subtract(a, b)
-                            | Expression::Multiply(a, b) | Expression::Divide(a, b)
+                            Expression::Property(base, _) => {
+                                check_undef_where(base, bound, kinds, found)
+                            }
+                            Expression::Or(a, b)
+                            | Expression::And(a, b)
+                            | Expression::Xor(a, b)
+                            | Expression::Add(a, b)
+                            | Expression::Subtract(a, b)
+                            | Expression::Multiply(a, b)
+                            | Expression::Divide(a, b)
                             | Expression::Comparison(a, _, b) => {
                                 check_undef_where(a, bound, kinds, found);
                                 check_undef_where(b, bound, kinds, found);
                             }
-                            Expression::Not(e) | Expression::Negate(e)
-                            | Expression::IsNull(e) | Expression::IsNotNull(e) => check_undef_where(e, bound, kinds, found),
+                            Expression::Not(e)
+                            | Expression::Negate(e)
+                            | Expression::IsNull(e)
+                            | Expression::IsNotNull(e) => check_undef_where(e, bound, kinds, found),
                             Expression::FunctionCall { args, .. } => {
-                                for a in args { check_undef_where(a, bound, kinds, found); }
+                                for a in args {
+                                    check_undef_where(a, bound, kinds, found);
+                                }
                             }
                             _ => {}
                         }
@@ -1154,6 +1293,10 @@ struct TranslationState {
     /// processing so that ORDER BY can reuse the same variables instead of creating
     /// new (unbound) fresh variables for aggregate expressions like count(*).
     agg_orderby_subst: std::collections::HashMap<String, Variable>,
+    /// Alias name → projected SPARQL variable, populated during RETURN ORDER BY
+    /// setup so that ORDER BY expressions referencing an alias (e.g. `ORDER BY n + 2`
+    /// where `n` is a RETURN alias) resolve to the correct projected variable.
+    return_alias_subst: std::collections::HashMap<String, Variable>,
     /// Whether the last RETURN used DISTINCT.
     return_distinct: bool,
     /// Variable-length relationship variables with their (lower, upper) hop bounds.
@@ -1199,6 +1342,7 @@ impl TranslationState {
             projected_columns: Vec::new(),
             with_prop_subst: Default::default(),
             agg_orderby_subst: Default::default(),
+            return_alias_subst: Default::default(),
             return_distinct: false,
             varlen_rel_scope: Default::default(),
             map_vars: Default::default(),
@@ -1278,11 +1422,13 @@ impl TranslationState {
     fn resolve_literal_list(&self, expr: &Expression) -> Option<Vec<Expression>> {
         match expr {
             Expression::List(items) => Some(items.clone()),
-            Expression::Variable(v) => {
-                self.with_list_vars.get(v.as_str()).and_then(|e| {
-                    if let Expression::List(items) = e { Some(items.clone()) } else { None }
-                })
-            }
+            Expression::Variable(v) => self.with_list_vars.get(v.as_str()).and_then(|e| {
+                if let Expression::List(items) = e {
+                    Some(items.clone())
+                } else {
+                    None
+                }
+            }),
             Expression::Subscript(coll, idx) => {
                 // Recursively resolve: list[n] where the element is itself a list
                 if let Some(n) = get_literal_int(idx) {
@@ -1318,11 +1464,13 @@ impl TranslationState {
     fn try_resolve_to_items(&self, expr: &Expression) -> Option<Vec<Expression>> {
         match expr {
             Expression::List(items) => Some(items.clone()),
-            Expression::Variable(v) => {
-                self.with_list_vars.get(v.as_str()).and_then(|e| {
-                    if let Expression::List(items) = e { Some(items.clone()) } else { None }
-                })
-            }
+            Expression::Variable(v) => self.with_list_vars.get(v.as_str()).and_then(|e| {
+                if let Expression::List(items) = e {
+                    Some(items.clone())
+                } else {
+                    None
+                }
+            }),
             Expression::Subscript(coll, idx) => {
                 if let Some(n) = get_literal_int(idx) {
                     let items = self.resolve_literal_list(coll)?;
@@ -1353,27 +1501,37 @@ impl TranslationState {
                     }
                     (Some(mut items_a), None) => {
                         // b is not a list: try to append as literal/boolean/subscript scalar
-                        let b_eval = if matches!(b.as_ref(),
-                            Expression::Literal(_) | Expression::Negate(_))
-                        {
-                            Some(*b.clone())
-                        } else if let Expression::Subscript(coll, idx) = b.as_ref() {
-                            // Evaluate subscript to a scalar element at compile time
-                            if let Some(n) = get_literal_int(idx) {
-                                if let Some(items) = self.resolve_literal_list(coll) {
-                                    let len = items.len() as i64;
-                                    let i = if n < 0 { len + n } else { n };
-                                    if i >= 0 && i < len { Some(items[i as usize].clone()) }
-                                    else { Some(Expression::Literal(Literal::Null)) }
-                                } else { None }
-                            } else { None }
-                        } else {
-                            try_eval_bool_const(b).map(|opt| match opt {
-                                Some(bv) => Expression::Literal(Literal::Boolean(bv)),
-                                None => Expression::Literal(Literal::Null),
-                            })
-                        };
-                        b_eval.map(|elem| { items_a.push(elem); items_a })
+                        let b_eval =
+                            if matches!(b.as_ref(), Expression::Literal(_) | Expression::Negate(_))
+                            {
+                                Some(*b.clone())
+                            } else if let Expression::Subscript(coll, idx) = b.as_ref() {
+                                // Evaluate subscript to a scalar element at compile time
+                                if let Some(n) = get_literal_int(idx) {
+                                    if let Some(items) = self.resolve_literal_list(coll) {
+                                        let len = items.len() as i64;
+                                        let i = if n < 0 { len + n } else { n };
+                                        if i >= 0 && i < len {
+                                            Some(items[i as usize].clone())
+                                        } else {
+                                            Some(Expression::Literal(Literal::Null))
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                try_eval_bool_const(b).map(|opt| match opt {
+                                    Some(bv) => Expression::Literal(Literal::Boolean(bv)),
+                                    None => Expression::Literal(Literal::Null),
+                                })
+                            };
+                        b_eval.map(|elem| {
+                            items_a.push(elem);
+                            items_a
+                        })
                     }
                     _ => None,
                 }
@@ -1381,23 +1539,43 @@ impl TranslationState {
             Expression::ListSlice { list, start, end } => {
                 let items = self.resolve_literal_list(list)?;
                 let n = items.len() as i64;
-                let start_is_null = start.as_deref().map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
-                let end_is_null = end.as_deref().map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
+                let start_is_null = start
+                    .as_deref()
+                    .map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
+                let end_is_null = end
+                    .as_deref()
+                    .map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
                 if start_is_null || end_is_null {
                     return None; // null range → null, not a list
                 }
                 let s: i64 = if let Some(start_expr) = start {
                     match get_literal_int(start_expr) {
-                        Some(i) => if i < 0 { (n + i).max(0) } else { i.min(n) },
+                        Some(i) => {
+                            if i < 0 {
+                                (n + i).max(0)
+                            } else {
+                                i.min(n)
+                            }
+                        }
                         None => return None,
                     }
-                } else { 0 };
+                } else {
+                    0
+                };
                 let e: i64 = if let Some(end_expr) = end {
                     match get_literal_int(end_expr) {
-                        Some(i) => if i < 0 { (n + i).max(0) } else { i.min(n) },
+                        Some(i) => {
+                            if i < 0 {
+                                (n + i).max(0)
+                            } else {
+                                i.min(n)
+                            }
+                        }
                         None => return None,
                     }
-                } else { n };
+                } else {
+                    n
+                };
                 let slice_start = s.max(0) as usize;
                 let slice_end = e.max(0).min(n) as usize;
                 if slice_end > slice_start {
@@ -1424,7 +1602,11 @@ impl TranslationState {
                 let items = self.resolve_literal_list(coll)?;
                 let n = items.len() as i64;
                 let i = if let Some(iv) = get_literal_int(idx) {
-                    if iv < 0 { n + iv } else { iv }
+                    if iv < 0 {
+                        n + iv
+                    } else {
+                        iv
+                    }
                 } else {
                     return None;
                 };
@@ -1805,16 +1987,20 @@ impl TranslationState {
                         for mi in &map_items {
                             let alias = mi.alias.as_deref().unwrap_or("__map");
                             if let Expression::Map(pairs) = &mi.expression {
-                                let mut key_vars: std::collections::HashMap<String, Variable> = Default::default();
+                                let mut key_vars: std::collections::HashMap<String, Variable> =
+                                    Default::default();
                                 for (key, val_expr) in pairs {
-                                    let key_var = Variable::new_unchecked(format!("{alias}__{key}"));
+                                    let key_var =
+                                        Variable::new_unchecked(format!("{alias}__{key}"));
                                     // Bind the key variable to the value (or leave unbound for null).
                                     match val_expr {
                                         Expression::Literal(Literal::Null) => {
                                             // null → leave key_var unbound (not added to Extend)
                                         }
                                         _ => {
-                                            if let Ok(sparql_expr) = self.translate_expr(val_expr, &mut extra_triples) {
+                                            if let Ok(sparql_expr) =
+                                                self.translate_expr(val_expr, &mut extra_triples)
+                                            {
                                                 current = GraphPattern::Extend {
                                                     inner: Box::new(current),
                                                     variable: key_var.clone(),
@@ -1825,13 +2011,21 @@ impl TranslationState {
                                             // so that `alias.key.innerkey` chains are resolvable.
                                             if let Expression::Map(inner_pairs) = val_expr {
                                                 let inner_alias = format!("{alias}__{key}");
-                                                let mut inner_key_vars: std::collections::HashMap<String, Variable> = Default::default();
+                                                let mut inner_key_vars: std::collections::HashMap<
+                                                    String,
+                                                    Variable,
+                                                > = Default::default();
                                                 for (ik, iv) in inner_pairs {
-                                                    let iv_var = Variable::new_unchecked(
-                                                        format!("{inner_alias}__{ik}"),
-                                                    );
-                                                    if !matches!(iv, Expression::Literal(Literal::Null)) {
-                                                        if let Ok(sv) = self.translate_expr(iv, &mut extra_triples) {
+                                                    let iv_var = Variable::new_unchecked(format!(
+                                                        "{inner_alias}__{ik}"
+                                                    ));
+                                                    if !matches!(
+                                                        iv,
+                                                        Expression::Literal(Literal::Null)
+                                                    ) {
+                                                        if let Ok(sv) = self
+                                                            .translate_expr(iv, &mut extra_triples)
+                                                        {
                                                             current = GraphPattern::Extend {
                                                                 inner: Box::new(current),
                                                                 variable: iv_var.clone(),
@@ -1839,9 +2033,13 @@ impl TranslationState {
                                                             };
                                                         }
                                                     }
-                                                    inner_key_vars.insert(ik.clone(), iv_var.clone());
+                                                    inner_key_vars
+                                                        .insert(ik.clone(), iv_var.clone());
                                                     if let Some(ref mut pvars) = project_vars {
-                                                        if !matches!(iv, Expression::Literal(Literal::Null)) {
+                                                        if !matches!(
+                                                            iv,
+                                                            Expression::Literal(Literal::Null)
+                                                        ) {
                                                             pvars.push(iv_var);
                                                         }
                                                     }
@@ -1964,9 +2162,7 @@ impl TranslationState {
                                 for tp in extra_triples.drain(..) {
                                     current = GraphPattern::LeftJoin {
                                         left: Box::new(current),
-                                        right: Box::new(GraphPattern::Bgp {
-                                            patterns: vec![tp],
-                                        }),
+                                        right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
                                         expression: None,
                                     };
                                 }
@@ -2072,8 +2268,7 @@ impl TranslationState {
                                 {
                                     for (item, pvar) in ti.iter().zip(vars.iter()) {
                                         if let Expression::Property(base, key) = &item.expression {
-                                            if let Expression::Variable(base_var) = base.as_ref()
-                                            {
+                                            if let Expression::Variable(base_var) = base.as_ref() {
                                                 self.with_prop_subst.insert(
                                                     (base_var.clone(), key.clone()),
                                                     pvar.clone(),
@@ -2188,7 +2383,8 @@ impl TranslationState {
                         {
                             let with_output_names: std::collections::HashSet<&str> =
                                 with_vars.iter().map(|v| v.as_str()).collect();
-                            self.unwind_null_vars.retain(|v| with_output_names.contains(v.as_str()));
+                            self.unwind_null_vars
+                                .retain(|v| with_output_names.contains(v.as_str()));
                         }
                         // Track literal-list-valued WITH items for compile-time
                         // UNWIND expansion.
@@ -2286,7 +2482,8 @@ impl TranslationState {
                         // SUM/AVG/MIN/MAX aggregate (null-sensitive).
                         for (_, agg_expr) in &aggregates {
                             if let AggregateExpression::FunctionCall {
-                                name: AggregateFunction::Sum
+                                name:
+                                    AggregateFunction::Sum
                                     | AggregateFunction::Avg
                                     | AggregateFunction::Min
                                     | AggregateFunction::Max,
@@ -2373,6 +2570,15 @@ impl TranslationState {
                                         let key = agg_expr_key(agg_expr);
                                         self.agg_orderby_subst.insert(key, pvar.clone());
                                     }
+                                    // Map the RETURN alias → projected variable so ORDER BY
+                                    // expressions referencing the alias use the correct var.
+                                    // E.g. `RETURN n.num AS n ORDER BY n + 2`: `n` in ORDER BY
+                                    // refers to the alias `n` → `?__n_num_0`, not node `?n`.
+                                    if let Some(alias) = &item.alias {
+                                        if pvar.as_str() != alias.as_str() {
+                                            self.return_alias_subst.insert(alias.clone(), pvar.clone());
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2384,15 +2590,13 @@ impl TranslationState {
                         let original_vars = vars.clone();
                         if let Some(ob) = r.order_by.as_ref() {
                             for sort_item in &ob.items {
-                                if let Expression::Property(base_expr, key) =
-                                    &sort_item.expression
+                                if let Expression::Property(base_expr, key) = &sort_item.expression
                                 {
                                     if let Expression::Variable(var_name) = base_expr.as_ref() {
                                         if self.edge_map.contains_key(var_name.as_str())
-                                            && !self.with_prop_subst.contains_key(&(
-                                                var_name.clone(),
-                                                key.clone(),
-                                            ))
+                                            && !self
+                                                .with_prop_subst
+                                                .contains_key(&(var_name.clone(), key.clone()))
                                         {
                                             let mut ob_extra = Vec::new();
                                             match self.translate_expr(
@@ -2446,6 +2650,7 @@ impl TranslationState {
                     // Clear ORDER BY property/aggregate substitutions.
                     self.with_prop_subst.clear();
                     self.agg_orderby_subst.clear();
+                    self.return_alias_subst.clear();
                     // If ORDER BY edge-property vars were added to the inner Project,
                     // wrap with an outer Project to hide them from the final result set.
                     if let Some(outer_vars) = needs_outer_project {
@@ -4386,17 +4591,24 @@ impl TranslationState {
                 {
                     Variable::new_unchecked(alias_name.to_string())
                 } else {
-                    self.fresh_var(if alias_name.is_empty() { "ret" } else { alias_name })
+                    self.fresh_var(if alias_name.is_empty() {
+                        "ret"
+                    } else {
+                        alias_name
+                    })
                 };
                 self.pending_aggs.clear();
                 match self.translate_expr(other, extra) {
                     Ok(sparql_expr) => {
                         if !self.pending_aggs.is_empty() {
-                            // Expression wraps an aggregate (e.g. count(*) * 10).
-                            // Take the captured aggregate binding: use only the first
-                            // for now (covers the common single-aggregate case).
+                            // Expression wraps one or more aggregates (e.g. count(*) * 10
+                            // or count(a) * 10 + count(b) * 5).
+                            // Take the first aggregate as the "primary" for the return tuple;
+                            // any additional aggregates remain in pending_aggs so the caller's
+                            // drain loop (line ~4255) picks them up and adds them to GROUP.
                             let (agg_var, agg) = self.pending_aggs.remove(0);
-                            self.pending_aggs.clear();
+                            // pending_aggs may still contain additional aggregates — leave them
+                            // for the caller to drain rather than clearing here.
                             Ok((result_var, Some((agg_var, agg)), Some(sparql_expr)))
                         } else {
                             Ok((result_var, None, Some(sparql_expr)))
@@ -4438,6 +4650,12 @@ impl TranslationState {
                         return Ok(SparExpr::Variable(v));
                     }
                 }
+                // Check if this variable name is a RETURN alias that has been remapped
+                // to a different SPARQL variable (e.g. `RETURN n.num AS n ORDER BY n + 2`
+                // where `n` is an alias for `?__n_num_0`, not the node variable `?n`).
+                if let Some(alias_var) = self.return_alias_subst.get(name.as_str()) {
+                    return Ok(SparExpr::Variable(alias_var.clone()));
+                }
                 Ok(SparExpr::Variable(Variable::new_unchecked(name.clone())))
             }
             Expression::Literal(Literal::Null) => {
@@ -4451,7 +4669,11 @@ impl TranslationState {
                 // First try compile-time map resolution: if base_expr resolves to a literal
                 // map (e.g. list[n] where list[n] is a Map literal), access the key directly.
                 if let Some(map_pairs) = self.try_resolve_to_literal_map(base_expr) {
-                    if let Some(val_expr) = map_pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()) {
+                    if let Some(val_expr) = map_pairs
+                        .iter()
+                        .find(|(k, _)| k == key)
+                        .map(|(_, v)| v.clone())
+                    {
                         if matches!(val_expr, Expression::Literal(Literal::Null)) {
                             return Ok(SparExpr::Variable(self.fresh_var("null")));
                         }
@@ -4472,7 +4694,11 @@ impl TranslationState {
                 // Check if this property was already projected by the surrounding WITH clause.
                 // This substitution prevents ORDER BY from emitting a new property triple
                 // after the WITH projection has hidden the base node variable.
-                if let Some(subst_var) = self.with_prop_subst.get(&(var_name.clone(), key.clone())).cloned() {
+                if let Some(subst_var) = self
+                    .with_prop_subst
+                    .get(&(var_name.clone(), key.clone()))
+                    .cloned()
+                {
                     return Ok(SparExpr::Variable(subst_var));
                 }
                 let fresh = self.fresh_var(&format!("{}_{}", var_name, key));
@@ -4616,8 +4842,10 @@ impl TranslationState {
                     if let Expression::Comparison(mid, op2, rhs2) = rhs.as_ref() {
                         if matches!(op2, CompOp::Lt | CompOp::Le | CompOp::Gt | CompOp::Ge) {
                             // Expand to (lhs op mid) AND (mid op2 rhs2).
-                            let left_cmp = Expression::Comparison(lhs.clone(), op.clone(), mid.clone());
-                            let right_cmp = Expression::Comparison(mid.clone(), op2.clone(), rhs2.clone());
+                            let left_cmp =
+                                Expression::Comparison(lhs.clone(), op.clone(), mid.clone());
+                            let right_cmp =
+                                Expression::Comparison(mid.clone(), op2.clone(), rhs2.clone());
                             let left_s = self.translate_expr(&left_cmp, extra)?;
                             let right_s = self.translate_expr(&right_cmp, extra)?;
                             return Ok(SparExpr::And(Box::new(left_s), Box::new(right_s)));
@@ -4657,7 +4885,9 @@ impl TranslationState {
                     // Type check: IN requires a list/null on the RHS. Reject known non-list literals.
                     if is_definitely_non_list(rhs) {
                         return Err(PolygraphError::Translation {
-                            message: "Type error: IN requires a list operand on the right-hand side".to_string(),
+                            message:
+                                "Type error: IN requires a list operand on the right-hand side"
+                                    .to_string(),
                         });
                     }
                     // Try fully compile-time evaluation of IN with Cypher 3-valued-logic semantics.
@@ -4709,21 +4939,30 @@ impl TranslationState {
                         return Ok(SparExpr::In(Box::new(l), members?));
                     }
                     // Special case: expr IN keys(map_expr) → expand keys at compile time
-                    if let Expression::FunctionCall { name: fname, args: fargs, .. } = rhs.as_ref() {
+                    if let Expression::FunctionCall {
+                        name: fname,
+                        args: fargs,
+                        ..
+                    } = rhs.as_ref()
+                    {
                         if fname.to_ascii_lowercase() == "keys" {
                             let keys_opt: Option<Vec<String>> = match fargs.first() {
                                 Some(Expression::Map(pairs)) => {
                                     Some(pairs.iter().map(|(k, _)| k.clone()).collect())
                                 }
-                                Some(Expression::Variable(v)) => {
-                                    self.map_vars.get(v.as_str()).map(|km| km.keys().cloned().collect())
-                                }
+                                Some(Expression::Variable(v)) => self
+                                    .map_vars
+                                    .get(v.as_str())
+                                    .map(|km| km.keys().cloned().collect()),
                                 _ => None,
                             };
                             if let Some(keys) = keys_opt {
                                 let l = self.translate_expr(lhs, extra)?;
-                                let members: Vec<SparExpr> = keys.iter()
-                                    .map(|k| SparExpr::Literal(SparLit::new_simple_literal(k.as_str())))
+                                let members: Vec<SparExpr> = keys
+                                    .iter()
+                                    .map(|k| {
+                                        SparExpr::Literal(SparLit::new_simple_literal(k.as_str()))
+                                    })
                                     .collect();
                                 return Ok(SparExpr::In(Box::new(l), members));
                             }
@@ -4807,7 +5046,8 @@ impl TranslationState {
                     (Some(mut items_a), None) => {
                         // list + scalar: append if b is a literal/subscript/bool expr
                         let b_eval: Option<Expression> =
-                            if matches!(b.as_ref(), Expression::Literal(_) | Expression::Negate(_)) {
+                            if matches!(b.as_ref(), Expression::Literal(_) | Expression::Negate(_))
+                            {
                                 Some(*b.clone())
                             } else if let Expression::Subscript(coll, idx) = b.as_ref() {
                                 // Evaluate subscript to a scalar element at compile time
@@ -4815,10 +5055,17 @@ impl TranslationState {
                                     if let Some(items) = self.resolve_literal_list(coll) {
                                         let len = items.len() as i64;
                                         let i = if n < 0 { len + n } else { n };
-                                        if i >= 0 && i < len { Some(items[i as usize].clone()) }
-                                        else { Some(Expression::Literal(Literal::Null)) }
-                                    } else { None }
-                                } else { None }
+                                        if i >= 0 && i < len {
+                                            Some(items[i as usize].clone())
+                                        } else {
+                                            Some(Expression::Literal(Literal::Null))
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
                             } else {
                                 try_eval_bool_const(b).map(|opt| match opt {
                                     Some(bv) => Expression::Literal(Literal::Boolean(bv)),
@@ -4834,7 +5081,8 @@ impl TranslationState {
                     (None, Some(items_b)) => {
                         // scalar + list: prepend if a is a literal value or a compile-time bool expr
                         let a_eval: Option<Expression> =
-                            if matches!(a.as_ref(), Expression::Literal(_) | Expression::Negate(_)) {
+                            if matches!(a.as_ref(), Expression::Literal(_) | Expression::Negate(_))
+                            {
                                 Some(*a.clone())
                             } else {
                                 try_eval_bool_const(a).map(|opt| match opt {
@@ -4865,7 +5113,10 @@ impl TranslationState {
                     use spargebra::algebra::Function;
                     let str_la = SparExpr::FunctionCall(Function::Str, vec![la]);
                     let str_lb = SparExpr::FunctionCall(Function::Str, vec![lb]);
-                    return Ok(SparExpr::FunctionCall(Function::Concat, vec![str_la, str_lb]));
+                    return Ok(SparExpr::FunctionCall(
+                        Function::Concat,
+                        vec![str_la, str_lb],
+                    ));
                 } else if is_list_candidate {
                     // List concat: CONCAT(SUBSTR(?a, 1, STRLEN(?a)-1), ", ", SUBSTR(?b, 2))
                     use spargebra::algebra::Function;
@@ -5058,7 +5309,8 @@ impl TranslationState {
                             )));
                         }
                         Expression::Literal(Literal::Null) => {
-                            concat_pieces.push(SparExpr::Literal(SparLit::new_simple_literal("null")));
+                            concat_pieces
+                                .push(SparExpr::Literal(SparLit::new_simple_literal("null")));
                         }
                         _ => {
                             let translated = self.translate_expr(val_expr, extra)?;
@@ -5141,7 +5393,11 @@ impl TranslationState {
                 self.pending_aggs.push((fresh.clone(), agg_expr));
                 Ok(SparExpr::Variable(fresh))
             }
-            Expression::CaseExpression { operand, whens, else_expr } => {
+            Expression::CaseExpression {
+                operand,
+                whens,
+                else_expr,
+            } => {
                 // CASE [operand] WHEN v1 THEN r1 WHEN v2 THEN r2 ... [ELSE default] END
                 // Translate to nested SPARQL IF(..., ..., IF(..., ..., default)).
                 // For simple CASE (with operand): WHEN vi → IF(operand = vi, ri, ...)
@@ -5167,17 +5423,27 @@ impl TranslationState {
                             None => self.translate_expr(when_val, extra)?,
                         };
                         let then_translated = self.translate_expr(then_expr, extra)?;
-                        Ok(SparExpr::If(Box::new(condition), Box::new(then_translated), Box::new(acc)))
+                        Ok(SparExpr::If(
+                            Box::new(condition),
+                            Box::new(then_translated),
+                            Box::new(acc),
+                        ))
                     },
                 )?;
                 Ok(result)
             }
-            Expression::QuantifierExpr { kind, variable, list, predicate } => {
+            Expression::QuantifierExpr {
+                kind,
+                variable,
+                list,
+                predicate,
+            } => {
                 use crate::ast::cypher::QuantifierKind;
                 // Special case: predicate is exactly the iteration variable (truthy check).
                 // For boolean-value lists coming from collect(), use CONTAINS on the
                 // serialized list string. Our collect() format: ['true', 'false', ...]
-                let pred_is_self_var = matches!(predicate.as_deref(), Some(Expression::Variable(v)) if v == variable);
+                let pred_is_self_var =
+                    matches!(predicate.as_deref(), Some(Expression::Variable(v)) if v == variable);
                 if pred_is_self_var {
                     let list_expr = self.translate_expr(list, extra)?;
                     let true_marker = SparExpr::Literal(SparLit::new_simple_literal("'true'"));
@@ -5247,7 +5513,8 @@ impl TranslationState {
                     }
                 } else {
                     Err(PolygraphError::UnsupportedFeature {
-                        feature: "dynamic subscript access with non-literal key (Phase C)".to_string(),
+                        feature: "dynamic subscript access with non-literal key (Phase C)"
+                            .to_string(),
                     })
                 }
             }
@@ -5257,28 +5524,54 @@ impl TranslationState {
                 if let Some(items) = items_opt {
                     let n = items.len() as i64;
                     // Handle null start/end → null result
-                    let start_is_null = start.as_deref().map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
-                    let end_is_null = end.as_deref().map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
+                    let start_is_null = start
+                        .as_deref()
+                        .map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
+                    let end_is_null = end
+                        .as_deref()
+                        .map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
                     if start_is_null || end_is_null {
                         return Ok(SparExpr::Variable(self.fresh_var("null")));
                     }
                     // Resolve start/end indices
                     let s: i64 = if let Some(start_expr) = start {
                         match get_literal_int(start_expr) {
-                            Some(i) => if i < 0 { (n + i).max(0) } else { i.min(n) },
-                            None => return Err(PolygraphError::UnsupportedFeature {
-                                feature: "list slice with non-literal start (Phase C)".to_string(),
-                            }),
+                            Some(i) => {
+                                if i < 0 {
+                                    (n + i).max(0)
+                                } else {
+                                    i.min(n)
+                                }
+                            }
+                            None => {
+                                return Err(PolygraphError::UnsupportedFeature {
+                                    feature: "list slice with non-literal start (Phase C)"
+                                        .to_string(),
+                                })
+                            }
                         }
-                    } else { 0 };
+                    } else {
+                        0
+                    };
                     let e: i64 = if let Some(end_expr) = end {
                         match get_literal_int(end_expr) {
-                            Some(i) => if i < 0 { (n + i).max(0) } else { i.min(n) },
-                            None => return Err(PolygraphError::UnsupportedFeature {
-                                feature: "list slice with non-literal end (Phase C)".to_string(),
-                            }),
+                            Some(i) => {
+                                if i < 0 {
+                                    (n + i).max(0)
+                                } else {
+                                    i.min(n)
+                                }
+                            }
+                            None => {
+                                return Err(PolygraphError::UnsupportedFeature {
+                                    feature: "list slice with non-literal end (Phase C)"
+                                        .to_string(),
+                                })
+                            }
                         }
-                    } else { n };
+                    } else {
+                        n
+                    };
                     // Slice
                     let slice_start = s.max(0) as usize;
                     let slice_end = e.max(0).min(n) as usize;
@@ -5295,15 +5588,22 @@ impl TranslationState {
                     })
                 }
             }
-            Expression::ListComprehension { variable, list, predicate, projection } => {
+            Expression::ListComprehension {
+                variable,
+                list,
+                predicate,
+                projection,
+            } => {
                 // Attempt compile-time evaluation when the list is a literal or a known WITH-bound literal.
                 let items_opt: Option<Vec<Expression>> = match list.as_ref() {
                     Expression::List(items) => Some(items.clone()),
-                    Expression::Variable(v) => {
-                        self.with_list_vars.get(v.as_str()).and_then(|e| {
-                            if let Expression::List(items) = e { Some(items.clone()) } else { None }
-                        })
-                    }
+                    Expression::Variable(v) => self.with_list_vars.get(v.as_str()).and_then(|e| {
+                        if let Expression::List(items) = e {
+                            Some(items.clone())
+                        } else {
+                            None
+                        }
+                    }),
                     _ => None,
                 };
 
@@ -5317,13 +5617,19 @@ impl TranslationState {
                             match pred_expr.as_ref() {
                                 Expression::Literal(Literal::Boolean(true)) => {} // pass
                                 Expression::Variable(v) if v == variable.as_str() => {}
-                                _ => { all_ok = false; break; }
+                                _ => {
+                                    all_ok = false;
+                                    break;
+                                }
                             }
                         }
                         if let Some(proj_expr) = projection {
                             match eval_comprehension_item(variable, item, proj_expr) {
                                 Some(result) => results.push(result),
-                                None => { all_ok = false; break; }
+                                None => {
+                                    all_ok = false;
+                                    break;
+                                }
                             }
                         } else {
                             // No projection — emit each element as-is
@@ -5336,7 +5642,8 @@ impl TranslationState {
                     }
                 }
                 Err(PolygraphError::UnsupportedFeature {
-                    feature: "list comprehension [x IN list WHERE pred | expr] (Phase C)".to_string(),
+                    feature: "list comprehension [x IN list WHERE pred | expr] (Phase C)"
+                        .to_string(),
                 })
             }
         }
@@ -5497,14 +5804,21 @@ impl TranslationState {
                 let str_arg = self.translate_expr(&args[0], extra)?;
                 let start_cypher = self.translate_expr(&args[1], extra)?;
                 let one = SparExpr::Literal(SparLit::new_typed_literal(
-                    "1", NamedNode::new_unchecked(XSD_INTEGER),
+                    "1",
+                    NamedNode::new_unchecked(XSD_INTEGER),
                 ));
                 let start_sparql = SparExpr::Add(Box::new(start_cypher), Box::new(one));
                 if args.len() >= 3 {
                     let len_arg = self.translate_expr(&args[2], extra)?;
-                    Ok(SparExpr::FunctionCall(Function::SubStr, vec![str_arg, start_sparql, len_arg]))
+                    Ok(SparExpr::FunctionCall(
+                        Function::SubStr,
+                        vec![str_arg, start_sparql, len_arg],
+                    ))
                 } else {
-                    Ok(SparExpr::FunctionCall(Function::SubStr, vec![str_arg, start_sparql]))
+                    Ok(SparExpr::FunctionCall(
+                        Function::SubStr,
+                        vec![str_arg, start_sparql],
+                    ))
                 }
             }
             "replace" => {
@@ -5659,13 +5973,16 @@ impl TranslationState {
                 })
             }
             "keys" => {
-                let arg = args.first().ok_or_else(|| PolygraphError::UnsupportedFeature {
-                    feature: "keys() requires an argument".to_string(),
-                })?;
+                let arg = args
+                    .first()
+                    .ok_or_else(|| PolygraphError::UnsupportedFeature {
+                        feature: "keys() requires an argument".to_string(),
+                    })?;
                 match arg {
                     Expression::Map(pairs) => {
                         // keys({k: v, ...}) → compile-time list of key strings
-                        let key_list: Vec<String> = pairs.iter().map(|(k, _)| format!("'{k}'")).collect();
+                        let key_list: Vec<String> =
+                            pairs.iter().map(|(k, _)| format!("'{k}'")).collect();
                         let serialized = format!("[{}]", key_list.join(", "));
                         return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
                     }
@@ -5677,7 +5994,8 @@ impl TranslationState {
                         let vname = v.clone();
                         // Check if variable is a known map alias from WITH clause
                         if let Some(key_map) = self.map_vars.get(&vname).cloned() {
-                            let key_list: Vec<String> = key_map.keys().map(|k| format!("'{k}'")).collect();
+                            let key_list: Vec<String> =
+                                key_map.keys().map(|k| format!("'{k}'")).collect();
                             let serialized = format!("[{}]", key_list.join(", "));
                             return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
                         }
@@ -5690,11 +6008,9 @@ impl TranslationState {
                     feature: "keys() on non-literal map".to_string(),
                 })
             }
-            "labels" | "relationships" => {
-                Err(PolygraphError::UnsupportedFeature {
-                    feature: format!("function call: {name}()"),
-                })
-            }
+            "labels" | "relationships" => Err(PolygraphError::UnsupportedFeature {
+                feature: format!("function call: {name}()"),
+            }),
             "reverse" => {
                 // reverse(string) — only supported for constant string literals.
                 if let Some(Expression::Literal(Literal::String(s))) = args.first() {
@@ -5708,9 +6024,10 @@ impl TranslationState {
             "split" => {
                 // split(string, delimiter) — supported for constant string literals.
                 // Returns a list string like ['a', 'b'] that can be used in UNWIND.
-                if let (Some(Expression::Literal(Literal::String(s))),
-                        Some(Expression::Literal(Literal::String(delim)))) =
-                       (args.first(), args.get(1))
+                if let (
+                    Some(Expression::Literal(Literal::String(s))),
+                    Some(Expression::Literal(Literal::String(delim))),
+                ) = (args.first(), args.get(1))
                 {
                     let parts: Vec<String> = if delim.is_empty() {
                         s.chars().map(|c| format!("'{c}'")).collect()
@@ -5757,76 +6074,118 @@ impl TranslationState {
             }
             "trim" => {
                 let arg = self.translate_expr(
-                    args.first().ok_or_else(|| PolygraphError::UnsupportedFeature {
-                        feature: "trim() requires an argument".to_string(),
-                    })?,
+                    args.first()
+                        .ok_or_else(|| PolygraphError::UnsupportedFeature {
+                            feature: "trim() requires an argument".to_string(),
+                        })?,
                     extra,
                 )?;
                 // REPLACE(REPLACE(s, leading_spaces, ""), trailing_spaces, "")
                 // Use SPARQL REPLACE with regex
                 let trimmed = SparExpr::FunctionCall(
                     Function::Replace,
-                    vec![arg, SparExpr::Literal(SparLit::new_simple_literal("^\\s+|\\s+$")), SparExpr::Literal(SparLit::new_simple_literal(""))],
+                    vec![
+                        arg,
+                        SparExpr::Literal(SparLit::new_simple_literal("^\\s+|\\s+$")),
+                        SparExpr::Literal(SparLit::new_simple_literal("")),
+                    ],
                 );
                 Ok(trimmed)
             }
             "ltrim" => {
                 let arg = self.translate_expr(
-                    args.first().ok_or_else(|| PolygraphError::UnsupportedFeature {
-                        feature: "ltrim() requires an argument".to_string(),
-                    })?,
+                    args.first()
+                        .ok_or_else(|| PolygraphError::UnsupportedFeature {
+                            feature: "ltrim() requires an argument".to_string(),
+                        })?,
                     extra,
                 )?;
                 Ok(SparExpr::FunctionCall(
                     Function::Replace,
-                    vec![arg, SparExpr::Literal(SparLit::new_simple_literal("^\\s+")), SparExpr::Literal(SparLit::new_simple_literal(""))],
+                    vec![
+                        arg,
+                        SparExpr::Literal(SparLit::new_simple_literal("^\\s+")),
+                        SparExpr::Literal(SparLit::new_simple_literal("")),
+                    ],
                 ))
             }
             "rtrim" => {
                 let arg = self.translate_expr(
-                    args.first().ok_or_else(|| PolygraphError::UnsupportedFeature {
-                        feature: "rtrim() requires an argument".to_string(),
-                    })?,
+                    args.first()
+                        .ok_or_else(|| PolygraphError::UnsupportedFeature {
+                            feature: "rtrim() requires an argument".to_string(),
+                        })?,
                     extra,
                 )?;
                 Ok(SparExpr::FunctionCall(
                     Function::Replace,
-                    vec![arg, SparExpr::Literal(SparLit::new_simple_literal("\\s+$")), SparExpr::Literal(SparLit::new_simple_literal(""))],
+                    vec![
+                        arg,
+                        SparExpr::Literal(SparLit::new_simple_literal("\\s+$")),
+                        SparExpr::Literal(SparLit::new_simple_literal("")),
+                    ],
                 ))
             }
             "left" => {
                 // left(s, n) → SUBSTR(s, 1, n)
                 let s_arg = self.translate_expr(
-                    args.first().ok_or_else(|| PolygraphError::UnsupportedFeature { feature: "left() requires arguments".to_string() })?,
+                    args.first()
+                        .ok_or_else(|| PolygraphError::UnsupportedFeature {
+                            feature: "left() requires arguments".to_string(),
+                        })?,
                     extra,
                 )?;
                 let n_arg = self.translate_expr(
-                    args.get(1).ok_or_else(|| PolygraphError::UnsupportedFeature { feature: "left() requires 2 arguments".to_string() })?,
+                    args.get(1)
+                        .ok_or_else(|| PolygraphError::UnsupportedFeature {
+                            feature: "left() requires 2 arguments".to_string(),
+                        })?,
                     extra,
                 )?;
-                Ok(SparExpr::FunctionCall(Function::SubStr, vec![
-                    s_arg,
-                    SparExpr::Literal(SparLit::new_typed_literal("1", NamedNode::new_unchecked(XSD_INTEGER))),
-                    n_arg,
-                ]))
+                Ok(SparExpr::FunctionCall(
+                    Function::SubStr,
+                    vec![
+                        s_arg,
+                        SparExpr::Literal(SparLit::new_typed_literal(
+                            "1",
+                            NamedNode::new_unchecked(XSD_INTEGER),
+                        )),
+                        n_arg,
+                    ],
+                ))
             }
             "right" => {
                 // right(s, n) → SUBSTR(s, STRLEN(s) - n + 1, n)
                 let s_arg = self.translate_expr(
-                    args.first().ok_or_else(|| PolygraphError::UnsupportedFeature { feature: "right() requires arguments".to_string() })?,
+                    args.first()
+                        .ok_or_else(|| PolygraphError::UnsupportedFeature {
+                            feature: "right() requires arguments".to_string(),
+                        })?,
                     extra,
                 )?;
                 let n_arg = self.translate_expr(
-                    args.get(1).ok_or_else(|| PolygraphError::UnsupportedFeature { feature: "right() requires 2 arguments".to_string() })?,
+                    args.get(1)
+                        .ok_or_else(|| PolygraphError::UnsupportedFeature {
+                            feature: "right() requires 2 arguments".to_string(),
+                        })?,
                     extra,
                 )?;
                 // start = strlen(s) - n + 1
                 let strlen = SparExpr::FunctionCall(Function::StrLen, vec![s_arg.clone()]);
                 let offset = SparExpr::Add(
-                    Box::new(SparExpr::Subtract(Box::new(strlen), Box::new(n_arg.clone()))),
-                    Box::new(SparExpr::Literal(SparLit::new_typed_literal("1", NamedNode::new_unchecked(XSD_INTEGER)))),
+                    Box::new(SparExpr::Subtract(
+                        Box::new(strlen),
+                        Box::new(n_arg.clone()),
+                    )),
+                    Box::new(SparExpr::Literal(SparLit::new_typed_literal(
+                        "1",
+                        NamedNode::new_unchecked(XSD_INTEGER),
+                    ))),
                 );
-                Ok(SparExpr::FunctionCall(Function::SubStr, vec![s_arg, offset, n_arg]))
+                Ok(SparExpr::FunctionCall(
+                    Function::SubStr,
+                    vec![s_arg, offset, n_arg],
+                ))
             }
             "toboolean" => {
                 // toBoolean(v): identity for booleans, string-to-bool for strings,
@@ -5834,7 +6193,10 @@ impl TranslationState {
                 // SPARQL: xsd:boolean(STR(v)) — works for "true"/"false" strings and
                 // boolean literals; produces error (→ null) for invalid strings.
                 let arg = self.translate_expr(
-                    args.first().ok_or_else(|| PolygraphError::UnsupportedFeature { feature: "toBoolean() requires an argument".to_string() })?,
+                    args.first()
+                        .ok_or_else(|| PolygraphError::UnsupportedFeature {
+                            feature: "toBoolean() requires an argument".to_string(),
+                        })?,
                     extra,
                 )?;
                 Ok(SparExpr::FunctionCall(
@@ -6079,7 +6441,9 @@ impl TranslationState {
                         }
                     })
                     .collect();
-                let has_null = items.iter().any(|e| matches!(e, Expression::Literal(Literal::Null)));
+                let has_null = items
+                    .iter()
+                    .any(|e| matches!(e, Expression::Literal(Literal::Null)));
                 if has_null {
                     // Track this variable as having UNDEF rows to work around oxigraph
                     // bug where MAX/MIN over VALUES with UNDEF returns null.
@@ -6151,14 +6515,19 @@ impl TranslationState {
                 // Try to evaluate as a compile-time constant list (e.g. split('a,b', ',')).
                 if let Expression::FunctionCall { name, args, .. } = &u.expression {
                     if name.eq_ignore_ascii_case("split") {
-                        if let (Some(Expression::Literal(Literal::String(s))),
-                                Some(Expression::Literal(Literal::String(d)))) =
-                               (args.first(), args.get(1))
+                        if let (
+                            Some(Expression::Literal(Literal::String(s))),
+                            Some(Expression::Literal(Literal::String(d))),
+                        ) = (args.first(), args.get(1))
                         {
                             let parts: Vec<Expression> = if d.is_empty() {
-                                s.chars().map(|c| Expression::Literal(Literal::String(c.to_string()))).collect()
+                                s.chars()
+                                    .map(|c| Expression::Literal(Literal::String(c.to_string())))
+                                    .collect()
                             } else {
-                                s.split(d.as_str()).map(|p| Expression::Literal(Literal::String(p.to_string()))).collect()
+                                s.split(d.as_str())
+                                    .map(|p| Expression::Literal(Literal::String(p.to_string())))
+                                    .collect()
                             };
                             return self.translate_unwind_clause(
                                 &crate::ast::cypher::UnwindClause {
@@ -6274,7 +6643,10 @@ impl TranslationState {
                 // Format floats in Cypher/Neo4j compatible style via cypher_float_str:
                 // uses decimal notation in [-6..+9] exponent range, scientific otherwise.
                 let s = cypher_float_str(*f);
-                Ok(SparLit::new_typed_literal(s, NamedNode::new_unchecked(XSD_DOUBLE)))
+                Ok(SparLit::new_typed_literal(
+                    s,
+                    NamedNode::new_unchecked(XSD_DOUBLE),
+                ))
             }
             Literal::String(s) => Ok(SparLit::new_simple_literal(s.clone())),
             Literal::Boolean(b) => Ok(SparLit::new_typed_literal(
@@ -6297,27 +6669,25 @@ impl TranslationState {
             }
             Expression::Variable(name) => Ok(Variable::new_unchecked(name.clone()).into()),
             // Handle -N and -F negation directly (common in UNWIND lists)
-            Expression::Negate(inner) => {
-                match inner.as_ref() {
-                    Expression::Literal(Literal::Integer(n)) => {
-                        let neg_lit = SparLit::new_typed_literal(
-                            (-n).to_string(),
-                            NamedNode::new_unchecked(XSD_INTEGER),
-                        );
-                        Ok(SparLit::into(neg_lit))
-                    }
-                    Expression::Literal(Literal::Float(f)) => {
-                        let neg_lit = SparLit::new_typed_literal(
-                            format!("{:?}", -f),
-                            NamedNode::new_unchecked(XSD_DOUBLE),
-                        );
-                        Ok(SparLit::into(neg_lit))
-                    }
-                    _ => Err(PolygraphError::UnsupportedFeature {
-                        feature: "complex negation in UNWIND list".to_string(),
-                    }),
+            Expression::Negate(inner) => match inner.as_ref() {
+                Expression::Literal(Literal::Integer(n)) => {
+                    let neg_lit = SparLit::new_typed_literal(
+                        (-n).to_string(),
+                        NamedNode::new_unchecked(XSD_INTEGER),
+                    );
+                    Ok(SparLit::into(neg_lit))
                 }
-            }
+                Expression::Literal(Literal::Float(f)) => {
+                    let neg_lit = SparLit::new_typed_literal(
+                        format!("{:?}", -f),
+                        NamedNode::new_unchecked(XSD_DOUBLE),
+                    );
+                    Ok(SparLit::into(neg_lit))
+                }
+                _ => Err(PolygraphError::UnsupportedFeature {
+                    feature: "complex negation in UNWIND list".to_string(),
+                }),
+            },
             _ => Err(PolygraphError::UnsupportedFeature {
                 feature: "complex expression in inline property map (Phase 4)".to_string(),
             }),
@@ -6341,7 +6711,8 @@ impl TranslationState {
                     }
                 }
                 Err(PolygraphError::UnsupportedFeature {
-                    feature: "property access on non-variable base expression (Phase 4)".to_string(),
+                    feature: "property access on non-variable base expression (Phase 4)"
+                        .to_string(),
                 })
             }
             _ => Err(PolygraphError::UnsupportedFeature {
@@ -6530,13 +6901,11 @@ fn expr_references_var(expr: &Expression, name: &str) -> bool {
         }
         Expression::List(items) => items.iter().any(|e| expr_references_var(e, name)),
         Expression::Map(pairs) => pairs.iter().any(|(_, v)| expr_references_var(v, name)),
-        Expression::FunctionCall { args, .. } => {
-            args.iter().any(|e| expr_references_var(e, name))
-        }
+        Expression::FunctionCall { args, .. } => args.iter().any(|e| expr_references_var(e, name)),
         Expression::Aggregate(agg) => match agg {
-            AggregateExpr::Count { expr, .. } => {
-                expr.as_ref().map_or(false, |e| expr_references_var(e, name))
-            }
+            AggregateExpr::Count { expr, .. } => expr
+                .as_ref()
+                .map_or(false, |e| expr_references_var(e, name)),
             AggregateExpr::Sum { expr, .. }
             | AggregateExpr::Avg { expr, .. }
             | AggregateExpr::Min { expr, .. }
@@ -6575,25 +6944,54 @@ fn expr_uses_nullable(expr: &Expression, nullable: &std::collections::HashSet<St
         Expression::LabelCheck { variable, .. } => nullable.contains(variable),
         Expression::PatternPredicate(_) => false,
         Expression::Aggregate(_) | Expression::Literal(_) | Expression::Map(_) => false,
-        Expression::CaseExpression { operand, whens, else_expr } => {
-            operand.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
-                || whens.iter().any(|(w, t)| expr_uses_nullable(w, nullable) || expr_uses_nullable(t, nullable))
-                || else_expr.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
+        Expression::CaseExpression {
+            operand,
+            whens,
+            else_expr,
+        } => {
+            operand
+                .as_ref()
+                .map_or(false, |e| expr_uses_nullable(e, nullable))
+                || whens.iter().any(|(w, t)| {
+                    expr_uses_nullable(w, nullable) || expr_uses_nullable(t, nullable)
+                })
+                || else_expr
+                    .as_ref()
+                    .map_or(false, |e| expr_uses_nullable(e, nullable))
         }
-        Expression::QuantifierExpr { list, predicate, .. } => {
+        Expression::QuantifierExpr {
+            list, predicate, ..
+        } => {
             expr_uses_nullable(list, nullable)
-                || predicate.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
+                || predicate
+                    .as_ref()
+                    .map_or(false, |e| expr_uses_nullable(e, nullable))
         }
-        Expression::Subscript(a, b) => expr_uses_nullable(a, nullable) || expr_uses_nullable(b, nullable),
+        Expression::Subscript(a, b) => {
+            expr_uses_nullable(a, nullable) || expr_uses_nullable(b, nullable)
+        }
         Expression::ListSlice { list, start, end } => {
             expr_uses_nullable(list, nullable)
-                || start.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
-                || end.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
+                || start
+                    .as_ref()
+                    .map_or(false, |e| expr_uses_nullable(e, nullable))
+                || end
+                    .as_ref()
+                    .map_or(false, |e| expr_uses_nullable(e, nullable))
         }
-        Expression::ListComprehension { list, predicate, projection, .. } => {
+        Expression::ListComprehension {
+            list,
+            predicate,
+            projection,
+            ..
+        } => {
             expr_uses_nullable(list, nullable)
-                || predicate.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
-                || projection.as_ref().map_or(false, |e| expr_uses_nullable(e, nullable))
+                || predicate
+                    .as_ref()
+                    .map_or(false, |e| expr_uses_nullable(e, nullable))
+                || projection
+                    .as_ref()
+                    .map_or(false, |e| expr_uses_nullable(e, nullable))
         }
     }
 }
@@ -6719,7 +7117,8 @@ fn cypher_float_str(f: f64) -> String {
                 let result = if int_len >= all_digits.len() as i32 {
                     // All digits are in integer part, add trailing zeros + ".0"
                     let zeros = (int_len - all_digits.len() as i32) as usize;
-                    format!("{}{}{}.0",
+                    format!(
+                        "{}{}{}.0",
                         if neg { "-" } else { "" },
                         all_digits,
                         "0".repeat(zeros),
@@ -6727,7 +7126,8 @@ fn cypher_float_str(f: f64) -> String {
                 } else if int_len <= 0 {
                     // All digits are in fractional part, add leading zeros
                     let leading = (-int_len) as usize;
-                    format!("{}0.{}{}",
+                    format!(
+                        "{}0.{}{}",
                         if neg { "-" } else { "" },
                         "0".repeat(leading),
                         all_digits,
@@ -6766,20 +7166,39 @@ fn agg_expr_key(agg: &crate::ast::cypher::AggregateExpr) -> String {
         }
     }
     match agg {
-        AggregateExpr::Count { distinct, expr: None } =>
-            format!("count_{}", if *distinct { "d_star" } else { "star" }),
-        AggregateExpr::Count { distinct, expr: Some(e) } =>
-            format!("count_{}{}", if *distinct { "d_" } else { "" }, expr_key(e)),
-        AggregateExpr::Sum { distinct, expr } =>
-            format!("sum_{}{}", if *distinct { "d_" } else { "" }, expr_key(expr)),
-        AggregateExpr::Avg { distinct, expr } =>
-            format!("avg_{}{}", if *distinct { "d_" } else { "" }, expr_key(expr)),
-        AggregateExpr::Min { distinct, expr } =>
-            format!("min_{}{}", if *distinct { "d_" } else { "" }, expr_key(expr)),
-        AggregateExpr::Max { distinct, expr } =>
-            format!("max_{}{}", if *distinct { "d_" } else { "" }, expr_key(expr)),
-        AggregateExpr::Collect { distinct, expr } =>
-            format!("collect_{}{}", if *distinct { "d_" } else { "" }, expr_key(expr)),
+        AggregateExpr::Count {
+            distinct,
+            expr: None,
+        } => format!("count_{}", if *distinct { "d_star" } else { "star" }),
+        AggregateExpr::Count {
+            distinct,
+            expr: Some(e),
+        } => format!("count_{}{}", if *distinct { "d_" } else { "" }, expr_key(e)),
+        AggregateExpr::Sum { distinct, expr } => format!(
+            "sum_{}{}",
+            if *distinct { "d_" } else { "" },
+            expr_key(expr)
+        ),
+        AggregateExpr::Avg { distinct, expr } => format!(
+            "avg_{}{}",
+            if *distinct { "d_" } else { "" },
+            expr_key(expr)
+        ),
+        AggregateExpr::Min { distinct, expr } => format!(
+            "min_{}{}",
+            if *distinct { "d_" } else { "" },
+            expr_key(expr)
+        ),
+        AggregateExpr::Max { distinct, expr } => format!(
+            "max_{}{}",
+            if *distinct { "d_" } else { "" },
+            expr_key(expr)
+        ),
+        AggregateExpr::Collect { distinct, expr } => format!(
+            "collect_{}{}",
+            if *distinct { "d_" } else { "" },
+            expr_key(expr)
+        ),
     }
 }
 
@@ -6795,17 +7214,20 @@ fn serialize_list_literal(elems: &[Expression]) -> String {
             Expression::Literal(Literal::Null) => "null".to_string(),
             Expression::List(inner) => serialize_list_literal(inner),
             Expression::Map(pairs) => {
-                let entries: Vec<String> = pairs.iter().map(|(k, v)| {
-                    let val = match v {
-                        Expression::Literal(Literal::Integer(n)) => n.to_string(),
-                        Expression::Literal(Literal::Float(f)) => cypher_float_str(*f),
-                        Expression::Literal(Literal::String(s)) => format!("'{s}'"),
-                        Expression::Literal(Literal::Boolean(b)) => b.to_string(),
-                        Expression::Literal(Literal::Null) => "null".to_string(),
-                        _ => "?".to_string(),
-                    };
-                    format!("{k}: {val}")
-                }).collect();
+                let entries: Vec<String> = pairs
+                    .iter()
+                    .map(|(k, v)| {
+                        let val = match v {
+                            Expression::Literal(Literal::Integer(n)) => n.to_string(),
+                            Expression::Literal(Literal::Float(f)) => cypher_float_str(*f),
+                            Expression::Literal(Literal::String(s)) => format!("'{s}'"),
+                            Expression::Literal(Literal::Boolean(b)) => b.to_string(),
+                            Expression::Literal(Literal::Null) => "null".to_string(),
+                            _ => "?".to_string(),
+                        };
+                        format!("{k}: {val}")
+                    })
+                    .collect();
                 format!("{{{}}}", entries.join(", "))
             }
             Expression::Negate(inner) => match inner.as_ref() {
@@ -6910,9 +7332,7 @@ fn try_eval_bool_const(expr: &Expression) -> Option<Option<bool>> {
         Expression::Comparison(lhs, CompOp::Ne, rhs) => {
             try_eval_literal_eq(lhs, rhs).map(|r| r.map(|b| !b))
         }
-        Expression::Not(inner) => {
-            try_eval_bool_const(inner).map(|r| r.map(|b| !b))
-        }
+        Expression::Not(inner) => try_eval_bool_const(inner).map(|r| r.map(|b| !b)),
         _ => None,
     }
 }
@@ -7018,9 +7438,10 @@ fn serialize_list_element(e: &Expression) -> String {
         Expression::List(inner) => serialize_list_literal(inner),
         Expression::Map(pairs) => {
             // Serialize map as "{key: value, ...}" string
-            let entries: Vec<String> = pairs.iter().map(|(k, v)| {
-                format!("{k}: {}", serialize_list_element(v))
-            }).collect();
+            let entries: Vec<String> = pairs
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", serialize_list_element(v)))
+                .collect();
             format!("{{{}}}", entries.join(", "))
         }
         Expression::Negate(inner) => match inner.as_ref() {

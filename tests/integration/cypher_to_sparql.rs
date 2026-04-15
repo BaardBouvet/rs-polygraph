@@ -733,7 +733,7 @@ fn parse_call_clause() {
 
 #[test]
 fn test_prec2_multiply_parens() {
-    use oxigraph::sparql::{QueryResults};
+    use oxigraph::sparql::QueryResults;
     use oxigraph::store::Store;
     let store = Store::new().unwrap();
     let sparql = transpile("RETURN 4 * (2 + 3) * 2 AS c");
@@ -742,7 +742,11 @@ fn test_prec2_multiply_parens() {
     #[allow(deprecated)]
     match store.query(sparql.as_str()) {
         Ok(QueryResults::Solutions(mut sols)) => {
-            let vars: Vec<_> = sols.variables().iter().map(|v| v.as_str().to_owned()).collect();
+            let vars: Vec<_> = sols
+                .variables()
+                .iter()
+                .map(|v| v.as_str().to_owned())
+                .collect();
             for sol_r in &mut sols {
                 if let Ok(sol) = sol_r {
                     for v in &vars {
@@ -759,3 +763,53 @@ fn test_prec2_multiply_parens() {
     println!("AST: {:?}", ast.clauses[0]);
 }
 
+#[test]
+fn debug_collect_with_undef() {
+    use oxigraph::{sparql::{QueryResults, SparqlEvaluator}, store::Store};
+    let store = Store::new().unwrap();
+    
+    // This is the key test: WITH collect() over UNWIND rows that include UNDEF,
+    // WHERE the FILTER(BOUND) is NOT applied
+    let sparql = r#"SELECT (CONCAT("[", COALESCE(?gc, ""), "]") AS ?eq) WHERE {
+  {SELECT (GROUP_CONCAT(CONCAT("'", STR((?a || ?b)), "'"); SEPARATOR=", ") AS ?gc) WHERE {
+    VALUES ?a { "true"^^<http://www.w3.org/2001/XMLSchema#boolean> "false"^^<http://www.w3.org/2001/XMLSchema#boolean> UNDEF }
+    VALUES ?b { "true"^^<http://www.w3.org/2001/XMLSchema#boolean> "false"^^<http://www.w3.org/2001/XMLSchema#boolean> UNDEF }
+  }}
+}"#;
+    
+    // Same with FILTER(BOUND)
+    let sparql_filtered = r#"SELECT (CONCAT("[", COALESCE(?gc, ""), "]") AS ?eq) WHERE {
+  {SELECT (GROUP_CONCAT(CONCAT("'", STR((?a || ?b)), "'"); SEPARATOR=", ") AS ?gc) WHERE {
+    VALUES ?a { "true"^^<http://www.w3.org/2001/XMLSchema#boolean> "false"^^<http://www.w3.org/2001/XMLSchema#boolean> UNDEF }
+    VALUES ?b { "true"^^<http://www.w3.org/2001/XMLSchema#boolean> "false"^^<http://www.w3.org/2001/XMLSchema#boolean> UNDEF }
+    FILTER(BOUND(?a))
+    FILTER(BOUND(?b))
+  }}
+}"#;
+    
+    for (name, q) in [("no filter", sparql), ("filtered", sparql_filtered)] {
+        #[expect(deprecated)]
+        let res = store.query_opt(q, SparqlEvaluator::new());
+        match res {
+            Ok(QueryResults::Solutions(sols)) => {
+                for r in sols { println!("{}: {:?}", name, r); }
+            }
+            Err(e) => println!("{}: Error: {}", name, e),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn debug_order_by_agg_arith() {
+    let q = "MATCH (a:A), (b:X) RETURN count(a) * 10 + count(b) * 5 AS x ORDER BY x";
+    let s = transpile(q);
+    println!("SPARQL:\n{}", s);
+}
+
+#[test]
+fn debug_rename_order_by() {
+    let q = "MATCH (n) RETURN n.num AS n ORDER BY n + 2";
+    let s = transpile(q);
+    println!("SPARQL:\n{}", s);
+}
