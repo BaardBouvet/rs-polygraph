@@ -4639,6 +4639,44 @@ impl TranslationState {
                             message: "Type error: IN requires a list operand on the right-hand side".to_string(),
                         });
                     }
+                    // Try fully compile-time evaluation of IN with Cypher 3-valued-logic semantics.
+                    // SPARQL's IN operator doesn't handle null elements correctly (e.g. [null] IN [[null]]
+                    // should return null, not true/false).  We evaluate element-by-element using
+                    // try_eval_literal_eq so that:
+                    //   - any true match → return true immediately
+                    //   - null comparison (but no true match) → return null at end
+                    //   - all false → return false
+                    // Only falls through if any element can't be evaluated at compile time.
+                    if let Expression::List(rhs_items) = rhs.as_ref() {
+                        let mut found_null = false;
+                        let mut all_definite = true;
+                        'ct_in: for item in rhs_items {
+                            match try_eval_literal_eq(lhs, item) {
+                                Some(Some(true)) => {
+                                    return Ok(SparExpr::Literal(SparLit::new_typed_literal(
+                                        "true".to_string(),
+                                        NamedNode::new_unchecked(XSD_BOOLEAN),
+                                    )));
+                                }
+                                Some(None) => found_null = true,
+                                Some(Some(false)) => {}
+                                None => {
+                                    all_definite = false;
+                                    break 'ct_in;
+                                }
+                            }
+                        }
+                        if all_definite {
+                            return Ok(if found_null {
+                                SparExpr::Variable(self.fresh_var("null"))
+                            } else {
+                                SparExpr::Literal(SparLit::new_typed_literal(
+                                    "false".to_string(),
+                                    NamedNode::new_unchecked(XSD_BOOLEAN),
+                                ))
+                            });
+                        }
+                    }
                     // Try to resolve rhs to a list of items at compile time
                     let items_opt = self.try_resolve_to_items(rhs);
                     if let Some(items) = items_opt {
