@@ -2094,6 +2094,29 @@ impl TranslationState {
 
                     // Apply aggregation (GROUP BY) if present.
                     if !aggregates.is_empty() {
+                        // Work around oxigraph bug: SUM/MIN/MAX/AVG over input that
+                        // contains UNDEF values returns null instead of ignoring them.
+                        // Fix: add FILTER(BOUND(?v)) for any variable used inside a
+                        // SUM/AVG/MIN/MAX aggregate (null-sensitive).
+                        for (_, agg_expr) in &aggregates {
+                            if let AggregateExpression::FunctionCall {
+                                name: AggregateFunction::Sum
+                                    | AggregateFunction::Avg
+                                    | AggregateFunction::Min
+                                    | AggregateFunction::Max,
+                                expr: SparExpr::Variable(inner_var),
+                                ..
+                            } = agg_expr
+                            {
+                                // Only add BOUND filter if not already handled via unwind_null_vars.
+                                if !self.unwind_null_vars.contains(inner_var.as_str()) {
+                                    current = GraphPattern::Filter {
+                                        inner: Box::new(current),
+                                        expr: SparExpr::Bound(inner_var.clone()),
+                                    };
+                                }
+                            }
+                        }
                         // Work around oxigraph bug: MAX/MIN/SUM over VALUES with UNDEF
                         // returns null. Add FILTER(BOUND(?v)) for UNWIND null vars.
                         if !self.unwind_null_vars.is_empty() {
