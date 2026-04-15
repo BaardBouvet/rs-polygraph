@@ -1405,6 +1405,33 @@ impl TranslationState {
         NamedNode::new_unchecked(format!("{}{}", self.base_iri, local))
     }
 
+    /// Try to resolve an expression to literal map key-value pairs at compile time.
+    /// Handles Map literals, and list[idx] where the element is a Map.
+    fn try_resolve_to_literal_map(&self, expr: &Expression) -> Option<Vec<(String, Expression)>> {
+        match expr {
+            Expression::Map(pairs) => Some(pairs.clone()),
+            Expression::Subscript(coll, idx) => {
+                let items = self.resolve_literal_list(coll)?;
+                let n = items.len() as i64;
+                let i = if let Some(iv) = get_literal_int(idx) {
+                    if iv < 0 { n + iv } else { iv }
+                } else {
+                    return None;
+                };
+                if i >= 0 && i < n {
+                    if let Expression::Map(pairs) = &items[i as usize] {
+                        Some(pairs.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Build the `rdf:type` predicate IRI.
     fn rdf_type(&self) -> NamedNode {
         NamedNode::new_unchecked(RDF_TYPE)
@@ -1783,6 +1810,33 @@ impl TranslationState {
                                                     variable: key_var.clone(),
                                                     expression: sparql_expr,
                                                 };
+                                            }
+                                            // If val is a nested map, recursively register inner key vars
+                                            // so that `alias.key.innerkey` chains are resolvable.
+                                            if let Expression::Map(inner_pairs) = val_expr {
+                                                let inner_alias = format!("{alias}__{key}");
+                                                let mut inner_key_vars: std::collections::HashMap<String, Variable> = Default::default();
+                                                for (ik, iv) in inner_pairs {
+                                                    let iv_var = Variable::new_unchecked(
+                                                        format!("{inner_alias}__{ik}"),
+                                                    );
+                                                    if !matches!(iv, Expression::Literal(Literal::Null)) {
+                                                        if let Ok(sv) = self.translate_expr(iv, &mut extra_triples) {
+                                                            current = GraphPattern::Extend {
+                                                                inner: Box::new(current),
+                                                                variable: iv_var.clone(),
+                                                                expression: sv,
+                                                            };
+                                                        }
+                                                    }
+                                                    inner_key_vars.insert(ik.clone(), iv_var.clone());
+                                                    if let Some(ref mut pvars) = project_vars {
+                                                        if !matches!(iv, Expression::Literal(Literal::Null)) {
+                                                            pvars.push(iv_var);
+                                                        }
+                                                    }
+                                                }
+                                                self.map_vars.insert(inner_alias, inner_key_vars);
                                             }
                                         }
                                     }
@@ -4170,6 +4224,19 @@ impl TranslationState {
             }
             Expression::Literal(lit) => Ok(SparExpr::Literal(self.translate_literal(lit)?)),
             Expression::Property(base_expr, key) => {
+                // First try compile-time map resolution: if base_expr resolves to a literal
+                // map (e.g. list[n] where list[n] is a Map literal), access the key directly.
+                if let Some(map_pairs) = self.try_resolve_to_literal_map(base_expr) {
+                    if let Some(val_expr) = map_pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()) {
+                        if matches!(val_expr, Expression::Literal(Literal::Null)) {
+                            return Ok(SparExpr::Variable(self.fresh_var("null")));
+                        }
+                        return self.translate_expr(&val_expr, extra);
+                    } else {
+                        // Key not found → null
+                        return Ok(SparExpr::Variable(self.fresh_var("null")));
+                    }
+                }
                 let base_var = self.extract_variable(base_expr)?;
                 let var_name = base_var.as_str().to_string();
                 // Check if base is a virtual map alias from head(collect({...})).
@@ -5988,9 +6055,23 @@ impl TranslationState {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// Extract the SPARQL [`Variable`] from a variable expression.
+    /// Also handles map property chains via `map_vars` (e.g. `nestedMap.key`).
     fn extract_variable(&self, expr: &Expression) -> Result<Variable, PolygraphError> {
         match expr {
             Expression::Variable(name) => Ok(Variable::new_unchecked(name.clone())),
+            // Support map property chain: map.key → look up via map_vars recursively
+            Expression::Property(base, key) => {
+                let base_var = self.extract_variable(base)?;
+                let var_name = base_var.as_str().to_string();
+                if let Some(key_map) = self.map_vars.get(&var_name) {
+                    if let Some(v) = key_map.get(key.as_str()).cloned() {
+                        return Ok(v);
+                    }
+                }
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: "property access on non-variable base expression (Phase 4)".to_string(),
+                })
+            }
             _ => Err(PolygraphError::UnsupportedFeature {
                 feature: "property access on non-variable base expression (Phase 4)".to_string(),
             }),
