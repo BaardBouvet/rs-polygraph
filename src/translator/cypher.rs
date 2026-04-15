@@ -3712,6 +3712,22 @@ impl TranslationState {
                         }
                     }
                 }
+                // Compile-time literal equality for list/map/scalar.
+                if matches!(op, CompOp::Eq | CompOp::Ne) {
+                    if let Some(eq_result) = try_eval_literal_eq(lhs, rhs) {
+                        let eq_val = match op {
+                            CompOp::Ne => eq_result.map(|b| !b),
+                            _ => eq_result,
+                        };
+                        return Ok(match eq_val {
+                            Some(b) => SparExpr::Literal(SparLit::new_typed_literal(
+                                b.to_string(),
+                                NamedNode::new_unchecked(XSD_BOOLEAN),
+                            )),
+                            None => SparExpr::Variable(self.fresh_var("null")),
+                        });
+                    }
+                }
                 let l = self.translate_expr(lhs, extra)?;
                 let r = self.translate_expr(rhs, extra)?;
                 let result = match op {
@@ -5654,6 +5670,90 @@ fn get_literal_int(expr: &Expression) -> Option<i64> {
             Expression::Literal(Literal::Integer(n)) => Some(-n),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+/// Three-valued logic conjunction: false beats null, null beats true.
+fn tval_and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None, // null AND true = null, null AND null = null
+    }
+}
+
+/// Evaluate equality of two literal expressions at compile time using Cypher's 3VL.
+/// Returns Some(true/false/null) when both values are fully literal, None otherwise.
+fn try_eval_literal_eq(lhs: &Expression, rhs: &Expression) -> Option<Option<bool>> {
+    match (lhs, rhs) {
+        // Any null input → null output
+        (Expression::Literal(Literal::Null), _) | (_, Expression::Literal(Literal::Null)) => {
+            Some(None)
+        }
+        // Scalar comparisons (same type)
+        (Expression::Literal(Literal::Integer(a)), Expression::Literal(Literal::Integer(b))) => {
+            Some(Some(a == b))
+        }
+        (Expression::Literal(Literal::Float(a)), Expression::Literal(Literal::Float(b))) => {
+            Some(Some(a == b))
+        }
+        (Expression::Literal(Literal::String(a)), Expression::Literal(Literal::String(b))) => {
+            Some(Some(a == b))
+        }
+        (Expression::Literal(Literal::Boolean(a)), Expression::Literal(Literal::Boolean(b))) => {
+            Some(Some(a == b))
+        }
+        // Different scalar types (no nulls) → false
+        (Expression::Literal(_), Expression::Literal(_)) => Some(Some(false)),
+        // Both lists
+        (Expression::List(a), Expression::List(b)) => {
+            if a.len() != b.len() {
+                return Some(Some(false));
+            }
+            let mut result: Option<bool> = Some(true);
+            for (ax, bx) in a.iter().zip(b.iter()) {
+                let pair = try_eval_literal_eq(ax, bx)?; // None = can't evaluate
+                result = tval_and(result, pair);
+                if result == Some(false) {
+                    break;
+                }
+            }
+            Some(result)
+        }
+        // List vs scalar (non-null) → false
+        (Expression::List(_), Expression::Literal(_))
+        | (Expression::Literal(_), Expression::List(_)) => Some(Some(false)),
+        // Both maps
+        (Expression::Map(a), Expression::Map(b)) => {
+            // Build key sets
+            let a_keys: Vec<&str> = a.iter().map(|(k, _)| k.as_str()).collect();
+            let b_keys: Vec<&str> = b.iter().map(|(k, _)| k.as_str()).collect();
+            // Key sets must match exactly (order-insensitive)
+            let mut a_sorted = a_keys.clone();
+            a_sorted.sort_unstable();
+            let mut b_sorted = b_keys.clone();
+            b_sorted.sort_unstable();
+            if a_sorted != b_sorted {
+                return Some(Some(false));
+            }
+            // Compare values for each key using 3VL
+            let mut result: Option<bool> = Some(true);
+            for (key, a_val) in a.iter() {
+                if let Some((_, b_val)) = b.iter().find(|(k, _)| k == key) {
+                    let pair = try_eval_literal_eq(a_val, b_val)?;
+                    result = tval_and(result, pair);
+                    if result == Some(false) {
+                        break;
+                    }
+                }
+            }
+            Some(result)
+        }
+        // Map vs scalar
+        (Expression::Map(_), Expression::Literal(_))
+        | (Expression::Literal(_), Expression::Map(_)) => Some(Some(false)),
+        // Can't evaluate at compile time
         _ => None,
     }
 }
