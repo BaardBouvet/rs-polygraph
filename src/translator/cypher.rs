@@ -1543,6 +1543,21 @@ impl TranslationState {
                     }
 
                     if let Some(vars) = project_vars {
+                        // Build property substitutions for ORDER BY before projection.
+                        if r.order_by.is_some() {
+                            if let crate::ast::cypher::ReturnItems::Explicit(ref items) = r.items {
+                                for (item, pvar) in items.iter().zip(vars.iter()) {
+                                    if let Expression::Property(base, key) = &item.expression {
+                                        if let Expression::Variable(base_var) = base.as_ref() {
+                                            self.with_prop_subst.insert(
+                                                (base_var.clone(), key.clone()),
+                                                pvar.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         current = GraphPattern::Project {
                             inner: Box::new(current),
                             variables: vars,
@@ -1561,6 +1576,8 @@ impl TranslationState {
                         r.limit.as_ref(),
                         &mut extra_triples,
                     )?;
+                    // Clear ORDER BY property substitutions.
+                    self.with_prop_subst.clear();
                 }
                 Clause::Unwind(u) => {
                     // UNWIND expr AS var → VALUES ?var { values... }
