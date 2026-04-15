@@ -343,8 +343,9 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                     let projection_has_agg = items.iter().any(|i| expr_contains_aggregate(&i.expression));
 
                     // UndefinedVariable check in ORDER BY (using pre-projection scope).
+                    // Always check when bound_vars is non-empty (we have some scope context).
                     if let Some(ob) = &w.order_by {
-                        if seen_match {
+                        if !bound_vars.is_empty() {
                             fn collect_free_vars_ob(expr: &Expression, vars: &mut Vec<String>) {
                                 match expr {
                                     Expression::Variable(v) => vars.push(v.clone()),
