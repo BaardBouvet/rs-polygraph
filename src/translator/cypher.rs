@@ -3926,6 +3926,29 @@ impl TranslationState {
     > {
         match &item.expression {
             Expression::Variable(name) => {
+                // Special case: for untyped edge variables, project the predicate variable
+                // rather than the plain edge name (which is unbound in SPARQL).  This allows
+                // subsequent MATCH clauses to join on the same predicate variable and thus
+                // correctly constrain the edge type to the originally-matched relationship.
+                if let Some(edge) = self.edge_map.get(name.as_str()) {
+                    if let Some(pred_var) = edge.pred_var.clone() {
+                        let alias_str = item.alias.as_deref().unwrap_or(name.as_str());
+                        let expected_pred = format!("{alias_str}_pred");
+                        if pred_var.as_str() == expected_pred {
+                            // Alias matches the generated pred_var name — project it directly.
+                            return Ok((pred_var, None, None));
+                        } else {
+                            // Different alias: BIND(?old_pred AS ?new_alias_pred).
+                            let new_pred = Variable::new_unchecked(expected_pred);
+                            return Ok((
+                                new_pred.clone(),
+                                None,
+                                Some(SparExpr::Variable(pred_var)),
+                            ));
+                        }
+                    }
+                    // Typed edge (pred is a NamedNode): fall through to default handling.
+                }
                 let var = Variable::new_unchecked(name.clone());
                 if let Some(alias) = &item.alias {
                     if alias == name {
@@ -3941,6 +3964,25 @@ impl TranslationState {
             }
             Expression::Property(base_expr, key) => {
                 // n.prop or r.prop [AS alias] → add BGP triple + projected var.
+                // First check compile-time map resolution for cases like (list[n]).key
+                if let Some(map_pairs) = self.try_resolve_to_literal_map(base_expr) {
+                    let result_var = match &item.alias {
+                        Some(alias) => Variable::new_unchecked(alias.clone()),
+                        None => self.fresh_var(&format!("__map_{key}")),
+                    };
+                    if let Some((_, val_expr)) = map_pairs.iter().find(|(k, _)| k == key) {
+                        let val_expr2 = val_expr.clone();
+                        if matches!(val_expr2, Expression::Literal(Literal::Null)) {
+                            // null value → unbound (null) result
+                            return Ok((result_var, None, None));
+                        }
+                        let sparql_expr = self.translate_expr(&val_expr2, &mut Vec::new())?;
+                        return Ok((result_var, None, Some(sparql_expr)));
+                    } else {
+                        // Key not found → null (unbound result)
+                        return Ok((result_var, None, None));
+                    }
+                }
                 let base_var = self.extract_variable(base_expr)?;
                 let var_name = base_var.as_str().to_string();
                 // Check if base is a virtual map alias from head(collect({...})).
