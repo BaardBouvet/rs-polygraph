@@ -813,3 +813,80 @@ fn debug_rename_order_by() {
     let s = transpile(q);
     println!("SPARQL:\n{}", s);
 }
+
+#[test]
+fn debug_agg_sort() {
+    let q = r#"MATCH (a:A)
+WITH a.num2 % 3 AS mod, sum(a.num + a.num2) AS sum
+  ORDER BY sum(a.num + a.num2)
+  LIMIT 2
+RETURN mod, sum"#;
+    let s = transpile(q);
+    println!("SPARQL:\n{}", s);
+}
+
+#[test]
+fn debug_rel_equality() {
+    // Tests if relationship variable equality works after WITH projection
+    use polygraph::Transpiler;
+    use oxigraph::{sparql::{QueryResults, SparqlEvaluator}, store::Store};
+    let q = r#"MATCH ()-[a]->()
+WITH a
+MATCH ()-[b]->()
+WHERE a = b
+RETURN count(b)"#;
+    let s = Transpiler::cypher_to_sparql(q, &ENGINE).map(|r| r.sparql).unwrap_or_else(|e| format!("ERROR: {e}"));
+    println!("SPARQL:\n{}", s);
+    let store = Store::new().unwrap();
+    store.load_from_reader(oxigraph::io::RdfFormat::Turtle, b"@prefix : <http://polygraph.example/> .\n:a :T :b .\n" as &[u8]).unwrap();
+    #[expect(deprecated)]
+    match store.query_opt(&s, SparqlEvaluator::new()) {
+        Ok(QueryResults::Solutions(mut sols)) => {
+            for r in &mut sols { println!("row: {:?}", r); }
+        }
+        Err(e) => println!("Error: {}", e),
+        _ => {}
+    }
+}
+
+
+#[test]
+fn debug_string_contains_type() {
+    let q = "WITH [1, 3.14, true, [], {}, null] AS operands
+UNWIND operands AS op1
+UNWIND operands AS op2
+WITH op1 CONTAINS op2 AS v
+RETURN v, count(*)";
+    let result = Transpiler::cypher_to_sparql(q, &ENGINE);
+    match result {
+        Ok(r) => println!("SPARQL:\n{}", r.sparql),
+        Err(e) => println!("Error: {}", e),
+    }
+}
+
+#[test]
+fn debug_pattern_comprehension() {
+    let q = "MATCH (n:X) RETURN n, size([(n)--() | 1]) > 0 AS b";
+    let result = Transpiler::cypher_to_sparql(q, &ENGINE);
+    match result {
+        Ok(r) => println!("SPARQL:\n{}", r.sparql),
+        Err(e) => println!("Error: {}", e),
+    }
+}
+
+#[test]
+fn debug_agg5_2() {
+    let q = "OPTIONAL MATCH (f:DoesExist)
+OPTIONAL MATCH (n:DoesNotExist)
+RETURN collect(DISTINCT n.num) AS a, collect(DISTINCT f.num) AS b";
+    let result = Transpiler::cypher_to_sparql(q, &ENGINE);
+    match result {
+        Ok(r) => {
+            println!("SPARQL:\n{}", r.sparql);
+            // Should use sub-SELECT with FILTER(BOUND(?n)) so unbound n doesn't wildcard-match
+            assert!(r.sparql.contains("SELECT ?n"), "Expected SELECT ?n sub-select in SPARQL");
+            assert!(r.sparql.contains("FILTER(BOUND(?n))"), "Expected FILTER(BOUND(?n)) in SPARQL");
+        }
+        Err(e) => panic!("Error: {}", e),
+    }
+}

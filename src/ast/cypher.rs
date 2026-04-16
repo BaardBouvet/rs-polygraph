@@ -307,6 +307,13 @@ pub enum Expression {
         predicate: Option<Box<Expression>>,
         projection: Option<Box<Expression>>,
     },
+    /// Pattern comprehension: `[(n)-[r]->(m) WHERE pred | projection]`.
+    PatternComprehension {
+        alias: Option<Ident>,
+        pattern: Pattern,
+        predicate: Option<Box<Expression>>,
+        projection: Box<Expression>,
+    },
 }
 
 /// Quantifier kind for `all / any / none / single` expressions.

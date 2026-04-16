@@ -852,9 +852,7 @@ fn build_comparison_suffix(
             Ok(Expression::Comparison(Box::new(lhs), op, Box::new(rhs)))
         }
         Rule::regex_op => {
-            let rhs_pair = children
-                .next()
-                .expect("=~ is followed by add_sub_expr");
+            let rhs_pair = children.next().expect("=~ is followed by add_sub_expr");
             let rhs = build_add_sub_expr(rhs_pair)?;
             Ok(Expression::Comparison(
                 Box::new(lhs),
@@ -977,11 +975,42 @@ fn build_unary_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
             // but when negated it is exactly representable as i64::MIN.
             let raw = operand.as_str().trim();
             const MIN_INT_MAG: u64 = i64::MAX as u64 + 1;
-            let is_min_int = raw.parse::<u64>().map(|n| n == MIN_INT_MAG).unwrap_or(false)
-                || raw.starts_with("0x").then(|| u64::from_str_radix(&raw[2..], 16).map(|n| n == MIN_INT_MAG).unwrap_or(false)).unwrap_or(false)
-                || raw.starts_with("0X").then(|| u64::from_str_radix(&raw[2..], 16).map(|n| n == MIN_INT_MAG).unwrap_or(false)).unwrap_or(false)
-                || raw.starts_with("0o").then(|| u64::from_str_radix(&raw[2..], 8).map(|n| n == MIN_INT_MAG).unwrap_or(false)).unwrap_or(false)
-                || raw.starts_with("0O").then(|| u64::from_str_radix(&raw[2..], 8).map(|n| n == MIN_INT_MAG).unwrap_or(false)).unwrap_or(false);
+            let is_min_int = raw
+                .parse::<u64>()
+                .map(|n| n == MIN_INT_MAG)
+                .unwrap_or(false)
+                || raw
+                    .starts_with("0x")
+                    .then(|| {
+                        u64::from_str_radix(&raw[2..], 16)
+                            .map(|n| n == MIN_INT_MAG)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+                || raw
+                    .starts_with("0X")
+                    .then(|| {
+                        u64::from_str_radix(&raw[2..], 16)
+                            .map(|n| n == MIN_INT_MAG)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+                || raw
+                    .starts_with("0o")
+                    .then(|| {
+                        u64::from_str_radix(&raw[2..], 8)
+                            .map(|n| n == MIN_INT_MAG)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false)
+                || raw
+                    .starts_with("0O")
+                    .then(|| {
+                        u64::from_str_radix(&raw[2..], 8)
+                            .map(|n| n == MIN_INT_MAG)
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
             if is_min_int {
                 return Ok(Expression::Literal(Literal::Integer(i64::MIN)));
             }
@@ -1028,8 +1057,8 @@ fn build_prop_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
                 // Use the source span to distinguish start (before "..") from
                 // end (after ".."). For "[..x]" the single expression is the end;
                 // for "[x..]" it is the start; for "[x..y]" both are present.
-                let dotdot_abs = postfix.as_span().start()
-                    + postfix.as_str().find("..").unwrap_or(0);
+                let dotdot_abs =
+                    postfix.as_span().start() + postfix.as_str().find("..").unwrap_or(0);
                 for child in postfix.into_inner() {
                     if child.as_rule() == Rule::expression {
                         if child.as_span().start() < dotdot_abs {
@@ -1121,6 +1150,7 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
         Rule::function_call => build_function_call(inner),
         Rule::label_check => build_label_check(inner),
         Rule::list_comprehension => build_list_comprehension(inner),
+        Rule::pattern_comprehension => build_pattern_comprehension(inner),
         Rule::pattern_predicate => {
             // pattern_predicate = { node_pattern ~ (rel_pattern ~ node_pattern)+ }
             // Build elements directly since this rule doesn't use chain_link wrapping.
@@ -1171,7 +1201,9 @@ fn build_case_expression(pair: Pair<Rule>) -> Result<Expression, PolygraphError>
     for child in pair.into_inner() {
         match child.as_rule() {
             Rule::kw_CASE | Rule::kw_END => {}
-            Rule::kw_ELSE => { last_was_kw_else = true; }
+            Rule::kw_ELSE => {
+                last_was_kw_else = true;
+            }
             Rule::case_alternative => {
                 // case_alternative = { kw_WHEN ~ expression ~ kw_THEN ~ expression }
                 let mut exprs: Vec<Expression> = Vec::new();
@@ -1194,11 +1226,17 @@ fn build_case_expression(pair: Pair<Rule>) -> Result<Expression, PolygraphError>
                 }
                 last_was_kw_else = false;
             }
-            _ => { last_was_kw_else = false; }
+            _ => {
+                last_was_kw_else = false;
+            }
         }
     }
     let _ = found_else;
-    Ok(Expression::CaseExpression { operand, whens, else_expr })
+    Ok(Expression::CaseExpression {
+        operand,
+        whens,
+        else_expr,
+    })
 }
 
 fn build_quantifier_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
@@ -1223,8 +1261,12 @@ fn build_quantifier_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError>
                         _ => {}
                     }
                 }
-                if !exprs.is_empty() { list = Some(exprs.remove(0)); }
-                if !exprs.is_empty() { predicate = Some(Box::new(exprs.remove(0))); }
+                if !exprs.is_empty() {
+                    list = Some(exprs.remove(0));
+                }
+                if !exprs.is_empty() {
+                    predicate = Some(Box::new(exprs.remove(0)));
+                }
             }
             _ => {}
         }
@@ -1256,8 +1298,12 @@ fn build_list_comprehension(pair: Pair<Rule>) -> Result<Expression, PolygraphErr
                         _ => {}
                     }
                 }
-                if !exprs.is_empty() { list = Some(exprs.remove(0)); }
-                if !exprs.is_empty() { predicate = Some(Box::new(exprs.remove(0))); }
+                if !exprs.is_empty() {
+                    list = Some(exprs.remove(0));
+                }
+                if !exprs.is_empty() {
+                    predicate = Some(Box::new(exprs.remove(0)));
+                }
                 filter_done = true;
             }
             Rule::expression if filter_done => {
@@ -1272,6 +1318,50 @@ fn build_list_comprehension(pair: Pair<Rule>) -> Result<Expression, PolygraphErr
         list: Box::new(list.expect("list_comprehension has list")),
         predicate,
         projection,
+    })
+}
+
+fn build_pattern_comprehension(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
+    // pattern_comprehension = { "[" ~ (variable ~ "=")? ~ node_pattern_chain ~ (kw_WHERE ~ expression)? ~ "|" ~ expression ~ "]" }
+    let mut alias: Option<String> = None;
+    let mut elements: Option<Vec<PatternElement>> = None;
+    let mut predicate: Option<Box<Expression>> = None;
+    let mut projection: Option<Box<Expression>> = None;
+    let mut after_chain = false;
+    for child in pair.into_inner() {
+        match child.as_rule() {
+            Rule::variable if elements.is_none() => {
+                alias = Some(ident_text(&child));
+            }
+            Rule::node_pattern_chain => {
+                elements = Some(build_node_pattern_chain(child)?);
+                after_chain = true;
+            }
+            Rule::expression if after_chain && predicate.is_none() => {
+                // Could be the WHERE predicate (first expression after chain) or the projection.
+                // We distinguish by position: kw_WHERE consumes nothing in the inner pairs,
+                // so we see two expression children — first is WHERE pred, second is projection.
+                predicate = Some(Box::new(build_expression(child)?));
+            }
+            Rule::expression => {
+                projection = Some(Box::new(build_expression(child)?));
+            }
+            _ => {}
+        }
+    }
+    // If only one expression was seen, it's the projection (no WHERE clause).
+    if predicate.is_some() && projection.is_none() {
+        projection = predicate.take();
+    }
+    let pattern = Pattern {
+        variable: alias.clone(),
+        elements: elements.expect("pattern_comprehension has pattern"),
+    };
+    Ok(Expression::PatternComprehension {
+        alias,
+        pattern,
+        predicate,
+        projection: projection.expect("pattern_comprehension has projection"),
     })
 }
 

@@ -17,6 +17,7 @@ All design documents live in `plans/`. Each file carries a **Status** and **Upda
 | [result-mapping.md](plans/result-mapping.md) | in progress | SPARQL results → openCypher values hydration API |
 | [tck-full-plan.md](plans/tck-full-plan.md) | in progress | Full 3,650-scenario TCK expansion (Phases A–D) |
 | [target-engines.md](plans/target-engines.md) | reference | SPARQL engine capability analysis (`TargetEngine` trait) |
+| [parser-extraction.md](plans/parser-extraction.md) | planned | Extract parser/AST into standalone crate for non-SPARQL reuse |
 | [pg-extension-protocol.md](plans/pg-extension-protocol.md) | planned | Postgres triplestore custom SPARQL functions for path decomposition |
 
 **Status values**: `complete` — implemented and stable; `in progress` — actively being built; `planned` — future work, not yet started; `reference` — living document with no discrete completion state.

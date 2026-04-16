@@ -209,6 +209,7 @@ atom        = { float_literal
               | quantifier_expr
               | function_call
               | label_check
+              | pattern_comprehension
               | list_comprehension
               | list_literal
               | map_literal
@@ -226,6 +227,10 @@ quantifier_expr = { (kw_ALL | kw_ANY | kw_NONE | kw_SINGLE) ~ "(" ~ filter_expre
 
 // List comprehension: [x IN list WHERE pred | projection]
 list_comprehension = { "[" ~ filter_expression ~ ("|" ~ expression)? ~ "]" }
+
+// Pattern comprehension: [(n)-[r]->(m) | projection] or [var = (n)->(m) WHERE pred | proj]
+// Counts / collects values for each match of an inline pattern.
+pattern_comprehension = { "[" ~ (variable ~ "=")? ~ node_pattern_chain ~ (kw_WHERE ~ expression)? ~ "|" ~ expression ~ "]" }
 
 // Pattern predicate in expression context: (a)-[:T]->(b:Label) tests for path existence.
 pattern_predicate = { node_pattern ~ (rel_pattern ~ node_pattern)+ }

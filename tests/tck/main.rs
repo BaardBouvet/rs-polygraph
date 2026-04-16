@@ -141,10 +141,20 @@ fn cypher_float_str(f: f64) -> String {
                 let int_len = int_part.len() as i32 + exp;
                 let result = if int_len >= all_digits.len() as i32 {
                     let zeros = (int_len - all_digits.len() as i32) as usize;
-                    format!("{}{}{}.0", if neg { "-" } else { "" }, all_digits, "0".repeat(zeros))
+                    format!(
+                        "{}{}{}.0",
+                        if neg { "-" } else { "" },
+                        all_digits,
+                        "0".repeat(zeros)
+                    )
                 } else if int_len <= 0 {
                     let leading = (-int_len) as usize;
-                    format!("{}0.{}{}", if neg { "-" } else { "" }, "0".repeat(leading), all_digits)
+                    format!(
+                        "{}0.{}{}",
+                        if neg { "-" } else { "" },
+                        "0".repeat(leading),
+                        all_digits
+                    )
                 } else {
                     let (i_d, f_d) = all_digits.split_at(int_len as usize);
                     if f_d.is_empty() {
@@ -350,7 +360,12 @@ fn emit_create_pattern(
     counter: &mut usize,
 ) {
     emit_create_pattern_with_bindings(
-        pattern, triples, node_map, counter, &Default::default(), &Default::default(),
+        pattern,
+        triples,
+        node_map,
+        counter,
+        &Default::default(),
+        &Default::default(),
     );
 }
 
@@ -377,7 +392,9 @@ fn emit_create_pattern_with_bindings(
                 }
                 if let Some(props) = &n.properties {
                     for (key, val_expr) in props {
-                        if let Some(lit) = expr_to_sparql_lit_with_bindings(val_expr, bindings, node_props) {
+                        if let Some(lit) =
+                            expr_to_sparql_lit_with_bindings(val_expr, bindings, node_props)
+                        {
                             triples.push(format!("{bnode} <{BASE}{key}> {lit} ."));
                             has_triple = true;
                         }
@@ -407,7 +424,9 @@ fn emit_create_pattern_with_bindings(
                             // Emit RDF-star annotated triples for relationship properties.
                             if let Some(props) = &rel.properties {
                                 for (key, val_expr) in props {
-                                    if let Some(lit) = expr_to_sparql_lit_with_bindings(val_expr, bindings, node_props) {
+                                    if let Some(lit) = expr_to_sparql_lit_with_bindings(
+                                        val_expr, bindings, node_props,
+                                    ) {
                                         triples.push(format!(
                                             "<< {s} <{BASE}{rt}> {o} >> <{BASE}{key}> {lit} ."
                                         ));
@@ -449,7 +468,13 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                             Expression::Literal(Literal::Integer(end)),
                         ) = (&args[0], &args[1])
                         {
-                            let step = if let Some(Expression::Literal(Literal::Integer(s))) = args.get(2) { *s } else { 1 };
+                            let step = if let Some(Expression::Literal(Literal::Integer(s))) =
+                                args.get(2)
+                            {
+                                *s
+                            } else {
+                                1
+                            };
                             let mut vals = Vec::new();
                             let mut i = *start;
                             while (step > 0 && i <= *end) || (step < 0 && i >= *end) {
@@ -492,9 +517,8 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                             if let PatternElement::Node(n) = elem {
                                 if let Some(var) = &n.variable {
                                     if let Some(props) = &n.properties {
-                                        let entry = node_literal_props
-                                            .entry(var.clone())
-                                            .or_default();
+                                        let entry =
+                                            node_literal_props.entry(var.clone()).or_default();
                                         for (k, v) in props {
                                             entry.insert(k.clone(), v.clone());
                                         }
