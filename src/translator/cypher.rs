@@ -1436,6 +1436,10 @@ struct TranslationState {
     /// Variables assigned a literal-list value by a WITH clause.
     /// Used so that `UNWIND list_var AS x` can be expanded at compile time.
     with_list_vars: std::collections::HashMap<String, crate::ast::cypher::Expression>,
+    /// Variables produced by `UNWIND outer_list AS x` where outer_list is a
+    /// list-of-lists.  Maps the produced variable name to the outer list expression.
+    /// Enables compile-time expansion of subsequent `UNWIND x AS y` clauses.
+    unwind_list_source: std::collections::HashMap<String, crate::ast::cypher::Expression>,
     /// Named path variables → hop count (for fixed-length paths).
     /// Used to resolve `length(p)` at compile time.
     path_hops: std::collections::HashMap<String, u64>,
@@ -1522,6 +1526,7 @@ impl TranslationState {
             unwind_null_vars: Default::default(),
             unwind_mixed_null_vars: Default::default(),
             pending_subqueries: Vec::new(),
+            unwind_list_source: Default::default(),
         }
     }
 
@@ -2776,8 +2781,11 @@ impl TranslationState {
                                 .retain(|v| with_output_names.contains(v.as_str()));
                         }
                         // Track literal-list-valued WITH items for compile-time
-                        // UNWIND expansion.
-                        self.with_list_vars.clear();
+                        // UNWIND expansion.  Save the current map BEFORE clearing so
+                        // pass-through variable aliases can re-register their bindings.
+                        let prev_list_vars = std::mem::take(&mut self.with_list_vars);
+                        // Also clear the double-UNWIND source tracking — WITH creates a new scope.
+                        self.unwind_list_source.clear();
                         if let crate::ast::cypher::ReturnItems::Explicit(ref items) = w.items {
                             for item in items {
                                 let alias = match &item.alias {
@@ -2795,8 +2803,10 @@ impl TranslationState {
                                         self.with_list_vars.insert(alias, item.expression.clone());
                                     }
                                     Expression::Variable(v) => {
+                                        // Look up from the SAVED pre-clear map so pass-through
+                                        // aliases like `WITH inputList, ...` keep their binding.
                                         if let Some(existing) =
-                                            self.with_list_vars.get(v.as_str()).cloned()
+                                            prev_list_vars.get(v.as_str()).cloned()
                                         {
                                             self.with_list_vars.insert(alias, existing);
                                         }
@@ -7428,6 +7438,14 @@ impl TranslationState {
             Expression::Variable(list_var) => {
                 // UNWIND variable — check if it was defined as a literal list in a WITH clause.
                 if let Some(list_expr) = self.with_list_vars.get(list_var.as_str()).cloned() {
+                    // If the source is a list-of-lists, register the produced variable so
+                    // a subsequent `UNWIND var AS inner` can be expanded at compile time.
+                    if let Expression::List(items) = &list_expr {
+                        if items.iter().any(|e| matches!(e, Expression::List(_))) {
+                            self.unwind_list_source
+                                .insert(u.variable.clone(), list_expr.clone());
+                        }
+                    }
                     // Recursively expand as if the expression were written inline.
                     let inline = list_expr;
                     return self.translate_unwind_clause(
@@ -7438,6 +7456,45 @@ impl TranslationState {
                         current,
                         extra,
                     );
+                }
+                // Check if this variable was produced by a prior UNWIND of a list-of-lists.
+                // In that case we can expand `UNWIND x AS y` by generating a correlated
+                // VALUES(?x ?y) that contains all (sub-list-encoding, element) pairs.
+                if let Some(outer_list) = self.unwind_list_source.get(list_var.as_str()).cloned() {
+                    if let Expression::List(sub_lists) = &outer_list {
+                        let x_var =
+                            Variable::new_unchecked(list_var.clone());
+                        let y_var =
+                            Variable::new(u.variable.as_str()).map_err(|_| {
+                                PolygraphError::UnsupportedFeature {
+                                    feature: "invalid variable name in UNWIND".to_string(),
+                                }
+                            })?;
+                        let mut rows: Vec<Vec<Option<GroundTerm>>> = Vec::new();
+                        for sub_list_expr in sub_lists {
+                            let x_encoded = serialize_list_element(sub_list_expr);
+                            let x_gt = GroundTerm::Literal(SparLit::new_simple_literal(x_encoded));
+                            if let Expression::List(elements) = sub_list_expr {
+                                for elem in elements {
+                                    match elem {
+                                        Expression::Literal(Literal::Null) => {
+                                            rows.push(vec![Some(x_gt.clone()), None]);
+                                        }
+                                        _ => {
+                                            let tp = self.expr_to_ground_term(elem)?;
+                                            let gt = term_pattern_to_ground(tp)?;
+                                            rows.push(vec![Some(x_gt.clone()), Some(gt)]);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let values = GraphPattern::Values {
+                            variables: vec![x_var, y_var],
+                            bindings: rows,
+                        };
+                        return Ok(join_patterns(current, values));
+                    }
                 }
                 // Fall through: SPARQL 1.1 has no native list iteration.
                 let _ = extra;
@@ -7658,6 +7715,199 @@ impl TranslationState {
                     feature: "complex negation in UNWIND list".to_string(),
                 }),
             },
+            // Temporal constructors with literal map arguments — compile-time evaluation.
+            // Supported: date({year, month, day}), localtime({hour, minute, [second, [nanosecond]]}),
+            //            localdatetime({year, month, day, hour, minute, [second, [nanosecond]]})
+            // The produced string literals sort correctly lexicographically (ISO 8601 format).
+            Expression::FunctionCall { name, args, .. } => {
+                let fname = name.to_ascii_lowercase();
+                // Helper: extract an integer literal from map pairs by key (case-insensitive).
+                let get_int =
+                    |pairs: &Vec<(String, Expression)>, key: &str| -> Option<i64> {
+                        pairs.iter().find_map(|(k, v)| {
+                            if k.eq_ignore_ascii_case(key) {
+                                if let Expression::Literal(Literal::Integer(n)) = v {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                // Helper: extract a string literal from map pairs by key (case-insensitive).
+                let get_str =
+                    |pairs: &Vec<(String, Expression)>, key: &str| -> Option<String> {
+                        pairs.iter().find_map(|(k, v)| {
+                            if k.eq_ignore_ascii_case(key) {
+                                if let Expression::Literal(Literal::String(s)) = v {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                    };
+                match fname.as_str() {
+                    "date" => {
+                        if let Some(Expression::Map(pairs)) = args.first() {
+                            if let (Some(y), Some(m), Some(d)) = (
+                                get_int(pairs, "year"),
+                                get_int(pairs, "month"),
+                                get_int(pairs, "day"),
+                            ) {
+                                let s = format!("{y:04}-{m:02}-{d:02}");
+                                return Ok(SparLit::new_simple_literal(s).into());
+                            }
+                        }
+                        Err(PolygraphError::UnsupportedFeature {
+                            feature: "date() with non-literal map arguments".to_string(),
+                        })
+                    }
+                    "localtime" => {
+                        if let Some(Expression::Map(pairs)) = args.first() {
+                            if let (Some(h), Some(min)) =
+                                (get_int(pairs, "hour"), get_int(pairs, "minute"))
+                            {
+                                let s =
+                                    match (get_int(pairs, "second"), get_int(pairs, "nanosecond"))
+                                    {
+                                        (None, _) => format!("{h:02}:{min:02}"),
+                                        (Some(sec), None) => {
+                                            format!("{h:02}:{min:02}:{sec:02}")
+                                        }
+                                        (Some(sec), Some(ns)) => {
+                                            format!("{h:02}:{min:02}:{sec:02}.{ns:09}")
+                                        }
+                                    };
+                                return Ok(SparLit::new_simple_literal(s).into());
+                            }
+                        }
+                        Err(PolygraphError::UnsupportedFeature {
+                            feature: "localtime() with non-literal map arguments".to_string(),
+                        })
+                    }
+                    "localdatetime" => {
+                        if let Some(Expression::Map(pairs)) = args.first() {
+                            if let (Some(y), Some(mo), Some(d), Some(h), Some(min)) = (
+                                get_int(pairs, "year"),
+                                get_int(pairs, "month"),
+                                get_int(pairs, "day"),
+                                get_int(pairs, "hour"),
+                                get_int(pairs, "minute"),
+                            ) {
+                                let s = match (
+                                    get_int(pairs, "second"),
+                                    get_int(pairs, "nanosecond"),
+                                ) {
+                                    (None, _) => {
+                                        format!("{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}")
+                                    }
+                                    (Some(sec), None) => {
+                                        format!(
+                                            "{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}:{sec:02}"
+                                        )
+                                    }
+                                    (Some(sec), Some(ns)) => {
+                                        format!(
+                                            "{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}:{sec:02}.{ns:09}"
+                                        )
+                                    }
+                                };
+                                return Ok(SparLit::new_simple_literal(s).into());
+                            }
+                        }
+                        Err(PolygraphError::UnsupportedFeature {
+                            feature: "localdatetime() with non-literal map arguments".to_string(),
+                        })
+                    }
+                    "time" => {
+                        // time({hour, minute, [second, [nanosecond,]] timezone}) —
+                        // stored as xsd:time typed literal for timezone-aware ORDER BY.
+                        // Seconds are always included in the stored form (xsd:time requires HH:MM:SS).
+                        if let Some(Expression::Map(pairs)) = args.first() {
+                            if let (Some(h), Some(min), Some(tz)) = (
+                                get_int(pairs, "hour"),
+                                get_int(pairs, "minute"),
+                                get_str(pairs, "timezone"),
+                            ) {
+                                let s = match (
+                                    get_int(pairs, "second"),
+                                    get_int(pairs, "nanosecond"),
+                                ) {
+                                    (None, _) => format!("{h:02}:{min:02}:00{tz}"),
+                                    (Some(sec), None) => {
+                                        format!("{h:02}:{min:02}:{sec:02}{tz}")
+                                    }
+                                    (Some(sec), Some(ns)) => {
+                                        format!("{h:02}:{min:02}:{sec:02}.{ns:09}{tz}")
+                                    }
+                                };
+                                return Ok(SparLit::new_typed_literal(
+                                    s,
+                                    NamedNode::new_unchecked(
+                                        "http://www.w3.org/2001/XMLSchema#time",
+                                    ),
+                                )
+                                .into());
+                            }
+                        }
+                        Err(PolygraphError::UnsupportedFeature {
+                            feature: "time() with non-literal map arguments".to_string(),
+                        })
+                    }
+                    "datetime" => {
+                        // datetime({year, month, day, hour, minute, [second, [nanosecond,]] timezone})
+                        // stored as xsd:dateTime typed literal for timezone-aware ORDER BY.
+                        if let Some(Expression::Map(pairs)) = args.first() {
+                            if let (Some(y), Some(mo), Some(d), Some(h), Some(min), Some(tz)) = (
+                                get_int(pairs, "year"),
+                                get_int(pairs, "month"),
+                                get_int(pairs, "day"),
+                                get_int(pairs, "hour"),
+                                get_int(pairs, "minute"),
+                                get_str(pairs, "timezone"),
+                            ) {
+                                let s = match (
+                                    get_int(pairs, "second"),
+                                    get_int(pairs, "nanosecond"),
+                                ) {
+                                    (None, _) => {
+                                        format!("{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}:00{tz}")
+                                    }
+                                    (Some(sec), None) => {
+                                        format!(
+                                            "{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}:{sec:02}{tz}"
+                                        )
+                                    }
+                                    (Some(sec), Some(ns)) => {
+                                        format!(
+                                            "{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}:{sec:02}.{ns:09}{tz}"
+                                        )
+                                    }
+                                };
+                                return Ok(SparLit::new_typed_literal(
+                                    s,
+                                    NamedNode::new_unchecked(
+                                        "http://www.w3.org/2001/XMLSchema#dateTime",
+                                    ),
+                                )
+                                .into());
+                            }
+                        }
+                        Err(PolygraphError::UnsupportedFeature {
+                            feature: "datetime() with non-literal map arguments".to_string(),
+                        })
+                    }
+                    _ => Err(PolygraphError::UnsupportedFeature {
+                        feature: "complex expression in inline property map (Phase 4)"
+                            .to_string(),
+                    }),
+                }
+            }
             _ => Err(PolygraphError::UnsupportedFeature {
                 feature: "complex expression in inline property map (Phase 4)".to_string(),
             }),

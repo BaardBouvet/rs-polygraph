@@ -55,21 +55,13 @@ fn run_query_verbose(store: &Store, name: &str, q: &str) {
 
 fn main() {
     let store = Store::new().unwrap();
-    let queries = vec![
-        ("= IS NULL [23]", "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b WITH collect((a = b IS NULL) = (a = (b IS NULL))) AS eq, collect((a = b IS NULL) <> ((a = b) IS NULL)) AS neq RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"),
-        ("= IS NOT NULL [23]", "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b WITH collect((a = b IS NOT NULL) = (a = (b IS NOT NULL))) AS eq, collect((a = b IS NOT NULL) <> ((a = b) IS NOT NULL)) AS neq RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"),
-        ("<= IS NULL [23]", "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b WITH collect((a <= b IS NULL) = (a <= (b IS NULL))) AS eq, collect((a <= b IS NULL) <> ((a <= b) IS NULL)) AS neq RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"),
-        ("<= IS NOT NULL [23]", "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b WITH collect((a <= b IS NOT NULL) = (a <= (b IS NOT NULL))) AS eq, collect((a <= b IS NOT NULL) <> ((a <= b) IS NOT NULL)) AS neq RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"),
-        (">= IS NULL [23]", "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b WITH collect((a >= b IS NULL) = (a >= (b IS NULL))) AS eq, collect((a >= b IS NULL) <> ((a >= b) IS NULL)) AS neq RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"),
-        (">= IS NOT NULL [23]", "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b WITH collect((a >= b IS NOT NULL) = (a >= (b IS NOT NULL))) AS eq, collect((a >= b IS NOT NULL) <> ((a >= b) IS NOT NULL)) AS neq RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"),
-        ("< IS NULL [23]", "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b WITH collect((a < b IS NULL) = (a < (b IS NULL))) AS eq, collect((a < b IS NULL) <> ((a < b) IS NULL)) AS neq RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"),
-        ("< IS NOT NULL [23]", "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b WITH collect((a < b IS NOT NULL) = (a < (b IS NOT NULL))) AS eq, collect((a < b IS NOT NULL) <> ((a < b) IS NOT NULL)) AS neq RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"),
-        ("> IS NULL [23]", "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b WITH collect((a > b IS NULL) = (a > (b IS NULL))) AS eq, collect((a > b IS NULL) <> ((a > b) IS NULL)) AS neq RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"),
-        ("> IS NOT NULL [23]", "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b WITH collect((a > b IS NOT NULL) = (a > (b IS NOT NULL))) AS eq, collect((a > b IS NOT NULL) <> ((a > b) IS NOT NULL)) AS neq RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"),
-        ("<> IS NULL [23]", "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b WITH collect((a <> b IS NULL) = (a <> (b IS NULL))) AS eq, collect((a <> b IS NULL) <> ((a <> b) IS NULL)) AS neq RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"),
-        ("<> IS NOT NULL [23]", "UNWIND [true, false, null] AS a UNWIND [true, false, null] AS b WITH collect((a <> b IS NOT NULL) = (a <> (b IS NOT NULL))) AS eq, collect((a <> b IS NOT NULL) <> ((a <> b) IS NOT NULL)) AS neq RETURN all(x IN eq WHERE x) AND any(x IN neq WHERE x) AS result"),
-    ];
-    for (name, q) in queries {
-        run_query(&store, name, q);
+    
+    // With7[1] - test: variable renaming across WITHs
+    let q = "MATCH (a:A)-[r:REL]->(b:B) WITH a AS b, b AS tmp, r AS r WITH b AS a, r LIMIT 1 MATCH (a)-[r]->(b) RETURN a, r, b";
+    match Transpiler::cypher_to_sparql(q, &ENGINE) {
+        Ok(r) => {
+            println!("SPARQL:\n{}", r.sparql);
+        }
+        Err(e) => println!("ERR: {}", e),
     }
 }

@@ -110,11 +110,42 @@ fn term_to_string(term: &Term) -> String {
                     return cypher_float_str(f);
                 }
             }
+            // For xsd:time — strip trailing :00 seconds (no fraction) to produce
+            // Cypher's canonical short form: "HH:MM:00+TZ" → "HH:MM+TZ".
+            if lit.datatype().as_str() == "http://www.w3.org/2001/XMLSchema#time" {
+                let v = lit.value();
+                if let Some(stripped) = strip_zero_seconds_from_time(v) {
+                    return stripped;
+                }
+            }
             lit.value().to_owned()
         }
         Term::NamedNode(nn) => nn.as_str().to_owned(),
         Term::BlankNode(bn) => format!("__bnode__{}", bn.as_str()),
         Term::Triple(_) => "<<triple>>".to_owned(),
+    }
+}
+
+/// Strip trailing `:00` (zero seconds, no fractional part) from a time string that
+/// includes a timezone offset.  Returns `Some(stripped)` on success, `None` if
+/// the seconds component is not `:00` or no timezone is present.
+///
+/// Examples:
+///   `"10:35:00-08:00"` → `Some("10:35-08:00")`
+///   `"12:35:15+05:00"` → `None`  (seconds ≠ 0)
+///   `"10:35:00"` → `None`  (no timezone, no stripping needed per Cypher convention)
+fn strip_zero_seconds_from_time(v: &str) -> Option<String> {
+    // Look for pattern HH:MM:00 followed by +/- timezone
+    // The value should have exactly 8 chars before the timezone: "HH:MM:SS"
+    let tz_start = v.find(['+', '-'].as_ref()).filter(|&i| i >= 8)?;
+    let time_part = &v[..tz_start];
+    let tz_part = &v[tz_start..];
+    // time_part must be exactly "HH:MM:00"
+    if time_part.len() == 8 && time_part.ends_with(":00") && !time_part[6..].contains('.') {
+        let hhmm = &time_part[..5]; // "HH:MM"
+        Some(format!("{hhmm}{tz_part}"))
+    } else {
+        None
     }
 }
 
