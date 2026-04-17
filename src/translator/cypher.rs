@@ -3974,6 +3974,8 @@ impl TranslationState {
             };
             // For Left: subj=dst, obj=src (already swapped above) — use forward path.
             // Adding PPE::Reverse on top of the swap causes double-inversion (wrong direction).
+            // For Both: effective_base was already built as Alternative(base, ^base) in the
+            // quantifier dispatch above; no further Alternative wrapping is needed here.
             let path = if rel.direction == Direction::Both {
                 PPE::Alternative(
                     Box::new(path.clone()),
