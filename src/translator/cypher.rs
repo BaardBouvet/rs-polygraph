@@ -8425,6 +8425,18 @@ fn try_eval_bool_const(expr: &Expression) -> Option<Option<bool>> {
     match expr {
         Expression::Literal(Literal::Boolean(b)) => Some(Some(*b)),
         Expression::Literal(Literal::Null) => Some(None),
+        // IS NULL: null IS NULL → true; any other literal → false
+        Expression::IsNull(inner) => match inner.as_ref() {
+            Expression::Literal(Literal::Null) => Some(Some(true)),
+            Expression::Literal(_) => Some(Some(false)),
+            _ => None,
+        },
+        // IS NOT NULL: null IS NOT NULL → false; any other literal → true
+        Expression::IsNotNull(inner) => match inner.as_ref() {
+            Expression::Literal(Literal::Null) => Some(Some(false)),
+            Expression::Literal(_) => Some(Some(true)),
+            _ => None,
+        },
         Expression::Comparison(lhs, CompOp::In, rhs) => {
             if let Expression::List(items) = rhs.as_ref() {
                 let mut found_null = false;
