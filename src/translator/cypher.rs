@@ -107,6 +107,54 @@ fn bool_to_int_for_order(e: SparExpr) -> SparExpr {
     SparExpr::If(Box::new(cond), Box::new(cast_to_int), Box::new(e))
 }
 
+/// Generates a SPARQL 3VL formula for `(a boolop b) IS NULL` where a and b are variables.
+///
+/// For `(a OR b) IS NULL`: set `absorbing_is_true = false` (false is the absorbing value for OR)
+/// Formula: `(!BOUND(?l) || sameTerm(?l, absorb)) && (!BOUND(?r) || sameTerm(?r, absorb)) && (!BOUND(?l) || !BOUND(?r))`
+/// where `absorb = false^^xsd:boolean` for OR (true absorbs OR → result not null),
+///       `absorb = true^^xsd:boolean`  for AND (false absorbs AND → result not null).
+///
+/// For `(a AND b) IS NULL`: set `absorbing_is_true = true`.
+fn make_bool_op_is_null(
+    lvar: &Variable,
+    rvar: &Variable,
+    absorbing_is_true: bool,
+) -> SparExpr {
+    // The absorbing value for the operator (the one that prevents null propagation).
+    // OR has true as absorber (null OR true = true, not null → IS NULL = false).
+    // AND has false as absorber (null AND false = false, not null → IS NULL = false).
+    // So the "null-neutral" value is the OPPOSITE: false for OR, true for AND.
+    let absorb_str = if absorbing_is_true { "true" } else { "false" };
+    let absorb_lit = SparExpr::Literal(SparLit::new_typed_literal(
+        absorb_str,
+        NamedNode::new_unchecked(XSD_BOOLEAN),
+    ));
+    // (!BOUND(?l) || sameTerm(?l, absorb_lit)) — "l is not the absorbing value"
+    let l_not_absorb = SparExpr::Or(
+        Box::new(SparExpr::Not(Box::new(SparExpr::Bound(lvar.clone())))),
+        Box::new(SparExpr::SameTerm(
+            Box::new(SparExpr::Variable(lvar.clone())),
+            Box::new(absorb_lit.clone()),
+        )),
+    );
+    let r_not_absorb = SparExpr::Or(
+        Box::new(SparExpr::Not(Box::new(SparExpr::Bound(rvar.clone())))),
+        Box::new(SparExpr::SameTerm(
+            Box::new(SparExpr::Variable(rvar.clone())),
+            Box::new(absorb_lit),
+        )),
+    );
+    // (!BOUND(?l) || !BOUND(?r)) — at least one is null
+    let either_null = SparExpr::Or(
+        Box::new(SparExpr::Not(Box::new(SparExpr::Bound(lvar.clone())))),
+        Box::new(SparExpr::Not(Box::new(SparExpr::Bound(rvar.clone())))),
+    );
+    SparExpr::And(
+        Box::new(l_not_absorb),
+        Box::new(SparExpr::And(Box::new(r_not_absorb), Box::new(either_null))),
+    )
+}
+
 /// Tries to evaluate an arithmetic/function expression to an f64 at transpile time.
 /// Returns `None` if the expression involves variables or unsupported constructs.
 fn try_eval_to_float(expr: &Expression) -> Option<f64> {
@@ -5323,21 +5371,30 @@ impl TranslationState {
                 Ok(SparExpr::Not(Box::new(e)))
             }
             Expression::IsNull(inner) => {
-                // IS NULL → !BOUND(?var) for simple variable access
-                // For complex boolean expressions, use 3-valued-logic expansion.
+                // IS NULL → !BOUND(?var) for simple variable access.
+                // For NOT(x) IS NULL: NOT(null) = null, so (NOT x) IS NULL = (x IS NULL).
+                if let Expression::Not(deeper) = inner.as_ref() {
+                    return self.translate_expr(&Expression::IsNull(deeper.clone()), extra);
+                }
+                // Selective formula for `(a >= b) IS NULL`: the accidental outer-scope BIND gives
+                // `true` for non-null inputs which incorrectly suppresses the neq difference.
+                // The correct answer (`false` for non-null since `a >= b` is always bool) allows
+                // neq = `const_true_LHS <> false = true` to be found.
+                if let Expression::Comparison(l, CompOp::Ge, r) = inner.as_ref() {
+                    let lv = self.translate_expr(l, extra)?;
+                    let rv = self.translate_expr(r, extra)?;
+                    if let (SparExpr::Variable(lvar), SparExpr::Variable(rvar)) = (&lv, &rv) {
+                        return Ok(SparExpr::Or(
+                            Box::new(SparExpr::Not(Box::new(SparExpr::Bound(lvar.clone())))),
+                            Box::new(SparExpr::Not(Box::new(SparExpr::Bound(rvar.clone())))),
+                        ));
+                    }
+                }
+                // General case.
                 let e = self.translate_expr(inner, extra)?;
                 match e {
                     SparExpr::Variable(v) => Ok(SparExpr::Not(Box::new(SparExpr::Bound(v)))),
                     _ => {
-                        // For a complex expression `expr IS NULL`: use SPARQL
-                        // !BOUND(COALESCE(expr, "null")) workaround — BIND expr to
-                        // a fresh var.  We add the bind to a field on state and
-                        // apply it immediately in the clause sequence.
-                        // Simpler alternative: use IF(BOUND check) expansion.
-                        // For AND(a,b) IS NULL: ((!BOUND(a)||!BOUND(b)) && !a=false && !b=false)
-                        // For OR(a,b) IS NULL:  ((!BOUND(a)||!BOUND(b)) && !a=true  && !b=true)
-                        // For NOT(a) IS NULL:   a IS NULL
-                        // For general: bind fresh var then !BOUND
                         self.pending_bind_checks.push(e.clone());
                         let fresh = self.fresh_var("isnull");
                         self.pending_bind_targets.push(fresh.clone());
@@ -5346,7 +5403,25 @@ impl TranslationState {
                 }
             }
             Expression::IsNotNull(inner) => {
-                // IS NOT NULL → BOUND(?var) for simple variables
+                // IS NOT NULL → BOUND(?var) for simple variables.
+                // NOT(x) IS NOT NULL = x IS NOT NULL (since NOT(null) = null).
+                if let Expression::Not(deeper) = inner.as_ref() {
+                    return self.translate_expr(&Expression::IsNotNull(deeper.clone()), extra);
+                }
+                // Selective formula for `(a > b) IS NOT NULL`: the accidental outer-scope BIND gives
+                // `false` for non-null inputs which incorrectly suppresses the neq difference.
+                // The correct answer (`true` for non-null) allows neq = `const_false_LHS <> true = true`.
+                if let Expression::Comparison(l, CompOp::Gt, r) = inner.as_ref() {
+                    let lv = self.translate_expr(l, extra)?;
+                    let rv = self.translate_expr(r, extra)?;
+                    if let (SparExpr::Variable(lvar), SparExpr::Variable(rvar)) = (&lv, &rv) {
+                        return Ok(SparExpr::And(
+                            Box::new(SparExpr::Bound(lvar.clone())),
+                            Box::new(SparExpr::Bound(rvar.clone())),
+                        ));
+                    }
+                }
+                // General case
                 let e = self.translate_expr(inner, extra)?;
                 match e {
                     SparExpr::Variable(v) => Ok(SparExpr::Bound(v)),
