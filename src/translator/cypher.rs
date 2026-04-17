@@ -3922,14 +3922,11 @@ impl TranslationState {
                                     Direction::Left => (dst.clone(), src.clone()),
                                     _ => (src.clone(), dst.clone()),
                                 };
-                                let path = if rel.direction == Direction::Left {
-                                    PPE::Reverse(Box::new(q))
-                                } else {
-                                    q
-                                };
+                                // For Left: subj=dst, obj=src (already swapped); use forward
+                                // path — no PPE::Reverse needed since the swap is sufficient.
                                 path_patterns.push(GraphPattern::Path {
                                     subject: subj,
-                                    path,
+                                    path: q,
                                     object: obj,
                                 });
                                 return Ok(());
@@ -3975,9 +3972,9 @@ impl TranslationState {
                 Direction::Left => (dst.clone(), src.clone()),
                 _ => (src.clone(), dst.clone()),
             };
-            let path = if rel.direction == Direction::Left {
-                PPE::Reverse(Box::new(path))
-            } else if rel.direction == Direction::Both {
+            // For Left: subj=dst, obj=src (already swapped above) — use forward path.
+            // Adding PPE::Reverse on top of the swap causes double-inversion (wrong direction).
+            let path = if rel.direction == Direction::Both {
                 PPE::Alternative(
                     Box::new(path.clone()),
                     Box::new(PPE::Reverse(Box::new(path))),
@@ -4399,13 +4396,13 @@ impl TranslationState {
                 union_patterns.push(zero_pattern);
             } else if hop_count == 1 {
                 // Single hop: emit as a plain path (allows multi-direction).
+                // For Left: effective_src=dst, effective_dst=src (already swapped) — forward path.
                 let p = match rel.direction {
-                    Direction::Left => PPE::Reverse(Box::new(base_ppe.clone())),
                     Direction::Both => PPE::Alternative(
                         Box::new(base_ppe.clone()),
                         Box::new(PPE::Reverse(Box::new(base_ppe.clone()))),
                     ),
-                    _ => base_ppe.clone(),
+                    _ => base_ppe.clone(), // Left: no extra Reverse; swap handles direction
                 };
                 union_patterns.push(GraphPattern::Path {
                     subject: effective_src.clone(),
@@ -6359,38 +6356,56 @@ impl TranslationState {
         // Extra triples (e.g. OPTIONAL property access) go into the inner pattern.
         let mut proj_extra: Vec<TriplePattern> = Vec::new();
         let proj_expr = self.translate_expr(projection, &mut proj_extra)?;
-        // Add property access triples as OPTIONALs to preserve null semantics.
-        for tp in proj_extra {
+        // Add property access triples as a SINGLE OPTIONAL to preserve null semantics
+        // and to prevent spurious matches.  For relationship properties in RDF-star mode
+        // translate_expr adds two triples (rdf:reifies + prop) that MUST stay together in
+        // one OPTIONAL block; splitting them causes the second triple to wildcard-match
+        // when the first has no solution (i.e. the edge has no such property).
+        if !proj_extra.is_empty() {
             inner_pattern = GraphPattern::LeftJoin {
                 left: Box::new(inner_pattern),
-                right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
+                right: Box::new(GraphPattern::Bgp { patterns: proj_extra }),
                 expression: None,
             };
         }
+
+        // Bind the projection expression to a fresh variable so we can distinguish
+        // null (UNDEF) from a real value via BOUND().  This ensures GROUP_CONCAT
+        // receives "null" for UNDEF projections instead of silently skipping them,
+        // which would collapse [null] into [].
+        let proj_bound_var = self.fresh_var("pc_proj");
+        inner_pattern = GraphPattern::Extend {
+            inner: Box::new(inner_pattern),
+            variable: proj_bound_var.clone(),
+            expression: proj_expr,
+        };
+        let proj_ref = SparExpr::Variable(proj_bound_var.clone());
 
         // Build GROUP_CONCAT to collect projected values into a list.
         let gc_var = self.fresh_var("pc_gc");
         // Encode each projected value into a string representation for the list,
         // using the same IF(isLiteral/boolean, STR(?v), CONCAT("'", STR(?v), "'")) pattern.
-        let enc = SparExpr::If(
+        // Outer BOUND check: when the projection is null/UNDEF, encode as "null" so
+        // GROUP_CONCAT preserves null list elements.
+        let value_enc = SparExpr::If(
             Box::new(SparExpr::And(
                 Box::new(SparExpr::FunctionCall(
                     spargebra::algebra::Function::IsLiteral,
-                    vec![proj_expr.clone()],
+                    vec![proj_ref.clone()],
                 )),
                 Box::new(SparExpr::Or(
                     Box::new(SparExpr::Or(
                         Box::new(SparExpr::Equal(
                             Box::new(SparExpr::FunctionCall(
                                 spargebra::algebra::Function::Datatype,
-                                vec![proj_expr.clone()],
+                                vec![proj_ref.clone()],
                             )),
                             Box::new(SparExpr::NamedNode(NamedNode::new_unchecked(XSD_INTEGER))),
                         )),
                         Box::new(SparExpr::Equal(
                             Box::new(SparExpr::FunctionCall(
                                 spargebra::algebra::Function::Datatype,
-                                vec![proj_expr.clone()],
+                                vec![proj_ref.clone()],
                             )),
                             Box::new(SparExpr::NamedNode(NamedNode::new_unchecked(XSD_DOUBLE))),
                         )),
@@ -6398,7 +6413,7 @@ impl TranslationState {
                     Box::new(SparExpr::Equal(
                         Box::new(SparExpr::FunctionCall(
                             spargebra::algebra::Function::Datatype,
-                            vec![proj_expr.clone()],
+                            vec![proj_ref.clone()],
                         )),
                         Box::new(SparExpr::NamedNode(NamedNode::new_unchecked(XSD_BOOLEAN))),
                     )),
@@ -6406,7 +6421,7 @@ impl TranslationState {
             )),
             Box::new(SparExpr::FunctionCall(
                 spargebra::algebra::Function::Str,
-                vec![proj_expr.clone()],
+                vec![proj_ref.clone()],
             )),
             Box::new(SparExpr::FunctionCall(
                 spargebra::algebra::Function::Concat,
@@ -6414,11 +6429,16 @@ impl TranslationState {
                     SparExpr::Literal(SparLit::new_simple_literal("'")),
                     SparExpr::FunctionCall(
                         spargebra::algebra::Function::Str,
-                        vec![proj_expr],
+                        vec![proj_ref],
                     ),
                     SparExpr::Literal(SparLit::new_simple_literal("'")),
                 ],
             )),
+        );
+        let enc = SparExpr::If(
+            Box::new(SparExpr::Bound(proj_bound_var)),
+            Box::new(value_enc),
+            Box::new(SparExpr::Literal(SparLit::new_simple_literal("null"))),
         );
         let gc_agg = spargebra::algebra::AggregateExpression::FunctionCall {
             name: spargebra::algebra::AggregateFunction::GroupConcat {
