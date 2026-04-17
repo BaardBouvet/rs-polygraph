@@ -49,29 +49,22 @@ fn build_query(pair: Pair<Rule>) -> Result<CypherQuery, PolygraphError> {
 }
 
 fn build_statement(pair: Pair<Rule>) -> Result<CypherQuery, PolygraphError> {
-    // statement = { clause+ ~ (union_marker ~ clause+)* }
+    // statement = { single_query ~ (union_marker ~ single_query)* }
+    // single_query = { clause+ }
     let mut clauses = Vec::new();
     for child in pair.into_inner() {
         match child.as_rule() {
-            Rule::clause => {
-                let inner = child
-                    .into_inner()
-                    .next()
-                    .expect("clause always has an inner rule");
-                let clause = match inner.as_rule() {
-                    Rule::match_clause => Clause::Match(build_match_clause(inner)?),
-                    Rule::with_clause => Clause::With(build_with_clause(inner)?),
-                    Rule::return_clause => Clause::Return(build_return_clause(inner)?),
-                    Rule::unwind_clause => Clause::Unwind(build_unwind_clause(inner)?),
-                    Rule::create_clause => Clause::Create(build_create_clause(inner)?),
-                    Rule::merge_clause => Clause::Merge(build_merge_clause(inner)?),
-                    Rule::set_clause => Clause::Set(build_set_clause(inner)?),
-                    Rule::delete_clause => Clause::Delete(build_delete_clause(inner)?),
-                    Rule::remove_clause => Clause::Remove(build_remove_clause(inner)?),
-                    Rule::call_clause => Clause::Call(build_call_clause(inner)?),
-                    _ => unreachable!("unexpected clause rule: {:?}", inner.as_rule()),
-                };
-                clauses.push(clause);
+            Rule::single_query => {
+                for sq_child in child.into_inner() {
+                    if sq_child.as_rule() == Rule::clause {
+                        let inner = sq_child
+                            .into_inner()
+                            .next()
+                            .expect("clause always has an inner rule");
+                        let clause = build_clause(inner)?;
+                        clauses.push(clause);
+                    }
+                }
             }
             Rule::union_marker => {
                 let all = child.into_inner().any(|p| p.as_rule() == Rule::kw_ALL);
@@ -81,6 +74,25 @@ fn build_statement(pair: Pair<Rule>) -> Result<CypherQuery, PolygraphError> {
         }
     }
     Ok(CypherQuery { clauses })
+}
+
+fn build_clause(inner: Pair<Rule>) -> Result<Clause, PolygraphError> {
+    match inner.as_rule() {
+        Rule::match_clause => Ok(Clause::Match(build_match_clause(inner)?)),
+        Rule::with_clause => Ok(Clause::With(build_with_clause(inner)?)),
+        Rule::return_clause => Ok(Clause::Return(build_return_clause(inner)?)),
+        Rule::unwind_clause => Ok(Clause::Unwind(build_unwind_clause(inner)?)),
+        Rule::create_clause => Ok(Clause::Create(build_create_clause(inner)?)),
+        Rule::merge_clause => Ok(Clause::Merge(build_merge_clause(inner)?)),
+        Rule::set_clause => Ok(Clause::Set(build_set_clause(inner)?)),
+        Rule::delete_clause => Ok(Clause::Delete(build_delete_clause(inner)?)),
+        Rule::remove_clause => Ok(Clause::Remove(build_remove_clause(inner)?)),
+        Rule::call_clause => Ok(Clause::Call(build_call_clause(inner)?)),
+        Rule::foreach_clause => Err(PolygraphError::UnsupportedFeature {
+            feature: "FOREACH clause".to_string(),
+        }),
+        _ => unreachable!("unexpected clause rule: {:?}", inner.as_rule()),
+    }
 }
 
 // ── Clause builders ───────────────────────────────────────────────────────────
@@ -119,36 +131,12 @@ fn build_where_clause(pair: Pair<Rule>) -> Result<WhereClause, PolygraphError> {
 }
 
 fn build_return_clause(pair: Pair<Rule>) -> Result<ReturnClause, PolygraphError> {
-    // return_clause = { kw_RETURN ~ return_body ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
-    let mut body_pair = None;
-    let mut order_by = None;
-    let mut skip = None;
-    let mut limit = None;
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::kw_RETURN => {}
-            Rule::return_body => body_pair = Some(inner),
-            Rule::order_by_clause => order_by = Some(build_order_by_clause(inner)?),
-            Rule::skip_clause => {
-                skip = Some(build_expression(
-                    inner
-                        .into_inner()
-                        .find(|p| p.as_rule() == Rule::expression)
-                        .expect("skip_clause has expression"),
-                )?);
-            }
-            Rule::limit_clause => {
-                limit = Some(build_expression(
-                    inner
-                        .into_inner()
-                        .find(|p| p.as_rule() == Rule::expression)
-                        .expect("limit_clause has expression"),
-                )?);
-            }
-            _ => {}
-        }
-    }
-    let (distinct, items) = build_return_body(body_pair.expect("grammar guarantees return_body"))?;
+    // return_clause = { kw_RETURN ~ projection_body }
+    let pb = pair
+        .into_inner()
+        .find(|p| p.as_rule() == Rule::projection_body)
+        .expect("return_clause has projection_body");
+    let (distinct, items, order_by, skip, limit) = build_projection_body(pb)?;
     Ok(ReturnClause {
         distinct,
         items,
@@ -159,23 +147,55 @@ fn build_return_clause(pair: Pair<Rule>) -> Result<ReturnClause, PolygraphError>
 }
 
 fn build_with_clause(pair: Pair<Rule>) -> Result<WithClause, PolygraphError> {
-    // with_clause = { kw_WITH ~ return_body ~ where_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
-    let mut distinct = false;
-    let mut items = None;
+    // with_clause = { kw_WITH ~ projection_body ~ where_clause? }
+    let mut pb_opt = None;
     let mut where_ = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::kw_WITH => {}
+            Rule::projection_body => pb_opt = Some(inner),
+            Rule::where_clause => where_ = Some(build_where_clause(inner)?),
+            _ => {}
+        }
+    }
+    let (distinct, items, order_by, skip, limit) =
+        build_projection_body(pb_opt.expect("with_clause has projection_body"))?;
+    Ok(WithClause {
+        distinct,
+        items,
+        where_,
+        order_by,
+        skip,
+        limit,
+    })
+}
+
+// ── Projection body ──────────────────────────────────────────────────────────
+
+/// Returns (distinct, items, order_by, skip, limit).
+fn build_projection_body(
+    pair: Pair<Rule>,
+) -> Result<
+    (
+        bool,
+        ReturnItems,
+        Option<OrderByClause>,
+        Option<Expression>,
+        Option<Expression>,
+    ),
+    PolygraphError,
+> {
+    // projection_body = { distinct_marker? ~ return_items ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
+    let mut distinct = false;
+    let mut items = ReturnItems::All;
     let mut order_by = None;
     let mut skip = None;
     let mut limit = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::kw_WITH => {}
-            Rule::return_body => {
-                let (d, i) = build_return_body(inner)?;
-                distinct = d;
-                items = Some(i);
-            }
-            Rule::where_clause => where_ = Some(build_where_clause(inner)?),
+            Rule::distinct_marker => distinct = true,
+            Rule::return_items => items = build_return_items(inner)?,
             Rule::order_by_clause => order_by = Some(build_order_by_clause(inner)?),
             Rule::skip_clause => {
                 skip = Some(build_expression(
@@ -196,31 +216,7 @@ fn build_with_clause(pair: Pair<Rule>) -> Result<WithClause, PolygraphError> {
             _ => {}
         }
     }
-    Ok(WithClause {
-        distinct,
-        items: items.expect("grammar guarantees return_body"),
-        where_,
-        order_by,
-        skip,
-        limit,
-    })
-}
-
-// ── Return body ───────────────────────────────────────────────────────────────
-
-fn build_return_body(pair: Pair<Rule>) -> Result<(bool, ReturnItems), PolygraphError> {
-    // return_body = { distinct_marker? ~ return_items }
-    let mut distinct = false;
-    let mut items = ReturnItems::All;
-
-    for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::distinct_marker => distinct = true,
-            Rule::return_items => items = build_return_items(inner)?,
-            _ => {}
-        }
-    }
-    Ok((distinct, items))
+    Ok((distinct, items, order_by, skip, limit))
 }
 
 fn build_return_items(pair: Pair<Rule>) -> Result<ReturnItems, PolygraphError> {
@@ -276,49 +272,53 @@ fn build_pattern_list(pair: Pair<Rule>) -> Result<PatternList, PolygraphError> {
 }
 
 fn build_pattern(pair: Pair<Rule>) -> Result<Pattern, PolygraphError> {
-    // pattern = { (variable ~ "=")? ~ node_pattern_chain }
+    // pattern = { (variable ~ "=")? ~ anonymous_pattern_part }
     let mut variable = None;
-    let mut chain_pair = None;
-    let mut saw_eq = false;
+    let mut elements: Option<Vec<PatternElement>> = None;
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::variable if !saw_eq => {
-                // Peek ahead: the `=` sign comes next if this is a named pattern.
-                // Because pest doesn't expose consumed-but-not-matched info, we
-                // rely on the grammar ordering: variable comes before node_pattern_chain.
+            Rule::variable => {
                 variable = Some(ident_text(&inner));
             }
-            Rule::node_pattern_chain => chain_pair = Some(inner),
-            _ => {
-                // A bare `=` token — once we see the chain we know variable was used.
-                saw_eq = true;
+            Rule::anonymous_pattern_part => {
+                let app_inner = inner
+                    .into_inner()
+                    .next()
+                    .expect("anonymous_pattern_part has child");
+                elements = Some(match app_inner.as_rule() {
+                    Rule::pattern_element => build_pattern_element(app_inner)?,
+                    Rule::shortest_path_pattern => {
+                        // Also unwrap and build the inner pattern_element
+                        let pe = app_inner
+                            .into_inner()
+                            .find(|p| p.as_rule() == Rule::pattern_element)
+                            .expect("shortest_path_pattern has pattern_element");
+                        build_pattern_element(pe)?
+                    }
+                    _ => unreachable!(
+                        "unexpected anonymous_pattern_part: {:?}",
+                        app_inner.as_rule()
+                    ),
+                });
             }
+            _ => {}
         }
     }
-
-    // If no `=` was consumed, the "variable" was actually the start of the chain;
-    // but the grammar forces `variable ~ "="` as the prefix, so `variable` field
-    // holds the pattern binding if `=` was present, which we detect by the presence
-    // of both `variable` AND `node_pattern_chain` pairs.
-    // Actually: if `variable` is Some and `chain_pair` is also Some, the variable is
-    // a pattern binder. If only `chain_pair` is Some, no binder was parsed (the grammar
-    // would not emit a variable pair). This logic is handled correctly by the grammar.
-    let chain = chain_pair.expect("grammar guarantees node_pattern_chain");
-    let elements = build_node_pattern_chain(chain)?;
+    let elements = elements.expect("grammar guarantees anonymous_pattern_part");
     Ok(Pattern { variable, elements })
 }
 
-fn build_node_pattern_chain(pair: Pair<Rule>) -> Result<Vec<PatternElement>, PolygraphError> {
-    // node_pattern_chain = { node_pattern ~ chain_link* }
+fn build_pattern_element(pair: Pair<Rule>) -> Result<Vec<PatternElement>, PolygraphError> {
+    // pattern_element = { node_pattern ~ pattern_element_chain* | "(" ~ pattern_element ~ ")" }
     let mut elements = Vec::new();
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::node_pattern => {
                 elements.push(PatternElement::Node(build_node_pattern(inner)?));
             }
-            Rule::chain_link => {
-                // chain_link = { rel_pattern ~ node_pattern }
+            Rule::pattern_element_chain => {
+                // pattern_element_chain = { rel_pattern ~ node_pattern }
                 for link_inner in inner.into_inner() {
                     match link_inner.as_rule() {
                         Rule::rel_pattern => {
@@ -331,6 +331,10 @@ fn build_node_pattern_chain(pair: Pair<Rule>) -> Result<Vec<PatternElement>, Pol
                         _ => {}
                     }
                 }
+            }
+            Rule::pattern_element => {
+                // Parenthesized pattern_element: recurse
+                elements.extend(build_pattern_element(inner)?);
             }
             _ => {}
         }
@@ -350,14 +354,13 @@ fn build_node_pattern(pair: Pair<Rule>) -> Result<NodePattern, PolygraphError> {
             Rule::node_labels => {
                 for label_pair in inner.into_inner() {
                     if label_pair.as_rule() == Rule::node_label {
-                        // node_label = { ":" ~ (ident_escaped | ident) }
+                        // node_label = { ":" ~ schema_name }
+                        // schema_name matches text that may be a reserved word or ident
                         let name = label_pair
                             .into_inner()
-                            .next()
-                            .expect("node_label has ident")
-                            .as_str()
-                            .trim_matches('`')
-                            .to_string();
+                            .find(|p| p.as_rule() == Rule::schema_name)
+                            .map(|p| p.as_str().trim_matches('`').to_string())
+                            .unwrap_or_default();
                         labels.push(name);
                     }
                 }
@@ -388,7 +391,7 @@ fn build_rel_pattern(pair: Pair<Rule>) -> Result<RelationshipPattern, PolygraphE
         match inner.as_rule() {
             Rule::left_arrow => has_left_arrow = true,
             Rule::right_arrow => has_right_arrow = true,
-            Rule::both_arrow => {
+            Rule::full_arrow => {
                 // <--> : undirected / any-direction — same semantics as --
             }
             Rule::rel_dash => {}
@@ -635,11 +638,9 @@ fn build_remove_item(pair: Pair<Rule>) -> Result<RemoveItem, PolygraphError> {
                         if lbl.as_rule() == Rule::node_label {
                             let name = lbl
                                 .into_inner()
-                                .next()
-                                .expect("node_label ident")
-                                .as_str()
-                                .trim_matches('`')
-                                .to_string();
+                                .find(|p| p.as_rule() == Rule::schema_name)
+                                .map(|p| p.as_str().trim_matches('`').to_string())
+                                .unwrap_or_default();
                             labels.push(name);
                         }
                     }
@@ -652,7 +653,7 @@ fn build_remove_item(pair: Pair<Rule>) -> Result<RemoveItem, PolygraphError> {
 }
 
 fn build_call_clause(pair: Pair<Rule>) -> Result<CallClause, PolygraphError> {
-    // call_clause = { kw_CALL ~ proc_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" ~ (kw_WITH_kw ~ yield_items)? }
+    // call_clause = { kw_CALL ~ proc_name ~ ("(" ~ call_args? ~ ")")? ~ yield_clause? }
     let mut procedure = String::new();
     let mut args = Vec::new();
     let mut yields = Vec::new();
@@ -660,12 +661,33 @@ fn build_call_clause(pair: Pair<Rule>) -> Result<CallClause, PolygraphError> {
         match inner.as_rule() {
             Rule::kw_CALL => {}
             Rule::proc_name => procedure = inner.as_str().to_string(),
-            Rule::expression => args.push(build_expression(inner)?),
-            Rule::kw_WITH_kw => {}
-            Rule::yield_items => {
-                for v in inner.into_inner() {
-                    if v.as_rule() == Rule::variable {
-                        yields.push(ident_text(&v));
+            Rule::call_args => {
+                for child in inner.into_inner() {
+                    if child.as_rule() == Rule::expression {
+                        args.push(build_expression(child)?);
+                    }
+                }
+            }
+            Rule::yield_clause => {
+                // yield_clause = { kw_YIELD ~ (yield_star | yield_items) ~ where_clause? }
+                for yc in inner.into_inner() {
+                    match yc.as_rule() {
+                        Rule::kw_YIELD => {}
+                        Rule::yield_star => {} // YIELD * — all fields; not tracked in yields vec
+                        Rule::yield_items => {
+                            for yi in yc.into_inner() {
+                                if yi.as_rule() == Rule::yield_item {
+                                    // yield_item = { (schema_name ~ kw_AS)? ~ variable }
+                                    for v in yi.into_inner() {
+                                        if v.as_rule() == Rule::variable {
+                                            yields.push(ident_text(&v));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Rule::where_clause => {} // WHERE inside YIELD; not stored
+                        _ => {}
                     }
                 }
             }
@@ -844,7 +866,7 @@ fn build_comparison_suffix(
                     })
                 }
             };
-            // RHS is a comparison_expr (allows chained IS NULL, etc.)
+            // RHS is comparison_expr (allows chained: a < b < c → a < (b < c))
             let rhs_pair = children
                 .next()
                 .expect("comp_op is followed by comparison_expr");
@@ -879,6 +901,17 @@ fn build_comparison_suffix(
                 CompOp::In,
                 Box::new(rhs),
             ))
+        }
+        Rule::kw_NOT => {
+            // NOT IN expr
+            let _kw_in = children.next().expect("NOT IN: kw_IN expected");
+            let rhs_pair = children.next().expect("NOT IN is followed by add_sub_expr");
+            let rhs = build_add_sub_expr(rhs_pair)?;
+            Ok(Expression::Not(Box::new(Expression::Comparison(
+                Box::new(lhs),
+                CompOp::In,
+                Box::new(rhs),
+            ))))
         }
         Rule::kw_STARTS => {
             // STARTS WITH expr
@@ -962,7 +995,7 @@ fn build_mul_div_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
 }
 
 fn build_unary_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    // unary_expr = { unary_minus | prop_expr }
+    // unary_expr = { unary_minus | unary_plus | non_arith_expr }
     let inner = pair.into_inner().next().expect("unary_expr has child");
     match inner.as_rule() {
         Rule::unary_minus => {
@@ -1016,8 +1049,16 @@ fn build_unary_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
             }
             Ok(Expression::Negate(Box::new(build_unary_expr(operand)?)))
         }
-        Rule::prop_expr => build_prop_expr(inner),
-        _ => unreachable!(),
+        Rule::unary_plus => {
+            // unary_plus = { "+" ~ unary_expr } — no-op, just unwrap
+            let operand = inner
+                .into_inner()
+                .next()
+                .expect("unary_plus has unary_expr");
+            build_unary_expr(operand)
+        }
+        Rule::non_arith_expr => build_non_arith_expr(inner),
+        _ => unreachable!("unexpected unary_expr child: {:?}", inner.as_rule()),
     }
 }
 
@@ -1032,10 +1073,10 @@ fn build_power_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
     Ok(acc)
 }
 
-fn build_prop_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    // prop_expr = { atom ~ (property_lookup | slice_access | subscript_access)* }
+fn build_non_arith_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
+    // non_arith_expr = { atom ~ (property_lookup | slice_access | subscript_access)* ~ node_labels? }
     let mut children = pair.into_inner();
-    let atom_pair = children.next().expect("prop_expr has atom");
+    let atom_pair = children.next().expect("non_arith_expr has atom");
     let mut acc = build_atom(atom_pair)?;
     for postfix in children {
         match postfix.as_rule() {
@@ -1082,6 +1123,29 @@ fn build_prop_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
                     .expect("subscript_access has expression");
                 let idx = build_expression(idx_pair)?;
                 acc = Expression::Subscript(Box::new(acc), Box::new(idx));
+            }
+            // node_labels at end of non_arith_expr: e.g. (n):Label — fold into a LabelCheck
+            Rule::node_labels => {
+                // Convert acc to a label check if it's a variable
+                let mut labels = Vec::new();
+                for label_pair in postfix.into_inner() {
+                    if label_pair.as_rule() == Rule::node_label {
+                        let name = label_pair
+                            .into_inner()
+                            .find(|p| p.as_rule() == Rule::schema_name)
+                            .map(|p| p.as_str().trim_matches('`').to_string())
+                            .unwrap_or_default();
+                        labels.push(name);
+                    }
+                }
+                if let Expression::Variable(var_name) = &acc {
+                    acc = Expression::LabelCheck {
+                        variable: var_name.clone(),
+                        labels,
+                    };
+                }
+                // If not a variable (e.g. result of property access), ignore label check
+                // — this is an unusual edge case not needed for current TCK scenarios
             }
             _ => {}
         }
@@ -1144,28 +1208,36 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
             Ok(Expression::Literal(Literal::Boolean(b)))
         }
         Rule::null_literal => Ok(Expression::Literal(Literal::Null)),
+        Rule::parameter => Err(PolygraphError::UnsupportedFeature {
+            feature: format!("query parameter: {}", inner.as_str()),
+        }),
+        Rule::legacy_parameter => Err(PolygraphError::UnsupportedFeature {
+            feature: format!("legacy parameter: {}", inner.as_str()),
+        }),
         Rule::aggregate_expr => build_aggregate_expr(inner),
         Rule::case_expression => build_case_expression(inner),
+        Rule::reduce_expr => Err(PolygraphError::UnsupportedFeature {
+            feature: "REDUCE expression".to_string(),
+        }),
+        Rule::exists_subquery => Err(PolygraphError::UnsupportedFeature {
+            feature: "EXISTS subquery".to_string(),
+        }),
+        Rule::shortest_path_atom => Err(PolygraphError::UnsupportedFeature {
+            feature: "shortestPath / allShortestPaths expression".to_string(),
+        }),
         Rule::quantifier_expr => build_quantifier_expr(inner),
         Rule::function_call => build_function_call(inner),
         Rule::label_check => build_label_check(inner),
         Rule::list_comprehension => build_list_comprehension(inner),
         Rule::pattern_comprehension => build_pattern_comprehension(inner),
         Rule::pattern_predicate => {
-            // pattern_predicate = { node_pattern ~ (rel_pattern ~ node_pattern)+ }
-            // Build elements directly since this rule doesn't use chain_link wrapping.
-            let mut elements = Vec::new();
-            for child in inner.into_inner() {
-                match child.as_rule() {
-                    Rule::node_pattern => {
-                        elements.push(PatternElement::Node(build_node_pattern(child)?));
-                    }
-                    Rule::rel_pattern => {
-                        elements.push(PatternElement::Relationship(build_rel_pattern(child)?));
-                    }
-                    _ => {}
-                }
-            }
+            // pattern_predicate = { relationships_pattern }
+            // relationships_pattern = { node_pattern ~ pattern_element_chain+ }
+            let rp = inner
+                .into_inner()
+                .find(|p| p.as_rule() == Rule::relationships_pattern)
+                .expect("pattern_predicate has relationships_pattern");
+            let elements = build_relationships_pattern(rp)?;
             Ok(Expression::PatternPredicate(Pattern {
                 variable: None,
                 elements,
@@ -1192,7 +1264,7 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn build_case_expression(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    // case_expression = { kw_CASE ~ expression? ~ case_alternative+ ~ (kw_ELSE ~ expression)? ~ kw_END }
+    // case_expression = { kw_CASE ~ expression? ~ case_when+ ~ (kw_ELSE ~ expression)? ~ kw_END }
     let mut operand: Option<Box<Expression>> = None;
     let mut whens: Vec<(Expression, Expression)> = Vec::new();
     let mut else_expr: Option<Box<Expression>> = None;
@@ -1204,8 +1276,8 @@ fn build_case_expression(pair: Pair<Rule>) -> Result<Expression, PolygraphError>
             Rule::kw_ELSE => {
                 last_was_kw_else = true;
             }
-            Rule::case_alternative => {
-                // case_alternative = { kw_WHEN ~ expression ~ kw_THEN ~ expression }
+            Rule::case_when => {
+                // case_when = { kw_WHEN ~ expression ~ kw_THEN ~ expression }
                 let mut exprs: Vec<Expression> = Vec::new();
                 for c in child.into_inner() {
                     if c.as_rule() == Rule::expression {
@@ -1322,7 +1394,7 @@ fn build_list_comprehension(pair: Pair<Rule>) -> Result<Expression, PolygraphErr
 }
 
 fn build_pattern_comprehension(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    // pattern_comprehension = { "[" ~ (variable ~ "=")? ~ node_pattern_chain ~ (kw_WHERE ~ expression)? ~ "|" ~ expression ~ "]" }
+    // pattern_comprehension = { "[" ~ (variable ~ "=")? ~ relationships_pattern ~ (kw_WHERE ~ expression)? ~ "|" ~ expression ~ "]" }
     let mut alias: Option<String> = None;
     let mut elements: Option<Vec<PatternElement>> = None;
     let mut predicate: Option<Box<Expression>> = None;
@@ -1333,14 +1405,12 @@ fn build_pattern_comprehension(pair: Pair<Rule>) -> Result<Expression, Polygraph
             Rule::variable if elements.is_none() => {
                 alias = Some(ident_text(&child));
             }
-            Rule::node_pattern_chain => {
-                elements = Some(build_node_pattern_chain(child)?);
+            Rule::relationships_pattern => {
+                elements = Some(build_relationships_pattern(child)?);
                 after_chain = true;
             }
             Rule::expression if after_chain && predicate.is_none() => {
                 // Could be the WHERE predicate (first expression after chain) or the projection.
-                // We distinguish by position: kw_WHERE consumes nothing in the inner pairs,
-                // so we see two expression children — first is WHERE pred, second is projection.
                 predicate = Some(Box::new(build_expression(child)?));
             }
             Rule::expression => {
@@ -1355,7 +1425,7 @@ fn build_pattern_comprehension(pair: Pair<Rule>) -> Result<Expression, Polygraph
     }
     let pattern = Pattern {
         variable: alias.clone(),
-        elements: elements.expect("pattern_comprehension has pattern"),
+        elements: elements.expect("pattern_comprehension has relationships_pattern"),
     };
     Ok(Expression::PatternComprehension {
         alias,
@@ -1365,8 +1435,37 @@ fn build_pattern_comprehension(pair: Pair<Rule>) -> Result<Expression, Polygraph
     })
 }
 
+/// Build elements from a `relationships_pattern` pair.
+/// relationships_pattern = { node_pattern ~ pattern_element_chain+ }
+fn build_relationships_pattern(pair: Pair<Rule>) -> Result<Vec<PatternElement>, PolygraphError> {
+    let mut elements = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::node_pattern => {
+                elements.push(PatternElement::Node(build_node_pattern(inner)?));
+            }
+            Rule::pattern_element_chain => {
+                for link_inner in inner.into_inner() {
+                    match link_inner.as_rule() {
+                        Rule::rel_pattern => {
+                            elements
+                                .push(PatternElement::Relationship(build_rel_pattern(link_inner)?));
+                        }
+                        Rule::node_pattern => {
+                            elements.push(PatternElement::Node(build_node_pattern(link_inner)?));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(elements)
+}
+
 fn build_aggregate_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    // aggregate_expr = { count_expr | agg_call_expr }
+    // aggregate_expr = { agg_call_expr }
     let inner = pair.into_inner().next().expect("aggregate_expr has child");
     match inner.as_rule() {
         Rule::count_expr => {
@@ -1375,8 +1474,7 @@ fn build_aggregate_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> 
             let mut expr: Option<Box<Expression>> = None;
             for child in inner.into_inner() {
                 match child.as_rule() {
-                    Rule::kw_COUNT => {}
-                    Rule::count_star => {} // expr stays None
+                    Rule::count_star => {} // COUNT(*) — expr stays None
                     Rule::kw_DISTINCT => distinct = true,
                     Rule::expression => expr = Some(Box::new(build_expression(child)?)),
                     _ => {}
@@ -1434,10 +1532,12 @@ fn ident_text(pair: &Pair<Rule>) -> Ident {
 }
 
 fn build_function_call(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    // function_call = { (ident_escaped | ident) ~ "(" ~ (kw_DISTINCT? ~ expression ~ ("," ~ expression)*)? ~ ")" }
+    // function_call = { func_name ~ "(" ~ (kw_DISTINCT? ~ expression ~ ("," ~ expression)*)? ~ ")" }
+    // func_name = @{ (ident ~ ".")* ~ ident }  — atomic, gives full dotted name
     let mut children = pair.into_inner().peekable();
-    let name_pair = children.next().expect("function_call has name");
-    let name = name_pair.as_str().trim_matches('`').to_string();
+    let name_pair = children.next().expect("function_call has func_name");
+    // func_name is atomic — as_str() gives the full name including namespace dots
+    let name = name_pair.as_str().to_string();
     let mut distinct = false;
     let mut args = Vec::new();
     for child in children {
@@ -1466,11 +1566,9 @@ fn build_label_check(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
                 if label_pair.as_rule() == Rule::node_label {
                     let name = label_pair
                         .into_inner()
-                        .next()
-                        .expect("node_label has ident")
-                        .as_str()
-                        .trim_matches('`')
-                        .to_string();
+                        .find(|p| p.as_rule() == Rule::schema_name)
+                        .map(|p| p.as_str().trim_matches('`').to_string())
+                        .unwrap_or_default();
                     labels.push(name);
                 }
             }

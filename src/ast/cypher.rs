@@ -36,7 +36,9 @@ pub enum Clause {
     Remove(RemoveClause),
     Call(CallClause),
     /// UNION [ALL] separator between two query arms.
-    Union { all: bool },
+    Union {
+        all: bool,
+    },
 }
 
 /// A `MATCH` or `OPTIONAL MATCH` clause, with an optional inline `WHERE`.

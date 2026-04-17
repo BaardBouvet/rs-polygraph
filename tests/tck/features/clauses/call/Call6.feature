@@ -28,39 +28,55 @@
 
 #encoding: utf-8
 
-Feature: Aggregation3 - Sum
+Feature: Call6 - Call clause interoperation with other clauses
 
-  Scenario: [1] Sum only non-null values
+  Scenario: [1] Calling the same STRING procedure twice using the same outputs in each call
     Given an empty graph
-    And having executed:
-      """
-      CREATE ({name: 'a', num: 33})
-      CREATE ({name: 'a'})
-      CREATE ({name: 'a', num: 42})
-      """
+    And there exists a procedure test.labels() :: (label :: STRING?):
+      | label |
+      | 'A'   |
+      | 'B'   |
+      | 'C'   |
     When executing query:
       """
-      MATCH (n)
-      RETURN n.name, sum(n.num)
+      CALL test.labels() YIELD label
+      WITH count(*) AS c
+      CALL test.labels() YIELD label
+      RETURN *
       """
-    Then the result should be, in any order:
-      | n.name | sum(n.num) |
-      | 'a'    | 75         |
+    Then the result should be, in order:
+      | c | label |
+      | 3 | 'A'   |
+      | 3 | 'B'   |
+      | 3 | 'C'   |
     And no side effects
 
-  @slow
-  Scenario: [2] No overflow during summation
-    Given any graph
+  Scenario: [2] Project procedure results between query scopes with WITH clause
+    Given an empty graph
+    And there exists a procedure test.my.proc(in :: INTEGER?) :: (out :: STRING?):
+      | in   | out   |
+      | null | 'nix' |
     When executing query:
       """
-      UNWIND range(1000000, 2000000) AS i
-      WITH i
-      LIMIT 3000
-      RETURN sum(i)
+      CALL test.my.proc(null) YIELD out
+      WITH out RETURN out
       """
-    Then the result should be, in any order:
-      | sum(i)     |
-      | 3004498500 |
+    Then the result should be, in order:
+      | out   |
+      | 'nix' |
     And no side effects
 
-  
+  Scenario: [3] Project procedure results between query scopes with WITH clause and rename the projection
+    Given an empty graph
+    And there exists a procedure test.my.proc(in :: INTEGER?) :: (out :: STRING?):
+      | in   | out   |
+      | null | 'nix' |
+    When executing query:
+      """
+      CALL test.my.proc(null) YIELD out
+      WITH out AS a RETURN a
+      """
+    Then the result should be, in order:
+      | a     |
+      | 'nix' |
+    And no side effects

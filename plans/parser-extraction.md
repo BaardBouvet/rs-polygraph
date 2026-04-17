@@ -1,7 +1,7 @@
 # Parser Extraction — Standalone `cypher-parser` / `gql-parser` Crate
 
 **Status**: planned  
-**Updated**: 2026-04-15
+**Updated**: 2026-04-16
 
 > See also the discussion notes appended at the end of this document for context on the spargebra comparison.
 
@@ -321,6 +321,86 @@ The current `AstVisitor` in `src/translator/visitor.rs` covers only 5 node types
 1. Move a complete read-only `CypherVisitor<Output>` (default no-op for every node) into `opencypher-parser`.
 2. Add `CypherVisitorMut` for in-place rewrites.
 3. The translator's internal visitor becomes an `opencypher_parser::CypherVisitor` implementor.
+
+---
+
+## Full-Grammar-First Strategy
+
+> **Status: IMPLEMENTED** (2026-04-16) — `grammars/cypher.pest` was rewritten from spec
+> and the parser updated; TCK baseline restored to 1632/1748 (93.3%). See implementation
+> notes at the end of this section.
+
+### Context
+
+The TCK compliance effort exposed a recurring pattern: a test scenario fails, we trace it to a missing grammar rule, add the rule, move on — only to hit the next gap a few hours later. Each incremental grammar addition is cheap in isolation but the cumulative cost is high: context-switches, re-running the suite, adjusting the AST, updating the translator, repeat. Many of the 3,650 TCK scenarios are blocked purely by parser gaps that could be closed in one pass if the complete grammar were in place from the start.
+
+### Proposed approach
+
+Instead of continuing to grow the grammar incrementally, do a **single upfront pass** to produce a complete, spec-faithful pest grammar before adding any more translator coverage.
+
+The official openCypher ANTLR4 grammar is maintained at:
+
+```
+https://github.com/opencypher/openCypher/tree/master/grammar
+```
+
+The key file is `cypher.xml` (the canonical EBNF specification) and an auto-generated `Cypher.g4` ANTLR4 grammar derived from it. The grammar covers the full openCypher 9 surface — every clause, expression, operator, literal type, and pattern variant included in the TCK.
+
+### Conversion: ANTLR4 → pest
+
+ANTLR4 and pest differ in a few important ways that require manual attention during conversion; everything else is mechanical:
+
+| Issue | ANTLR4 | pest | Resolution |
+|---|---|---|---|
+| Left recursion | Supported (implicit) | Forbidden | Rewrite left-recursive expression rules using Pratt parsing or iterative `(op term)*` wrappers |
+| Case-insensitive keywords | `options { caseInsensitive=true; }` | Explicit `^"keyword"` or combined rules | Add `ASCII_ALPHA_UPPER \| ASCII_ALPHA_LOWER` alternatives per keyword, or use `^` prefix |
+| Whitespace/comments | `WHITESPACE` channel | `WHITESPACE` rule + `_` | Declare `WHITESPACE = _{ … }` and `COMMENT = _{ … }` as silent rules |
+| Lookahead predicates (`~`, `?`) | Inline predicates | `!` / `&` | Translate directly to pest prefix operators |
+| Lexer fragments | Separate `fragment` rules | Inlined or named rules | Inline small fragments; name reusable ones |
+| Unicode identifiers | Built-in | `\u{…}` ranges | Replicate openCypher spec's identifier Unicode ranges explicitly |
+
+The expression precedence hierarchy in openCypher (12 levels, from `OR` down to unary) is the hardest part. The recommended approach is **pest Pratt parser** (`PrattParser` from the `pest` crate), which lets the grammar express operators and their precedence separately from the recursive descent rules — matching how the ANTLR4 grammar handles it.
+
+### Recommended build order
+
+1. **Clone the openCypher repo** and review `grammar/cypher.xml` (authoritative) and `grammar/Cypher.g4` (readable ANTLR4 form).
+2. **Produce a complete `cypher.pest`** that parses every construct in the ANTLR4 grammar. All nodes that the translator does not yet handle can map to a single `unimplemented_clause` catch-all rule initially — the grammar must *accept* the input even if the translator returns `UnsupportedFeature`.
+3. **Run the full TCK parse-only pass**: for each scenario, invoke the parser only (no translation) and confirm the grammar accepts the input. This gives a clean parser coverage baseline before any translator work.
+4. **Replace the existing `grammars/cypher.pest`** with the new complete grammar, updating parser code and AST in the same PR.
+5. **Continue TCK translator work** — but now every failure is a translator gap, never a parser gap.
+
+This is a one-time investment that eliminates an entire class of future regressions and lets translator work proceed at higher velocity.
+
+### Implementation Notes (2026-04-16)
+
+Steps 1–4 are now complete. Key additions over the old grammar:
+
+| Feature | Grammar rule | Parser handling |
+|---|---|---|
+| `UNION` / `UNION ALL` | `single_query` wrapper in `statement` | `build_statement` restructured |
+| `ORDER BY/SKIP/LIMIT` inside `WITH` | `projection_body` rule | `build_projection_body` returns 5-tuple |
+| Reserved words as label/type/key names | `schema_name` rule | label extraction updated to `schema_name` |
+| Namespaced functions (`apoc.text.join`) | `func_name = @{ (ident ~ ".")* ~ ident }` | `name = name_pair.as_str()` |
+| `COUNT(n)`, `COUNT(DISTINCT n)` | `count_expr = { COUNT ~ (count_star \| DISTINCT? expr) }` | `build_aggregate_expr` handles `count_expr` |
+| `FOREACH (var IN list \| clause+)` | `foreach_clause` | → `UnsupportedFeature` |
+| `ON MATCH SET` / `ON CREATE SET` in `MERGE` | `merge_action` | parsed, not yet translated |
+| `CALL … YIELD *` / `YIELD items` | `yield_clause`, `yield_star`, `yield_items` | via `build_call_clause` |
+| `EXISTS { … }` subquery | `exists_subquery` | → `UnsupportedFeature` |
+| `REDUCE(acc = e, v IN l \| expr)` | `reduce_expr` | → `UnsupportedFeature` |
+| `shortestPath`, `allShortestPaths` | `shortest_path_atom` | → `UnsupportedFeature` |
+| `$param` in expressions | `parameter` atom | → `UnsupportedFeature` |
+| Unary `+` | `unary_plus` in `unary_expr` | no-op, returns inner |
+| `NOT IN` | `kw_NOT ~ kw_IN ~ add_sub_expr` in `comparison_suffix` | `NotIn` expression variant |
+
+**PEG ordering lessons learned** (tricky correctness constraints):
+- `full_arrow = { "<-->" }` **must** appear as the **first** alternative in `rel_pattern`; otherwise `left_arrow` (`<-`) greedily consumes 3 chars of `<-->` leaving `>` unparseable.
+- `aggregate_expr` must appear **before** `function_call` in `atom`; otherwise `COUNT(*)` matches `function_call` before `aggregate_expr`.
+- `comparison_suffix = { comp_op ~ comparison_expr \| … }` — the RHS must remain `comparison_expr` (not `add_sub_expr`) to preserve right-associative chained comparison `a < b < c` → `a < (b < c)`, which the translator converts to `a < b AND b < c`.
+- `properties = { map_literal }` — parameters in node-predicate position (`MATCH (n $p)`) are correctly rejected as syntax errors per the TCK. Do NOT add `\| parameter` here.
+
+### Scope
+
+This work belongs inside the eventual `opencypher-parser` crate but does **not** require the crate extraction to happen first. It can be done in-place against the current `grammars/cypher.pest` and then the completed grammar moves to the extracted crate later.
 
 ---
 

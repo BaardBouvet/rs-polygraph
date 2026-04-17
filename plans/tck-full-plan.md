@@ -1,11 +1,11 @@
 # Full openCypher TCK Suite Expansion Plan
 
 **Status**: in progress  
-**Updated**: 2026-04-14
+**Updated**: 2026-04-15
 
-**Current state**: 461/463 (99.6%) across 4 clause categories — 12.7% of the full TCK  
+**Current state**: 2199/2505 (87.8%) across all vendored scenarios  
 **Target state**: ≥ 80% pass rate across all 3,650 scenarios from 37 categories  
-**Gap**: 3,170 new scenarios across 33 missing categories + 196 feature files
+**Gap**: ~350 more scenarios from non-vendored categories (Phase D)
 
 **Target SPARQL dialect**: SPARQL-star / SPARQL 1.2 (Oxigraph 0.4 supports RDF-star natively). SPARQL 1.2 adds `TRIPLE()`, `SUBJECT()`, `PREDICATE()`, `OBJECT()`, and `isTRIPLE()` functions, which directly enable `type(r)` extraction and relationship-as-value scenarios.
 

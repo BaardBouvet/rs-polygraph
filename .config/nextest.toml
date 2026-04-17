@@ -1,0 +1,55 @@
+[profile.default]
+
+# tck_clauses: all 10 clauses sub-directories
+[[profile.default.overrides]]
+filter = "binary(tck_clauses)"
+run-extra-args = [
+  "--dir", "tests/tck/features/clauses/match-where",
+  "--dir", "tests/tck/features/clauses/return",
+  "--dir", "tests/tck/features/clauses/return-orderby",
+  "--dir", "tests/tck/features/clauses/return-skip-limit",
+  "--dir", "tests/tck/features/clauses/union",
+  "--dir", "tests/tck/features/clauses/unwind",
+  "--dir", "tests/tck/features/clauses/with",
+  "--dir", "tests/tck/features/clauses/with-orderBy",
+  "--dir", "tests/tck/features/clauses/with-skip-limit",
+  "--dir", "tests/tck/features/clauses/with-where"
+]
+
+# tck_expressions_agg: aggregation (all 8 files; @slow skipped by default)
+[[profile.default.overrides]]
+filter = "binary(tck_expressions_agg)"
+run-extra-args = ["--dir", "tests/tck/features/expressions/aggregation"]
+
+# tck_expressions_heavy: the two slowest expression groups
+[[profile.default.overrides]]
+filter = "binary(tck_expressions_heavy)"
+run-extra-args = [
+  "--dir", "tests/tck/features/expressions/boolean",
+  "--dir", "tests/tck/features/expressions/precedence"
+]
+
+# tck_expressions_misc: remaining expression sub-directories
+[[profile.default.overrides]]
+filter = "binary(tck_expressions_misc)"
+run-extra-args = [
+  "--dir", "tests/tck/features/expressions/comparison",
+  "--dir", "tests/tck/features/expressions/conditional",
+  "--dir", "tests/tck/features/expressions/list",
+  "--dir", "tests/tck/features/expressions/literals",
+  "--dir", "tests/tck/features/expressions/map",
+  "--dir", "tests/tck/features/expressions/mathematical",
+  "--dir", "tests/tck/features/expressions/null",
+  "--dir", "tests/tck/features/expressions/string",
+  "--dir", "tests/tck/features/expressions/typeConversion"
+]
+
+# tck_usecases
+[[profile.default.overrides]]
+filter = "binary(tck_usecases)"
+run-extra-args = ["--dir", "tests/tck/features/useCases"]
+
+# Slow scenarios — run periodically, not on every dev cycle.
+[[profile.default.overrides]]
+filter = "binary(tck_slow)"
+run-extra-args = ["--run-slow"]

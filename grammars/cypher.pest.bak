@@ -154,13 +154,7 @@ ident_escaped = @{ "`" ~ (!"``" ~ !"` " ~ !("`" ~ !"`") ~ ANY | "``")+ ~ "`" }
 
 // Variable: a symbolic name that is not a reserved keyword.
 // symbolic_name_extra items ARE allowed as variables per the spec.
-// Note: we use !(reserved_word) rather than !(reserved_word ~ !ident_char)
-// because each kw_* rule already includes a !ident_char word-boundary guard.
-// Using the compound form `!(reserved_word ~ !ident_char)` causes whitespace
-// to be consumed between reserved_word and !ident_char, putting the boundary
-// check at the wrong position (e.g. "WHEN 1" would skip the space and check at
-// "1", which IS an ident_char, wrongly passing WHEN as a variable).
-variable = { !(reserved_word) ~ (ident_escaped | ident) }
+variable = { !(reserved_word ~ !ident_char) ~ (ident_escaped | ident) }
 
 // Schema names: used for labels, relationship types, and property keys.
 // Reserved words ARE allowed in these positions (e.g. CREATE (n:MATCH)).

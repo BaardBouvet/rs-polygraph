@@ -1,7 +1,7 @@
 # TCK Parallelism Plan
 
-**Status**: planned  
-**Updated**: 2026-04-15
+**Status**: complete  
+**Updated**: 2026-04-16
 
 ## Problem
 

@@ -28,39 +28,40 @@
 
 #encoding: utf-8
 
-Feature: Aggregation3 - Sum
+Feature: Path3 - Length of a path
 
-  Scenario: [1] Sum only non-null values
+  Scenario: [1] Return a var length path of length zero
     Given an empty graph
     And having executed:
       """
-      CREATE ({name: 'a', num: 33})
-      CREATE ({name: 'a'})
-      CREATE ({name: 'a', num: 42})
+      CREATE (a:A)-[:REL]->(b:B)
       """
     When executing query:
       """
-      MATCH (n)
-      RETURN n.name, sum(n.num)
+      MATCH p = (a)-[*0..1]->(b)
+      RETURN a, b, length(p) AS l
       """
     Then the result should be, in any order:
-      | n.name | sum(n.num) |
-      | 'a'    | 75         |
+      | a    | b    | l |
+      | (:A) | (:A) | 0 |
+      | (:B) | (:B) | 0 |
+      | (:A) | (:B) | 1 |
     And no side effects
 
-  @slow
-  Scenario: [2] No overflow during summation
+  Scenario: [2] Failing when using `length()` on a node
     Given any graph
     When executing query:
       """
-      UNWIND range(1000000, 2000000) AS i
-      WITH i
-      LIMIT 3000
-      RETURN sum(i)
+      MATCH (n)
+      RETURN length(n)
       """
-    Then the result should be, in any order:
-      | sum(i)     |
-      | 3004498500 |
-    And no side effects
+    Then a SyntaxError should be raised at compile time: InvalidArgumentType
 
-  
+  Scenario: [3] Failing when using `length()` on a relationship
+    Given any graph
+    When executing query:
+      """
+      MATCH ()-[r]->()
+      RETURN length(r)
+      """
+    Then a SyntaxError should be raised at compile time: InvalidArgumentType

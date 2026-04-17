@@ -765,9 +765,12 @@ fn test_prec2_multiply_parens() {
 
 #[test]
 fn debug_collect_with_undef() {
-    use oxigraph::{sparql::{QueryResults, SparqlEvaluator}, store::Store};
+    use oxigraph::{
+        sparql::{QueryResults, SparqlEvaluator},
+        store::Store,
+    };
     let store = Store::new().unwrap();
-    
+
     // This is the key test: WITH collect() over UNWIND rows that include UNDEF,
     // WHERE the FILTER(BOUND) is NOT applied
     let sparql = r#"SELECT (CONCAT("[", COALESCE(?gc, ""), "]") AS ?eq) WHERE {
@@ -776,7 +779,7 @@ fn debug_collect_with_undef() {
     VALUES ?b { "true"^^<http://www.w3.org/2001/XMLSchema#boolean> "false"^^<http://www.w3.org/2001/XMLSchema#boolean> UNDEF }
   }}
 }"#;
-    
+
     // Same with FILTER(BOUND)
     let sparql_filtered = r#"SELECT (CONCAT("[", COALESCE(?gc, ""), "]") AS ?eq) WHERE {
   {SELECT (GROUP_CONCAT(CONCAT("'", STR((?a || ?b)), "'"); SEPARATOR=", ") AS ?gc) WHERE {
@@ -786,13 +789,15 @@ fn debug_collect_with_undef() {
     FILTER(BOUND(?b))
   }}
 }"#;
-    
+
     for (name, q) in [("no filter", sparql), ("filtered", sparql_filtered)] {
         #[expect(deprecated)]
         let res = store.query_opt(q, SparqlEvaluator::new());
         match res {
             Ok(QueryResults::Solutions(sols)) => {
-                for r in sols { println!("{}: {:?}", name, r); }
+                for r in sols {
+                    println!("{}: {:?}", name, r);
+                }
             }
             Err(e) => println!("{}: Error: {}", name, e),
             _ => {}
@@ -828,27 +833,38 @@ RETURN mod, sum"#;
 #[test]
 fn debug_rel_equality() {
     // Tests if relationship variable equality works after WITH projection
+    use oxigraph::{
+        sparql::{QueryResults, SparqlEvaluator},
+        store::Store,
+    };
     use polygraph::Transpiler;
-    use oxigraph::{sparql::{QueryResults, SparqlEvaluator}, store::Store};
     let q = r#"MATCH ()-[a]->()
 WITH a
 MATCH ()-[b]->()
 WHERE a = b
 RETURN count(b)"#;
-    let s = Transpiler::cypher_to_sparql(q, &ENGINE).map(|r| r.sparql).unwrap_or_else(|e| format!("ERROR: {e}"));
+    let s = Transpiler::cypher_to_sparql(q, &ENGINE)
+        .map(|r| r.sparql)
+        .unwrap_or_else(|e| format!("ERROR: {e}"));
     println!("SPARQL:\n{}", s);
     let store = Store::new().unwrap();
-    store.load_from_reader(oxigraph::io::RdfFormat::Turtle, b"@prefix : <http://polygraph.example/> .\n:a :T :b .\n" as &[u8]).unwrap();
+    store
+        .load_from_reader(
+            oxigraph::io::RdfFormat::Turtle,
+            b"@prefix : <http://polygraph.example/> .\n:a :T :b .\n" as &[u8],
+        )
+        .unwrap();
     #[expect(deprecated)]
     match store.query_opt(&s, SparqlEvaluator::new()) {
         Ok(QueryResults::Solutions(mut sols)) => {
-            for r in &mut sols { println!("row: {:?}", r); }
+            for r in &mut sols {
+                println!("row: {:?}", r);
+            }
         }
         Err(e) => println!("Error: {}", e),
         _ => {}
     }
 }
-
 
 #[test]
 fn debug_string_contains_type() {
@@ -884,8 +900,14 @@ RETURN collect(DISTINCT n.num) AS a, collect(DISTINCT f.num) AS b";
         Ok(r) => {
             println!("SPARQL:\n{}", r.sparql);
             // Should use sub-SELECT with FILTER(BOUND(?n)) so unbound n doesn't wildcard-match
-            assert!(r.sparql.contains("SELECT ?n"), "Expected SELECT ?n sub-select in SPARQL");
-            assert!(r.sparql.contains("FILTER(BOUND(?n))"), "Expected FILTER(BOUND(?n)) in SPARQL");
+            assert!(
+                r.sparql.contains("SELECT ?n"),
+                "Expected SELECT ?n sub-select in SPARQL"
+            );
+            assert!(
+                r.sparql.contains("FILTER(BOUND(?n))"),
+                "Expected FILTER(BOUND(?n)) in SPARQL"
+            );
         }
         Err(e) => panic!("Error: {}", e),
     }

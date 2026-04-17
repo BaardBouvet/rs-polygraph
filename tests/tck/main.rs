@@ -866,8 +866,62 @@ async fn runtime_error(world: &mut TckWorld) {
 
 #[tokio::main]
 async fn main() {
-    TckWorld::cucumber()
-        .max_concurrent_scenarios(None) // unlimited — each scenario is isolated (fresh in-memory Store)
-        .run("tests/tck/features")
-        .await;
+    // cargo-nextest passes `--list --format terse` to discover tests in custom harnesses.
+    // It calls twice: without `--ignored` for regular tests and with `--ignored` for
+    // ignored tests.  Respond with a single test entry for the regular call; nothing for
+    // the ignored call (we have no #[ignore] tests).
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--list") {
+        if !args.iter().any(|a| a == "--ignored") {
+            // Derive the test name from the binary name (strip cargo's hash suffix).
+            let binary = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "tck".to_owned());
+            let name = binary.split('-').next().unwrap_or("tck");
+            println!("{name}: test");
+        }
+        return;
+    }
+
+    let features_dirs: Vec<String> = {
+        // Allow nextest to inject shard paths via one or more --dir <path> in run-extra-args.
+        let mut dirs: Vec<String> = Vec::new();
+        let args: Vec<String> = std::env::args().collect();
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--dir" && i + 1 < args.len() {
+                dirs.push(args[i + 1].clone());
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        if dirs.is_empty() {
+            dirs.push(
+                std::env::var("POLYGRAPH_TCK_FEATURES_DIR")
+                    .unwrap_or_else(|_| "tests/tck/features".to_owned()),
+            );
+        }
+        dirs
+    };
+
+    // Scenarios tagged @slow are skipped by default; pass --run-slow to include them.
+    // This keeps the dev-cycle fast while still allowing periodic full compliance runs.
+    let run_slow: bool = std::env::args().any(|a| a == "--run-slow");
+
+    // Run each shard directory (or file) sequentially within this binary.
+    // Nextest parallelises across binaries; within a binary we just chain the runs.
+    for dir in features_dirs {
+        TckWorld::cucumber()
+            .with_default_cli() // bypass clap arg-parsing (nextest injects --exact/--nocapture)
+            .max_concurrent_scenarios(None) // unlimited — each scenario is isolated
+            .filter_run(&dir, move |_, _, sc| {
+                if !run_slow && sc.tags.iter().any(|t| t == "slow") {
+                    return false;
+                }
+                true
+            })
+            .await;
+    }
 }

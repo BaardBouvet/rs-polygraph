@@ -28,39 +28,51 @@
 
 #encoding: utf-8
 
-Feature: Aggregation3 - Sum
+Feature: Graph7 - Dynamic property access
+  # Accessing a property of a node or edge by using a dynamically-computed string value as the key; e.g. allowing for the key to be passed in as a parameter
 
-  Scenario: [1] Sum only non-null values
-    Given an empty graph
+  Scenario: [1] Execute n['name'] in read queries
+    Given any graph
     And having executed:
       """
-      CREATE ({name: 'a', num: 33})
-      CREATE ({name: 'a'})
-      CREATE ({name: 'a', num: 42})
+      CREATE ({name: 'Apa'})
       """
     When executing query:
       """
-      MATCH (n)
-      RETURN n.name, sum(n.num)
+      MATCH (n {name: 'Apa'})
+      RETURN n['nam' + 'e'] AS value
       """
     Then the result should be, in any order:
-      | n.name | sum(n.num) |
-      | 'a'    | 75         |
+      | value |
+      | 'Apa' |
     And no side effects
 
-  @slow
-  Scenario: [2] No overflow during summation
+  Scenario: [2] Execute n['name'] in update queries
     Given any graph
     When executing query:
       """
-      UNWIND range(1000000, 2000000) AS i
-      WITH i
-      LIMIT 3000
-      RETURN sum(i)
+      CREATE (n {name: 'Apa'})
+      RETURN n['nam' + 'e'] AS value
       """
     Then the result should be, in any order:
-      | sum(i)     |
-      | 3004498500 |
-    And no side effects
+      | value |
+      | 'Apa' |
+    And the side effects should be:
+      | +nodes      | 1 |
+      | +properties | 1 |
 
-  
+  Scenario: [3] Use dynamic property lookup based on parameters when there is lhs type information
+    Given any graph
+    And parameters are:
+      | idx | 'name' |
+    When executing query:
+      """
+      CREATE (n {name: 'Apa'})
+      RETURN n[$idx] AS value
+      """
+    Then the result should be, in any order:
+      | value |
+      | 'Apa' |
+    And the side effects should be:
+      | +nodes      | 1 |
+      | +properties | 1 |

@@ -28,39 +28,33 @@
 
 #encoding: utf-8
 
-Feature: Aggregation3 - Sum
+Feature: Call4 - Null Arguments
 
-  Scenario: [1] Sum only non-null values
+  Scenario: [1] Standalone call to procedure with null argument
     Given an empty graph
-    And having executed:
-      """
-      CREATE ({name: 'a', num: 33})
-      CREATE ({name: 'a'})
-      CREATE ({name: 'a', num: 42})
-      """
+    And there exists a procedure test.my.proc(in :: INTEGER?) :: (out :: STRING?):
+      | in   | out   |
+      | null | 'nix' |
     When executing query:
       """
-      MATCH (n)
-      RETURN n.name, sum(n.num)
+      CALL test.my.proc(null)
       """
-    Then the result should be, in any order:
-      | n.name | sum(n.num) |
-      | 'a'    | 75         |
+    Then the result should be, in order:
+      | out   |
+      | 'nix' |
     And no side effects
 
-  @slow
-  Scenario: [2] No overflow during summation
-    Given any graph
+  Scenario: [2] In-query call to procedure with null argument
+    Given an empty graph
+    And there exists a procedure test.my.proc(in :: INTEGER?) :: (out :: STRING?):
+      | in   | out   |
+      | null | 'nix' |
     When executing query:
       """
-      UNWIND range(1000000, 2000000) AS i
-      WITH i
-      LIMIT 3000
-      RETURN sum(i)
+      CALL test.my.proc(null) YIELD out
+      RETURN out
       """
-    Then the result should be, in any order:
-      | sum(i)     |
-      | 3004498500 |
+    Then the result should be, in order:
+      | out   |
+      | 'nix' |
     And no side effects
-
-  

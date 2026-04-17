@@ -130,6 +130,9 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 | Release | Pass | Fail | Total | % | Notes |
 |---------|------|------|-------|---|-------|
 | dev     | 461  | 2    | 463   | 99.6% | 4-category subset |
+| dev     | 1632 | 116  | 1748  | 93.4% | full suite, grammar expanded |
+| dev     | 2179 | 224  | 2505  | 87.0% | Phase C vendored: graph/pattern/quantifier |
+| dev     | 2199 | 204  | 2505  | 87.8% | Phase C: SyntaxError checks, 3VL single() |
 | target  | —    | —    | 3,650 | ≥ 80% | all 37 categories |
 
 **Milestone**: ≥ 80% pass rate across the full 3,650-scenario suite.

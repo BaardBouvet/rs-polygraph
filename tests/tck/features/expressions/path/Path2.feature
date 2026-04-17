@@ -28,39 +28,50 @@
 
 #encoding: utf-8
 
-Feature: Aggregation3 - Sum
+Feature: Path2 - Relationships of a path
 
-  Scenario: [1] Sum only non-null values
+  Scenario: [1] Return relationships by fetching them from the path
     Given an empty graph
     And having executed:
       """
-      CREATE ({name: 'a', num: 33})
-      CREATE ({name: 'a'})
-      CREATE ({name: 'a', num: 42})
+      CREATE (s:Start)-[:REL {num: 1}]->(b:B)-[:REL {num: 2}]->(c:C)
       """
     When executing query:
       """
-      MATCH (n)
-      RETURN n.name, sum(n.num)
+      MATCH p = (a:Start)-[:REL*2..2]->(b)
+      RETURN relationships(p)
       """
     Then the result should be, in any order:
-      | n.name | sum(n.num) |
-      | 'a'    | 75         |
+      | relationships(p)                   |
+      | [[:REL {num: 1}], [:REL {num: 2}]] |
     And no side effects
 
-  @slow
-  Scenario: [2] No overflow during summation
+
+  Scenario: [2] Return relationships by fetching them from the path - starting from the end
+    Given an empty graph
+    And having executed:
+      """
+      CREATE (a:A)-[:REL {num: 1}]->(b:B)-[:REL {num: 2}]->(e:End)
+      """
+    When executing query:
+      """
+      MATCH p = (a)-[:REL*2..2]->(b:End)
+      RETURN relationships(p)
+      """
+    Then the result should be, in any order:
+      | relationships(p)                   |
+      | [[:REL {num: 1}], [:REL {num: 2}]] |
+    And no side effects
+
+  Scenario: [3] `relationships()` on null path
     Given any graph
     When executing query:
       """
-      UNWIND range(1000000, 2000000) AS i
-      WITH i
-      LIMIT 3000
-      RETURN sum(i)
+      WITH null AS a
+      OPTIONAL MATCH p = (a)-[r]->()
+      RETURN relationships(p), relationships(null)
       """
     Then the result should be, in any order:
-      | sum(i)     |
-      | 3004498500 |
+      | relationships(p) | relationships(null) |
+      | null             | null                |
     And no side effects
-
-  
