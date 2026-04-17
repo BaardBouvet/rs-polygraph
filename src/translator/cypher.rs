@@ -8468,6 +8468,8 @@ fn try_eval_bool_const(expr: &Expression) -> Option<Option<bool>> {
                 match e {
                     Expression::Literal(Literal::Integer(n)) => Some(*n as f64),
                     Expression::Literal(Literal::Float(f)) => Some(*f),
+                    // Handle negated literals like -15 → Negate(Integer(15))
+                    Expression::Negate(inner) => to_f64(inner).map(|v| -v),
                     _ => None,
                 }
             }
@@ -8507,6 +8509,25 @@ fn try_eval_bool_const(expr: &Expression) -> Option<Option<bool>> {
 /// Evaluate equality of two literal expressions at compile time using Cypher's 3VL.
 /// Returns Some(true/false/null) when both values are fully literal, None otherwise.
 fn try_eval_literal_eq(lhs: &Expression, rhs: &Expression) -> Option<Option<bool>> {
+    // Normalize negated numeric literals → actual value for comparison.
+    fn normalize(e: &Expression) -> Option<Expression> {
+        match e {
+            Expression::Negate(inner) => match inner.as_ref() {
+                Expression::Literal(Literal::Integer(n)) => {
+                    Some(Expression::Literal(Literal::Integer(-*n)))
+                }
+                Expression::Literal(Literal::Float(f)) => {
+                    Some(Expression::Literal(Literal::Float(-*f)))
+                }
+                _ => None,
+            },
+            _ => Some(e.clone()),
+        }
+    }
+    let lhs_n = normalize(lhs)?;
+    let rhs_n = normalize(rhs)?;
+    let lhs = &lhs_n;
+    let rhs = &rhs_n;
     match (lhs, rhs) {
         // Any null input → null output
         (Expression::Literal(Literal::Null), _) | (_, Expression::Literal(Literal::Null)) => {
