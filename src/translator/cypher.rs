@@ -8338,40 +8338,7 @@ fn agg_expr_key(agg: &crate::ast::cypher::AggregateExpr) -> String {
 
 /// Serialize a list of expressions to a string like `[1, 2, 'foo']`.
 fn serialize_list_literal(elems: &[Expression]) -> String {
-    let parts: Vec<String> = elems
-        .iter()
-        .map(|e| match e {
-            Expression::Literal(Literal::Integer(n)) => n.to_string(),
-            Expression::Literal(Literal::Float(f)) => cypher_float_str(*f),
-            Expression::Literal(Literal::String(s)) => format!("'{s}'"),
-            Expression::Literal(Literal::Boolean(b)) => b.to_string(),
-            Expression::Literal(Literal::Null) => "null".to_string(),
-            Expression::List(inner) => serialize_list_literal(inner),
-            Expression::Map(pairs) => {
-                let entries: Vec<String> = pairs
-                    .iter()
-                    .map(|(k, v)| {
-                        let val = match v {
-                            Expression::Literal(Literal::Integer(n)) => n.to_string(),
-                            Expression::Literal(Literal::Float(f)) => cypher_float_str(*f),
-                            Expression::Literal(Literal::String(s)) => format!("'{s}'"),
-                            Expression::Literal(Literal::Boolean(b)) => b.to_string(),
-                            Expression::Literal(Literal::Null) => "null".to_string(),
-                            _ => "?".to_string(),
-                        };
-                        format!("{k}: {val}")
-                    })
-                    .collect();
-                format!("{{{}}}", entries.join(", "))
-            }
-            Expression::Negate(inner) => match inner.as_ref() {
-                Expression::Literal(Literal::Integer(n)) => format!("-{n}"),
-                Expression::Literal(Literal::Float(f)) => cypher_float_str(-f),
-                _ => "?".to_string(),
-            },
-            _ => "?".to_string(),
-        })
-        .collect();
+    let parts: Vec<String> = elems.iter().map(serialize_list_element).collect();
     format!("[{}]", parts.join(", "))
 }
 
