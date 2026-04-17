@@ -2,8 +2,7 @@ use polygraph::{sparql_engine::GenericSparql11, Transpiler};
 const ENGINE: GenericSparql11 = GenericSparql11;
 fn main() {
     let queries = [
-        "MATCH (n)-[r:T]->() RETURN r.name AS name",  // normal match
-        "MATCH (n) RETURN [(n)-[r:T]->() | r.name] AS list",  // comprehension
+        "MATCH ()-[a]->() WITH a MATCH ()-[b]->() WHERE a = b RETURN count(b)",
     ];
     for q in &queries {
         match Transpiler::cypher_to_sparql(q, &ENGINE) {
