@@ -2501,6 +2501,34 @@ impl TranslationState {
                                         .unwrap_or_else(|| v.clone())
                                 })
                                 .collect();
+                            // Also project eid_var, src, and dst for relationship variables
+                            // so that relationship identity comparisons (a = b) work
+                            // correctly after the WITH scope boundary.
+                            // Uses sameTerm(src_a, src_b) etc., which works for blank nodes.
+                            if let crate::ast::cypher::ReturnItems::Explicit(ref wit_items) =
+                                w.items
+                            {
+                                for item in wit_items {
+                                    if let Expression::Variable(var_name) = &item.expression {
+                                        let alias =
+                                            item.alias.as_deref().unwrap_or(var_name.as_str());
+                                        if let Some(edge) = self.edge_map.get(alias).cloned() {
+                                            // Project src variable
+                                            if let TermPattern::Variable(sv) = &edge.src {
+                                                if !inner_vars.contains(sv) {
+                                                    inner_vars.push(sv.clone());
+                                                }
+                                            }
+                                            // Project dst variable
+                                            if let TermPattern::Variable(dv) = &edge.dst {
+                                                if !inner_vars.contains(dv) {
+                                                    inner_vars.push(dv.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             // Pre-translate ORDER BY edge-property accesses BEFORE the WITH
                             // sub-SELECT so that RDF-star reification triples are inside the
                             // sub-SELECT where src/dst variables are in scope.
@@ -3540,20 +3568,81 @@ impl TranslationState {
 
             match rel.direction {
                 Direction::Left => {
-                    triples.push(TriplePattern {
-                        subject: dst.clone(),
-                        predicate: pred_term.clone(),
-                        object: src.clone(),
-                    });
-                    triples.extend(anno_triples(dst, src));
+                    if reuse_eid.is_none() {
+                        if let Some(ref var_name) = rel.variable {
+                            // Named untyped LEFT relationship: put the triple and the BIND
+                            // in the SAME group graph pattern so BIND can see ?pred and endpoints.
+                            let eid = Variable::new_unchecked(format!("__eid_{}", var_name));
+                            let pred_expr = SparExpr::Variable(pred_var.clone());
+                            // Canonical stored-triple order: subject=dst, predicate=?pred, object=src.
+                            let eid_expr = build_edge_id_expr(dst, pred_expr, src);
+                            let rel_bgp = GraphPattern::Bgp {
+                                patterns: vec![TriplePattern {
+                                    subject: dst.clone(),
+                                    predicate: pred_term.clone(),
+                                    object: src.clone(),
+                                }],
+                            };
+                            path_patterns.push(GraphPattern::Extend {
+                                inner: Box::new(rel_bgp),
+                                variable: eid,
+                                expression: eid_expr,
+                            });
+                            triples.extend(anno_triples(dst, src));
+                        } else {
+                            triples.push(TriplePattern {
+                                subject: dst.clone(),
+                                predicate: pred_term.clone(),
+                                object: src.clone(),
+                            });
+                            triples.extend(anno_triples(dst, src));
+                        }
+                    } else {
+                        triples.push(TriplePattern {
+                            subject: dst.clone(),
+                            predicate: pred_term.clone(),
+                            object: src.clone(),
+                        });
+                        triples.extend(anno_triples(dst, src));
+                    }
                 }
                 Direction::Right => {
-                    triples.push(TriplePattern {
-                        subject: src.clone(),
-                        predicate: pred_term.clone(),
-                        object: dst.clone(),
-                    });
-                    triples.extend(anno_triples(src, dst));
+                    if reuse_eid.is_none() {
+                        if let Some(ref var_name) = rel.variable {
+                            // Named untyped RIGHT relationship: put the triple and the BIND
+                            // in the SAME group graph pattern so BIND can see ?pred and endpoints.
+                            let eid = Variable::new_unchecked(format!("__eid_{}", var_name));
+                            let pred_expr = SparExpr::Variable(pred_var.clone());
+                            let eid_expr = build_edge_id_expr(src, pred_expr, dst);
+                            let rel_bgp = GraphPattern::Bgp {
+                                patterns: vec![TriplePattern {
+                                    subject: src.clone(),
+                                    predicate: pred_term.clone(),
+                                    object: dst.clone(),
+                                }],
+                            };
+                            path_patterns.push(GraphPattern::Extend {
+                                inner: Box::new(rel_bgp),
+                                variable: eid,
+                                expression: eid_expr,
+                            });
+                            triples.extend(anno_triples(src, dst));
+                        } else {
+                            triples.push(TriplePattern {
+                                subject: src.clone(),
+                                predicate: pred_term.clone(),
+                                object: dst.clone(),
+                            });
+                            triples.extend(anno_triples(src, dst));
+                        }
+                    } else {
+                        triples.push(TriplePattern {
+                            subject: src.clone(),
+                            predicate: pred_term.clone(),
+                            object: dst.clone(),
+                        });
+                        triples.extend(anno_triples(src, dst));
+                    }
                 }
                 Direction::Both => {
                     // For re-used edges (same generation, no intervening WITH), emit a
@@ -5288,25 +5377,89 @@ impl TranslationState {
                     }
                 }
                 // Special case: relationship identity comparison (r = r2 or r <> r2).
-                // When both sides are relationship variables with eid_var, compare
-                // the synthetic edge-identity variables instead of the raw pattern vars.
+                // Compare using sameTerm on src/pred/dst. Use OR of forward and reverse
+                // comparison to handle undirected vs directed and LEFT vs RIGHT cross-matches:
+                //   (sameTerm(src_l, src_r) AND pred_eq AND sameTerm(dst_l, dst_r))
+                //   OR
+                //   (sameTerm(src_l, dst_r) AND pred_eq AND sameTerm(dst_l, src_r))
+                // Works with blank nodes (unlike CONCAT(STR(...)) which returns UNDEF for bnodes).
                 if matches!(op, CompOp::Eq | CompOp::Ne) {
                     if let (Expression::Variable(lname), Expression::Variable(rname)) =
                         (lhs.as_ref(), rhs.as_ref())
                     {
-                        let l_eid = self
-                            .edge_map
-                            .get(lname.as_str())
-                            .and_then(|e| e.eid_var.clone());
-                        let r_eid = self
-                            .edge_map
-                            .get(rname.as_str())
-                            .and_then(|e| e.eid_var.clone());
-                        if let (Some(le), Some(re)) = (l_eid, r_eid) {
-                            let eq = SparExpr::Equal(
-                                Box::new(SparExpr::Variable(le)),
-                                Box::new(SparExpr::Variable(re)),
+                        let l_edge = self.edge_map.get(lname.as_str()).cloned();
+                        let r_edge = self.edge_map.get(rname.as_str()).cloned();
+                        if let (Some(le), Some(re)) = (l_edge, r_edge) {
+                            // Predicate equality expression.
+                            let pred_eq: SparExpr = match (&le.pred_var, &re.pred_var) {
+                                (Some(lp), Some(rp)) => SparExpr::SameTerm(
+                                    Box::new(SparExpr::Variable(lp.clone())),
+                                    Box::new(SparExpr::Variable(rp.clone())),
+                                ),
+                                (Some(lp), None) => SparExpr::SameTerm(
+                                    Box::new(SparExpr::Variable(lp.clone())),
+                                    Box::new(SparExpr::Literal(SparLit::new_simple_literal(
+                                        re.pred.as_str(),
+                                    ))),
+                                ),
+                                (None, Some(rp)) => SparExpr::SameTerm(
+                                    Box::new(SparExpr::Literal(SparLit::new_simple_literal(
+                                        le.pred.as_str(),
+                                    ))),
+                                    Box::new(SparExpr::Variable(rp.clone())),
+                                ),
+                                (None, None) => {
+                                    // Both typed: compare predicate IRIs.
+                                    if le.pred == re.pred {
+                                        SparExpr::Literal(SparLit::new_typed_literal(
+                                            "true",
+                                            spargebra::term::NamedNode::new_unchecked(
+                                                "http://www.w3.org/2001/XMLSchema#boolean",
+                                            ),
+                                        ))
+                                    } else {
+                                        SparExpr::Literal(SparLit::new_typed_literal(
+                                            "false",
+                                            spargebra::term::NamedNode::new_unchecked(
+                                                "http://www.w3.org/2001/XMLSchema#boolean",
+                                            ),
+                                        ))
+                                    }
+                                }
+                            };
+                            let ls = term_to_sparexpr(&le.src);
+                            let ld = term_to_sparexpr(&le.dst);
+                            let rs = term_to_sparexpr(&re.src);
+                            let rd = term_to_sparexpr(&re.dst);
+                            // Forward comparison: src_l=src_r AND pred AND dst_l=dst_r
+                            let fwd = SparExpr::And(
+                                Box::new(SparExpr::SameTerm(
+                                    Box::new(ls.clone()),
+                                    Box::new(rs.clone()),
+                                )),
+                                Box::new(SparExpr::And(
+                                    Box::new(pred_eq.clone()),
+                                    Box::new(SparExpr::SameTerm(
+                                        Box::new(ld.clone()),
+                                        Box::new(rd.clone()),
+                                    )),
+                                )),
                             );
+                            // Reverse comparison: src_l=dst_r AND pred AND dst_l=src_r
+                            let rev = SparExpr::And(
+                                Box::new(SparExpr::SameTerm(
+                                    Box::new(ls),
+                                    Box::new(rd),
+                                )),
+                                Box::new(SparExpr::And(
+                                    Box::new(pred_eq),
+                                    Box::new(SparExpr::SameTerm(
+                                        Box::new(ld),
+                                        Box::new(rs),
+                                    )),
+                                )),
+                            );
+                            let eq = SparExpr::Or(Box::new(fwd), Box::new(rev));
                             return Ok(if matches!(op, CompOp::Ne) {
                                 SparExpr::Not(Box::new(eq))
                             } else {
