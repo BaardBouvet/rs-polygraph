@@ -8777,13 +8777,29 @@ fn try_eval_bool_const(expr: &Expression) -> Option<Option<bool>> {
             if lhs_null || rhs_null {
                 return Some(None);
             }
-            // Evaluate numeric comparisons for literal integers/floats.
+            // Evaluate numeric comparisons for literal integers/floats,
+            // including arithmetic sub-expressions like Modulo, Add, etc.
             fn to_f64(e: &Expression) -> Option<f64> {
                 match e {
                     Expression::Literal(Literal::Integer(n)) => Some(*n as f64),
                     Expression::Literal(Literal::Float(f)) => Some(*f),
                     // Handle negated literals like -15 → Negate(Integer(15))
                     Expression::Negate(inner) => to_f64(inner).map(|v| -v),
+                    // Fold arithmetic at compile time
+                    Expression::Modulo(a, b) => {
+                        let av = to_f64(a)?;
+                        let bv = to_f64(b)?;
+                        if bv == 0.0 { None } else { Some(av % bv) }
+                    }
+                    Expression::Add(a, b) => {
+                        Some(to_f64(a)? + to_f64(b)?)
+                    }
+                    Expression::Subtract(a, b) => {
+                        Some(to_f64(a)? - to_f64(b)?)
+                    }
+                    Expression::Multiply(a, b) => {
+                        Some(to_f64(a)? * to_f64(b)?)
+                    }
                     _ => None,
                 }
             }
@@ -8823,7 +8839,7 @@ fn try_eval_bool_const(expr: &Expression) -> Option<Option<bool>> {
 /// Evaluate equality of two literal expressions at compile time using Cypher's 3VL.
 /// Returns Some(true/false/null) when both values are fully literal, None otherwise.
 fn try_eval_literal_eq(lhs: &Expression, rhs: &Expression) -> Option<Option<bool>> {
-    // Normalize negated numeric literals → actual value for comparison.
+    // Normalize arithmetic expressions to literal values where possible.
     fn normalize(e: &Expression) -> Option<Expression> {
         match e {
             Expression::Negate(inner) => match inner.as_ref() {
@@ -8835,6 +8851,48 @@ fn try_eval_literal_eq(lhs: &Expression, rhs: &Expression) -> Option<Option<bool
                 }
                 _ => None,
             },
+            // Fold modulo of integer literals at compile time
+            Expression::Modulo(a, b) => {
+                let an = normalize(a)?;
+                let bn = normalize(b)?;
+                match (&an, &bn) {
+                    (
+                        Expression::Literal(Literal::Integer(av)),
+                        Expression::Literal(Literal::Integer(bv)),
+                    ) => {
+                        if *bv == 0 {
+                            None
+                        } else {
+                            Some(Expression::Literal(Literal::Integer(*av % *bv)))
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            // Fold addition of integer literals
+            Expression::Add(a, b) => {
+                let an = normalize(a)?;
+                let bn = normalize(b)?;
+                match (&an, &bn) {
+                    (
+                        Expression::Literal(Literal::Integer(av)),
+                        Expression::Literal(Literal::Integer(bv)),
+                    ) => Some(Expression::Literal(Literal::Integer(*av + *bv))),
+                    _ => None,
+                }
+            }
+            // Fold subtraction of integer literals
+            Expression::Subtract(a, b) => {
+                let an = normalize(a)?;
+                let bn = normalize(b)?;
+                match (&an, &bn) {
+                    (
+                        Expression::Literal(Literal::Integer(av)),
+                        Expression::Literal(Literal::Integer(bv)),
+                    ) => Some(Expression::Literal(Literal::Integer(*av - *bv))),
+                    _ => None,
+                }
+            }
             _ => Some(e.clone()),
         }
     }
