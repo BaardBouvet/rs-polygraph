@@ -6712,7 +6712,35 @@ impl TranslationState {
                 if let Some(Expression::Literal(Literal::Null)) = args.first() {
                     return Ok(SparExpr::Variable(self.fresh_var("null")));
                 }
-                if let Some(Expression::Variable(var_name)) = args.first() {
+                // If arg is list[n] that resolves to a known variable, rewrite as type(var).
+                let resolved_var: Option<String> =
+                    if let Some(Expression::Subscript(coll, idx)) = args.first() {
+                        self.resolve_literal_list(coll).and_then(|items| {
+                            let n_len = items.len() as i64;
+                            get_literal_int(idx).and_then(|iv| {
+                                let i = if iv < 0 { n_len + iv } else { iv };
+                                if i >= 0 && i < n_len {
+                                    if let Expression::Variable(v) = &items[i as usize] {
+                                        Some(v.clone())
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                    } else {
+                        None
+                    };
+                let eff_var_name: Option<String> = resolved_var.or_else(|| {
+                    if let Some(Expression::Variable(v)) = args.first() {
+                        Some(v.clone())
+                    } else {
+                        None
+                    }
+                });
+                if let Some(var_name) = &eff_var_name {
                     if let Some(edge) = self.edge_map.get(var_name).cloned() {
                         if let Some(pred_var) = edge.pred_var {
                             // Untyped relationship: extract local name via STRAFTER(STR(?pred), base).
@@ -7169,9 +7197,28 @@ impl TranslationState {
                     feature: "keys() on non-literal map".to_string(),
                 })
             }
-            "labels" | "relationships" => Err(PolygraphError::UnsupportedFeature {
-                feature: format!("function call: {name}()"),
-            }),
+            "labels" | "relationships" => {
+                // For null literal or statically-null/nullable variables, return null.
+                // For real node/path variables we can't enumerate labels/relationships at
+                // compile time (no graph data).
+                let arg = args.first();
+                match arg {
+                    Some(Expression::Literal(Literal::Null)) => {
+                        return Ok(SparExpr::Variable(self.fresh_var("null")));
+                    }
+                    Some(Expression::Variable(v)) => {
+                        if self.null_vars.contains(v.as_str())
+                            || self.nullable_vars.contains(v.as_str())
+                        {
+                            return Ok(SparExpr::Variable(self.fresh_var("null")));
+                        }
+                    }
+                    _ => {}
+                }
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: format!("function call: {name}()"),
+                })
+            }
             "properties" => {
                 // properties(null) = null
                 // properties(map_literal) = map_literal (identity for literal maps)
