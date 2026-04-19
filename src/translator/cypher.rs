@@ -7029,6 +7029,7 @@ impl TranslationState {
             }),
             "properties" => {
                 // properties(null) = null
+                // properties(map_literal) = map_literal (identity for literal maps)
                 // properties(nullable_var) = null (no graph data support; only null case)
                 let arg = args.first().ok_or_else(|| PolygraphError::UnsupportedFeature {
                     feature: "properties() requires an argument".to_string(),
@@ -7037,12 +7038,27 @@ impl TranslationState {
                     Expression::Literal(Literal::Null) => {
                         return Ok(SparExpr::Variable(self.fresh_var("null")));
                     }
+                    Expression::Map(pairs) => {
+                        // properties({k: v}) = {k: v} itself — serialize as string.
+                        let serialized = serialize_list_element(&Expression::Map(pairs.clone()));
+                        return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
+                    }
                     Expression::Variable(v) => {
+                        let vname = v.clone();
                         // If the variable is statically known to be null (via null_vars)
                         // or is nullable (from OPTIONAL MATCH that didn't match), return null.
-                        if self.null_vars.contains(v.as_str()) || self.nullable_vars.contains(v.as_str()) {
-                            let null_var = SparExpr::Variable(self.fresh_var("null"));
-                            return Ok(null_var);
+                        if self.null_vars.contains(vname.as_str()) || self.nullable_vars.contains(vname.as_str()) {
+                            return Ok(SparExpr::Variable(self.fresh_var("null")));
+                        }
+                        // If it's a known map alias, serialize it.
+                        if let Some(key_map) = self.map_vars.get(&vname).cloned() {
+                            let mut entries: Vec<String> = key_map
+                                .into_iter()
+                                .map(|(k, var)| format!("{k}: ?{}", var.as_str()))
+                                .collect();
+                            entries.sort();
+                            let serialized = format!("{{{}}}", entries.join(", "));
+                            return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
                         }
                     }
                     _ => {}
