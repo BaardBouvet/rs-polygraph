@@ -2196,6 +2196,12 @@ impl TranslationState {
                         for v in collect_pattern_vars(&m.pattern) {
                             self.nullable_vars.insert(v);
                         }
+                        // Also mark path variables from OPTIONAL MATCH as nullable.
+                        for pattern in &m.pattern.0 {
+                            if let Some(path_var) = &pattern.variable {
+                                self.nullable_vars.insert(path_var.clone());
+                            }
+                        }
                     } else {
                         // Before joining, emit FILTER(BOUND(?v)) for any pattern
                         // variable that might be null from a prior OPTIONAL MATCH.
@@ -7139,6 +7145,19 @@ impl TranslationState {
             }
             "nodes" => {
                 // nodes(p) → list of node IRIs along named path p.
+                // nodes(null) or nodes(nullable) → null
+                match args.first() {
+                    Some(Expression::Literal(Literal::Null)) => {
+                        return Ok(SparExpr::Variable(self.fresh_var("null")));
+                    }
+                    Some(Expression::Variable(v))
+                        if self.null_vars.contains(v.as_str())
+                            || self.nullable_vars.contains(v.as_str()) =>
+                    {
+                        return Ok(SparExpr::Variable(self.fresh_var("null")));
+                    }
+                    _ => {}
+                }
                 if let Some(Expression::Variable(path_name)) = args.first() {
                     if let Some(node_vars) = self.path_node_vars.get(path_name.as_str()).cloned() {
                         // Build CONCAT("[", STR(?n0), ", ", STR(?n1), ..., "]")
