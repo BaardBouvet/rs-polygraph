@@ -9901,11 +9901,18 @@ fn tc_extract_ns(pairs: &[(String, Expression)]) -> Option<i64> {
 /// Normalise a timezone string to a display suffix.
 /// Numeric offsets pass through; named timezones are looked up.
 fn tc_tz_suffix(tz: &str) -> String {
+    tc_tz_suffix_month(tz, 1) // default to January (winter)
+}
+
+/// DST-aware timezone suffix: `month` (1-12) used to determine winter/summer offset.
+fn tc_tz_suffix_month(tz: &str, month: i64) -> String {
     if tz == "Z" || tz.starts_with('+') || tz.starts_with('-') {
         return tz.to_string();
     }
-    // Named timezone lookup (only CET/CEST offset needed for TCK)
-    let offset = match tz {
+    // Named timezone lookup — approximate DST by month:
+    // Central European Time: +01:00 (Oct-Mar), +02:00 (Apr-Sep)
+    let is_summer = matches!(month, 4 | 5 | 6 | 7 | 8 | 9);
+    let (winter, summer) = match tz {
         "Europe/Stockholm"
         | "Europe/Paris"
         | "Europe/Berlin"
@@ -9918,14 +9925,16 @@ fn tc_tz_suffix(tz: &str) -> String {
         | "Europe/Vienna"
         | "Europe/Zurich"
         | "Europe/Prague"
-        | "Europe/Budapest" => "+01:00",
-        "Europe/London" | "Europe/Dublin" | "UTC" | "Etc/UTC" => "Z",
-        "America/New_York" | "America/Toronto" | "America/Detroit" => "-05:00",
-        "America/Los_Angeles" | "America/San_Francisco" => "-08:00",
-        "Asia/Tokyo" => "+09:00",
-        "Asia/Shanghai" | "Asia/Beijing" | "Asia/Hong_Kong" => "+08:00",
-        _ => "Z", // safe fallback
+        | "Europe/Budapest" => ("+01:00", "+02:00"),
+        "Europe/London" | "Europe/Dublin" | "Europe/Lisbon" => ("Z", "+01:00"),
+        "UTC" | "Etc/UTC" => ("Z", "Z"),
+        "America/New_York" | "America/Toronto" | "America/Detroit" => ("-05:00", "-04:00"),
+        "America/Los_Angeles" | "America/San_Francisco" => ("-08:00", "-07:00"),
+        "Asia/Tokyo" => ("+09:00", "+09:00"), // Japan no DST
+        "Asia/Shanghai" | "Asia/Beijing" | "Asia/Hong_Kong" => ("+08:00", "+08:00"),
+        _ => ("Z", "Z"),
     };
+    let offset = if is_summer { summer } else { winter };
     if offset == "Z" {
         format!("Z[{}]", tz)
     } else {
@@ -10431,7 +10440,9 @@ fn temporal_localtime_from_map(pairs: &[(String, Expression)]) -> Option<String>
 fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     let h = temporal_get_i(pairs, "hour")?;
     let min = temporal_get_i(pairs, "minute").unwrap_or(0);
-    let tz = temporal_get_s(pairs, "timezone").unwrap_or_else(|| "Z".to_string());
+    let tz = temporal_get_s(pairs, "timezone")
+        .map(|s| tc_tz_suffix(&s))
+        .unwrap_or_else(|| "Z".to_string());
     let sec = temporal_get_i(pairs, "second");
     let frac = temporal_sub_second(pairs);
     match sec {
@@ -10475,25 +10486,30 @@ fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<Str
 /// Construct a `datetime` literal from a map.
 fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     let year = temporal_get_i(pairs, "year")?;
-    let date_part = if let Some(m) = temporal_get_i(pairs, "month") {
+    // Extract month and date_part simultaneously for DST lookup
+    let (month, date_part) = if let Some(m) = temporal_get_i(pairs, "month") {
         let d = temporal_get_i(pairs, "day").unwrap_or(1);
-        format!("{year:04}-{m:02}-{d:02}")
+        (m, format!("{year:04}-{m:02}-{d:02}"))
     } else if let Some(w) = temporal_get_i(pairs, "week") {
         let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(1);
-        temporal_week_to_date(year, w, dow)
+        let ds = temporal_week_to_date(year, w, dow);
+        let m: i64 = ds[5..7].parse().unwrap_or(1);
+        (m, ds)
     } else if let Some(ord) = temporal_get_i(pairs, "ordinalDay") {
         let (m, d) = temporal_ordinal_to_md(year, ord);
-        format!("{year:04}-{m:02}-{d:02}")
+        (m, format!("{year:04}-{m:02}-{d:02}"))
     } else if let Some(q) = temporal_get_i(pairs, "quarter") {
         let doq = temporal_get_i(pairs, "dayOfQuarter").unwrap_or(1);
         let (m, d) = temporal_quarter_to_md(year, q, doq);
-        format!("{year:04}-{m:02}-{d:02}")
+        (m, format!("{year:04}-{m:02}-{d:02}"))
     } else {
-        format!("{year:04}-01-01")
+        (1, format!("{year:04}-01-01"))
     };
     let h = temporal_get_i(pairs, "hour").unwrap_or(0);
     let min = temporal_get_i(pairs, "minute").unwrap_or(0);
-    let tz = temporal_get_s(pairs, "timezone").unwrap_or_else(|| "Z".to_string());
+    let tz = temporal_get_s(pairs, "timezone")
+        .map(|s| tc_tz_suffix_month(&s, month))
+        .unwrap_or_else(|| "Z".to_string());
     let sec = temporal_get_i(pairs, "second");
     let frac = temporal_sub_second(pairs);
     let time_part = match sec {
