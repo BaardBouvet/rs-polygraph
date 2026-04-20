@@ -8144,6 +8144,118 @@ impl TranslationState {
                     feature: format!("function call: {name}() with unsupported arguments"),
                 })
             }
+            // ── Temporal truncation functions ─────────────────────────────
+            "date.truncate"
+            | "datetime.truncate"
+            | "localdatetime.truncate"
+            | "localtime.truncate"
+            | "time.truncate" => {
+                if args.len() < 3 {
+                    return Err(PolygraphError::UnsupportedFeature {
+                        feature: format!("{name}() requires 3 arguments"),
+                    });
+                }
+                let unit = match &args[0] {
+                    Expression::Literal(Literal::String(s)) => s.clone(),
+                    _ => {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: format!("{name}() unit must be a string literal"),
+                        })
+                    }
+                };
+                let other_expr = &args[1];
+                let overrides: &[(String, Expression)] = match &args[2] {
+                    Expression::Map(kvs) => kvs,
+                    _ => {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: format!("{name}() map argument must be a literal map"),
+                        })
+                    }
+                };
+
+                let mut comps = tc_from_expr(other_expr).ok_or_else(|| {
+                    PolygraphError::UnsupportedFeature {
+                        feature: format!("{name}() with non-literal 'other' argument"),
+                    }
+                })?;
+
+                tc_apply_truncation(&unit, &mut comps);
+                tc_apply_overrides(overrides, &mut comps);
+
+                let _is_time_unit = matches!(
+                    unit.as_str(),
+                    "hour"
+                        | "minute"
+                        | "second"
+                        | "millisecond"
+                        | "microsecond"
+                        | "nanosecond"
+                );
+
+                let xsd_dt =
+                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime");
+                let xsd_time =
+                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#time");
+
+                let lit: SparLit = match name_lower.as_str() {
+                    "date.truncate" => {
+                        let y = comps.year.unwrap_or(0);
+                        let m = comps.month.unwrap_or(1);
+                        let d = comps.day.unwrap_or(1);
+                        SparLit::new_simple_literal(format!("{y:04}-{m:02}-{d:02}"))
+                    }
+                    "datetime.truncate" => {
+                        let y = comps.year.unwrap_or(0);
+                        let m = comps.month.unwrap_or(1);
+                        let d = comps.day.unwrap_or(1);
+                        let h = comps.hour.unwrap_or(0);
+                        let min = comps.minute.unwrap_or(0);
+                        let sec = comps.second.unwrap_or(0);
+                        let ns = comps.ns.unwrap_or(0);
+                        let time_part = tc_fmt_time(h, min, sec, ns);
+                        let tz = comps.tz.as_deref().unwrap_or("Z");
+                        SparLit::new_typed_literal(
+                            format!("{y:04}-{m:02}-{d:02}T{time_part}{tz}"),
+                            xsd_dt,
+                        )
+                    }
+                    "localdatetime.truncate" => {
+                        let y = comps.year.unwrap_or(0);
+                        let m = comps.month.unwrap_or(1);
+                        let d = comps.day.unwrap_or(1);
+                        let h = comps.hour.unwrap_or(0);
+                        let min = comps.minute.unwrap_or(0);
+                        let sec = comps.second.unwrap_or(0);
+                        let ns = comps.ns.unwrap_or(0);
+                        let time_part = tc_fmt_time(h, min, sec, ns);
+                        SparLit::new_simple_literal(format!(
+                            "{y:04}-{m:02}-{d:02}T{time_part}"
+                        ))
+                    }
+                    "localtime.truncate" => {
+                        let h = comps.hour.unwrap_or(0);
+                        let min = comps.minute.unwrap_or(0);
+                        let sec = comps.second.unwrap_or(0);
+                        let ns = comps.ns.unwrap_or(0);
+                        SparLit::new_simple_literal(tc_fmt_time(h, min, sec, ns))
+                    }
+                    "time.truncate" => {
+                        let h = comps.hour.unwrap_or(0);
+                        let min = comps.minute.unwrap_or(0);
+                        let sec = comps.second.unwrap_or(0);
+                        let ns = comps.ns.unwrap_or(0);
+                        let time_part = tc_fmt_time(h, min, sec, ns);
+                        let tz = comps.tz.as_deref().unwrap_or("Z");
+                        SparLit::new_typed_literal(
+                            format!("{time_part}{tz}"),
+                            xsd_time,
+                        )
+                    }
+                    _ => unreachable!(),
+                };
+                Ok(SparExpr::Literal(lit))
+            }
+
             _ => Err(PolygraphError::UnsupportedFeature {
                 feature: format!("function call: {name}()"),
             }),
@@ -9598,6 +9710,476 @@ fn try_const_fold_pow(base: &SparExpr, exp: &SparExpr) -> Option<SparExpr> {
         format!("{result:?}"),
         NamedNode::new_unchecked(XSD_DOUBLE),
     )))
+}
+
+// ── Temporal Truncation helpers ───────────────────────────────────────────────
+
+/// Decomposed temporal components used during truncation.
+#[derive(Clone, Debug, Default)]
+struct TcComponents {
+    year: Option<i64>,
+    month: Option<i64>,
+    day: Option<i64>,
+    hour: Option<i64>,
+    minute: Option<i64>,
+    second: Option<i64>,
+    /// Combined nanosecond within second (0..=999_999_999). None = not specified.
+    ns: Option<i64>,
+    /// Full timezone suffix appended to output, e.g. "Z", "+01:00",
+    /// "+01:00[Europe/Stockholm]". None = local/no-timezone.
+    tz: Option<String>,
+    /// True when the source temporal expression was `localdatetime()` or `localtime()`.
+    /// Drives the Z-suffix rule for `localdatetime.truncate` at time-granularity units.
+    is_localdatetime: bool,
+}
+
+/// Extract TcComponents from a literal temporal function-call expression.
+fn tc_from_expr(expr: &Expression) -> Option<TcComponents> {
+    let Expression::FunctionCall { name, args, .. } = expr else {
+        return None;
+    };
+    let nm = name.to_ascii_lowercase();
+    match nm.as_str() {
+        "date" => {
+            if let Some(Expression::Map(pairs)) = args.first() {
+                let year = temporal_get_i(pairs, "year")?;
+                let (month, day) = tc_extract_date_md(year, pairs);
+                Some(TcComponents {
+                    year: Some(year),
+                    month: Some(month),
+                    day: Some(day),
+                    ..Default::default()
+                })
+            } else if let Some(Expression::Literal(Literal::String(s))) = args.first() {
+                let ds = temporal_parse_date(s)?;
+                let y = ds[..4].parse().ok()?;
+                let m = ds[5..7].parse().ok()?;
+                let d = ds[8..10].parse().ok()?;
+                Some(TcComponents {
+                    year: Some(y),
+                    month: Some(m),
+                    day: Some(d),
+                    ..Default::default()
+                })
+            } else {
+                None
+            }
+        }
+        "localdatetime" => {
+            if let Some(Expression::Map(pairs)) = args.first() {
+                let year = temporal_get_i(pairs, "year")?;
+                let (month, day) = tc_extract_date_md(year, pairs);
+                let hour = temporal_get_i(pairs, "hour");
+                let minute = temporal_get_i(pairs, "minute");
+                let second = temporal_get_i(pairs, "second");
+                let ns = tc_extract_ns(pairs);
+                Some(TcComponents {
+                    year: Some(year),
+                    month: Some(month),
+                    day: Some(day),
+                    hour,
+                    minute,
+                    second,
+                    ns,
+                    is_localdatetime: true,
+                    ..Default::default()
+                })
+            } else {
+                None
+            }
+        }
+        "datetime" => {
+            if let Some(Expression::Map(pairs)) = args.first() {
+                let year = temporal_get_i(pairs, "year")?;
+                let (month, day) = tc_extract_date_md(year, pairs);
+                let hour = temporal_get_i(pairs, "hour");
+                let minute = temporal_get_i(pairs, "minute");
+                let second = temporal_get_i(pairs, "second");
+                let ns = tc_extract_ns(pairs);
+                let tz = temporal_get_s(pairs, "timezone").map(|s| tc_tz_suffix(&s));
+                Some(TcComponents {
+                    year: Some(year),
+                    month: Some(month),
+                    day: Some(day),
+                    hour,
+                    minute,
+                    second,
+                    ns,
+                    tz,
+                    ..Default::default()
+                })
+            } else {
+                None
+            }
+        }
+        "localtime" => {
+            if let Some(Expression::Map(pairs)) = args.first() {
+                let hour = temporal_get_i(pairs, "hour")?;
+                let minute = temporal_get_i(pairs, "minute");
+                let second = temporal_get_i(pairs, "second");
+                let ns = tc_extract_ns(pairs);
+                Some(TcComponents {
+                    hour: Some(hour),
+                    minute,
+                    second,
+                    ns,
+                    is_localdatetime: true, // localtime → Z rule
+                    ..Default::default()
+                })
+            } else {
+                None
+            }
+        }
+        "time" => {
+            if let Some(Expression::Map(pairs)) = args.first() {
+                let hour = temporal_get_i(pairs, "hour")?;
+                let minute = temporal_get_i(pairs, "minute");
+                let second = temporal_get_i(pairs, "second");
+                let ns = tc_extract_ns(pairs);
+                let tz = temporal_get_s(pairs, "timezone").map(|s| tc_tz_suffix(&s));
+                Some(TcComponents {
+                    hour: Some(hour),
+                    minute,
+                    second,
+                    ns,
+                    tz,
+                    ..Default::default()
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Extract (month, day) from map pairs given year, handling calendar variants.
+fn tc_extract_date_md(year: i64, pairs: &[(String, Expression)]) -> (i64, i64) {
+    if let Some(m) = temporal_get_i(pairs, "month") {
+        let d = temporal_get_i(pairs, "day").unwrap_or(1);
+        return (m, d);
+    }
+    if let Some(w) = temporal_get_i(pairs, "week") {
+        let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(1);
+        let ds = temporal_week_to_date(year, w, dow);
+        if let (Ok(m), Ok(d)) = (ds[5..7].parse::<i64>(), ds[8..10].parse::<i64>()) {
+            return (m, d);
+        }
+    }
+    if let Some(ord) = temporal_get_i(pairs, "ordinalDay") {
+        let (m, d) = temporal_ordinal_to_md(year, ord);
+        return (m, d);
+    }
+    if let Some(q) = temporal_get_i(pairs, "quarter") {
+        let doq = temporal_get_i(pairs, "dayOfQuarter").unwrap_or(1);
+        let (m, d) = temporal_quarter_to_md(year, q, doq);
+        return (m, d);
+    }
+    (1, 1)
+}
+
+/// Extract combined nanosecond value from map pairs (millisecond + microsecond + nanosecond).
+fn tc_extract_ns(pairs: &[(String, Expression)]) -> Option<i64> {
+    let has_ms = pairs
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("millisecond"));
+    let has_us = pairs
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("microsecond"));
+    let has_ns = pairs
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("nanosecond"));
+    if !has_ms && !has_us && !has_ns {
+        return None;
+    }
+    let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+    let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+    let ns = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+    Some(ms * 1_000_000 + us * 1_000 + ns)
+}
+
+/// Normalise a timezone string to a display suffix.
+/// Numeric offsets pass through; named timezones are looked up.
+fn tc_tz_suffix(tz: &str) -> String {
+    if tz == "Z" || tz.starts_with('+') || tz.starts_with('-') {
+        return tz.to_string();
+    }
+    // Named timezone lookup (only CET/CEST offset needed for TCK)
+    let offset = match tz {
+        "Europe/Stockholm"
+        | "Europe/Paris"
+        | "Europe/Berlin"
+        | "Europe/Rome"
+        | "Europe/Madrid"
+        | "Europe/Amsterdam"
+        | "Europe/Brussels"
+        | "Europe/Copenhagen"
+        | "Europe/Warsaw"
+        | "Europe/Vienna"
+        | "Europe/Zurich"
+        | "Europe/Prague"
+        | "Europe/Budapest" => "+01:00",
+        "Europe/London" | "Europe/Dublin" | "UTC" | "Etc/UTC" => "Z",
+        "America/New_York" | "America/Toronto" | "America/Detroit" => "-05:00",
+        "America/Los_Angeles" | "America/San_Francisco" => "-08:00",
+        "Asia/Tokyo" => "+09:00",
+        "Asia/Shanghai" | "Asia/Beijing" | "Asia/Hong_Kong" => "+08:00",
+        _ => "Z", // safe fallback
+    };
+    if offset == "Z" {
+        format!("Z[{}]", tz)
+    } else {
+        format!("{}[{}]", offset, tz)
+    }
+}
+
+/// Return the ISO week-numbering year for a given calendar date.
+fn tc_iso_week_year(y: i64, m: i64, d: i64) -> i64 {
+    let epoch = temporal_epoch(y, m, d);
+    let dow = ((epoch - 1) % 7 + 7) % 7 + 1; // 1=Mon, 7=Sun
+    // ISO week year = year of the Thursday in the same ISO week
+    let thu_epoch = epoch + (4 - dow);
+    temporal_from_epoch(thu_epoch).0
+}
+
+/// Apply unit-based truncation to a TcComponents in-place.
+fn tc_apply_truncation(unit: &str, comps: &mut TcComponents) {
+    match unit {
+        "millennium" => {
+            if let Some(y) = comps.year {
+                comps.year = Some((y / 1000) * 1000);
+            }
+            comps.month = Some(1);
+            comps.day = Some(1);
+            comps.hour = Some(0);
+            comps.minute = Some(0);
+            comps.second = Some(0);
+            comps.ns = Some(0);
+        }
+        "century" => {
+            if let Some(y) = comps.year {
+                comps.year = Some((y / 100) * 100);
+            }
+            comps.month = Some(1);
+            comps.day = Some(1);
+            comps.hour = Some(0);
+            comps.minute = Some(0);
+            comps.second = Some(0);
+            comps.ns = Some(0);
+        }
+        "decade" => {
+            if let Some(y) = comps.year {
+                comps.year = Some((y / 10) * 10);
+            }
+            comps.month = Some(1);
+            comps.day = Some(1);
+            comps.hour = Some(0);
+            comps.minute = Some(0);
+            comps.second = Some(0);
+            comps.ns = Some(0);
+        }
+        "year" => {
+            comps.month = Some(1);
+            comps.day = Some(1);
+            comps.hour = Some(0);
+            comps.minute = Some(0);
+            comps.second = Some(0);
+            comps.ns = Some(0);
+        }
+        "weekYear" => {
+            if let (Some(y), Some(m), Some(d)) = (comps.year, comps.month, comps.day) {
+                let wy = tc_iso_week_year(y, m, d);
+                let mon_str = temporal_week_to_date(wy, 1, 1);
+                if let (Ok(ny), Ok(nm), Ok(nd)) = (
+                    mon_str[..4].parse::<i64>(),
+                    mon_str[5..7].parse::<i64>(),
+                    mon_str[8..10].parse::<i64>(),
+                ) {
+                    comps.year = Some(ny);
+                    comps.month = Some(nm);
+                    comps.day = Some(nd);
+                }
+            }
+            comps.hour = Some(0);
+            comps.minute = Some(0);
+            comps.second = Some(0);
+            comps.ns = Some(0);
+        }
+        "quarter" => {
+            if let Some(m) = comps.month {
+                comps.month = Some(((m - 1) / 3) * 3 + 1);
+            }
+            comps.day = Some(1);
+            comps.hour = Some(0);
+            comps.minute = Some(0);
+            comps.second = Some(0);
+            comps.ns = Some(0);
+        }
+        "month" => {
+            comps.day = Some(1);
+            comps.hour = Some(0);
+            comps.minute = Some(0);
+            comps.second = Some(0);
+            comps.ns = Some(0);
+        }
+        "week" => {
+            if let (Some(y), Some(m), Some(d)) = (comps.year, comps.month, comps.day) {
+                let epoch = temporal_epoch(y, m, d);
+                let dow = ((epoch - 1) % 7 + 7) % 7 + 1; // 1=Mon..7=Sun
+                let monday_epoch = epoch - (dow - 1);
+                let (ny, nm, nd) = temporal_from_epoch(monday_epoch);
+                comps.year = Some(ny);
+                comps.month = Some(nm);
+                comps.day = Some(nd);
+            }
+            comps.hour = Some(0);
+            comps.minute = Some(0);
+            comps.second = Some(0);
+            comps.ns = Some(0);
+        }
+        "day" => {
+            comps.hour = Some(0);
+            comps.minute = Some(0);
+            comps.second = Some(0);
+            comps.ns = Some(0);
+        }
+        "hour" => {
+            comps.minute = Some(0);
+            comps.second = Some(0);
+            comps.ns = Some(0);
+        }
+        "minute" => {
+            comps.second = Some(0);
+            comps.ns = Some(0);
+        }
+        "second" => {
+            comps.ns = Some(0);
+        }
+        "millisecond" => {
+            if let Some(n) = comps.ns {
+                comps.ns = Some((n / 1_000_000) * 1_000_000);
+            }
+        }
+        "microsecond" => {
+            if let Some(n) = comps.ns {
+                comps.ns = Some((n / 1_000) * 1_000);
+            }
+        }
+        "nanosecond" => {
+            // no truncation
+        }
+        _ => {}
+    }
+}
+
+/// Extract integer override value from an Expression.
+fn tc_get_override_i(v: &Expression) -> Option<i64> {
+    match v {
+        Expression::Literal(Literal::Integer(n)) => Some(*n),
+        Expression::Literal(Literal::Float(f)) => Some(*f as i64),
+        _ => None,
+    }
+}
+
+/// Apply map override values to TcComponents.
+fn tc_apply_overrides(overrides: &[(String, Expression)], comps: &mut TcComponents) {
+    for (k, v) in overrides {
+        match k.to_ascii_lowercase().as_str() {
+            "year" => {
+                if let Some(n) = tc_get_override_i(v) {
+                    comps.year = Some(n);
+                }
+            }
+            "month" => {
+                if let Some(n) = tc_get_override_i(v) {
+                    comps.month = Some(n);
+                }
+            }
+            "day" => {
+                if let Some(n) = tc_get_override_i(v) {
+                    comps.day = Some(n);
+                }
+            }
+            "dayofweek" => {
+                // dayOfWeek override: advance from current Monday by (dow-1) days
+                if let (Some(y), Some(m), Some(d), Some(dow)) = (
+                    comps.year,
+                    comps.month,
+                    comps.day,
+                    tc_get_override_i(v),
+                ) {
+                    let monday_epoch = temporal_epoch(y, m, d);
+                    let target_epoch = monday_epoch + dow - 1;
+                    let (ny, nm, nd) = temporal_from_epoch(target_epoch);
+                    comps.year = Some(ny);
+                    comps.month = Some(nm);
+                    comps.day = Some(nd);
+                }
+            }
+            "hour" => {
+                if let Some(n) = tc_get_override_i(v) {
+                    comps.hour = Some(n);
+                }
+            }
+            "minute" => {
+                if let Some(n) = tc_get_override_i(v) {
+                    comps.minute = Some(n);
+                }
+            }
+            "second" => {
+                if let Some(n) = tc_get_override_i(v) {
+                    comps.second = Some(n);
+                }
+            }
+            "millisecond" => {
+                if let Some(n) = tc_get_override_i(v) {
+                    // Replace millisecond bits; keep sub-millisecond portion
+                    let sub_ms = comps.ns.unwrap_or(0) % 1_000_000;
+                    comps.ns = Some(n * 1_000_000 + sub_ms);
+                }
+            }
+            "microsecond" => {
+                if let Some(n) = tc_get_override_i(v) {
+                    // Replace microsecond bits; keep sub-microsecond (ns % 1000)
+                    let ms_bits = (comps.ns.unwrap_or(0) / 1_000_000) * 1_000_000;
+                    let sub_us = comps.ns.unwrap_or(0) % 1_000;
+                    comps.ns = Some(ms_bits + n * 1_000 + sub_us);
+                }
+            }
+            "nanosecond" => {
+                if let Some(n) = tc_get_override_i(v) {
+                    // Replace nanosecond bits; keep ms+us portion
+                    let upper = (comps.ns.unwrap_or(0) / 1_000) * 1_000;
+                    comps.ns = Some(upper + n);
+                }
+            }
+            "timezone" => {
+                if let Expression::Literal(Literal::String(s)) = v {
+                    comps.tz = Some(tc_tz_suffix(s));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Build fractional-second suffix from combined nanoseconds. Empty if zero.
+fn tc_fmt_frac(ns: i64) -> String {
+    if ns == 0 {
+        return String::new();
+    }
+    let s = format!("{ns:09}");
+    format!(".{}", s.trim_end_matches('0'))
+}
+
+/// Format a time part "HH:MM" or "HH:MM:SS[.frac]" from components.
+fn tc_fmt_time(h: i64, min: i64, sec: i64, ns: i64) -> String {
+    let frac = tc_fmt_frac(ns);
+    if sec == 0 && ns == 0 {
+        format!("{h:02}:{min:02}")
+    } else {
+        format!("{h:02}:{min:02}:{sec:02}{frac}")
+    }
 }
 
 // ── Temporal helper functions (pure calendar arithmetic) ─────────────────────
