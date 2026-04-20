@@ -1575,6 +1575,95 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                     bound_vars.insert(v);
                 }
             }
+            Clause::Merge(m) => {
+                // Validate MERGE pattern — same rules as CREATE for structural errors.
+                let mut merge_vars: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                let is_standalone = m.pattern.elements.len() == 1;
+                for elem in &m.pattern.elements {
+                    match elem {
+                        PatternElement::Node(n) => {
+                            if let Some(v) = &n.variable {
+                                let already_bound = bound_vars.contains(v.as_str())
+                                    || kinds.contains_key(v.as_str())
+                                    || !merge_vars.insert(v.clone());
+                                if already_bound {
+                                    let adds_labels = !n.labels.is_empty();
+                                    let adds_props = n.properties.is_some();
+                                    if adds_labels || adds_props || is_standalone {
+                                        return Err(PolygraphError::Translation {
+                                            message: format!(
+                                                "VariableAlreadyBound: '{v}' is already bound"
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        PatternElement::Relationship(r) => {
+                            // NoSingleRelationshipType: MERGE must have exactly 1 rel type.
+                            if r.rel_types.is_empty() {
+                                return Err(PolygraphError::Translation {
+                                    message: "NoSingleRelationshipType: \
+                                              relationship in MERGE must have exactly one type"
+                                        .to_string(),
+                                });
+                            }
+                            if r.rel_types.len() > 1 {
+                                return Err(PolygraphError::Translation {
+                                    message: "NoSingleRelationshipType: \
+                                              relationship in MERGE cannot have multiple types"
+                                        .to_string(),
+                                });
+                            }
+                            // CreatingVarLength: variable-length rels in MERGE are invalid.
+                            if r.range.is_some() {
+                                return Err(PolygraphError::Translation {
+                                    message: "CreatingVarLength: \
+                                              variable-length relationship in MERGE \
+                                              is not supported"
+                                        .to_string(),
+                                });
+                            }
+                            // VariableAlreadyBound for relationship variables
+                            if let Some(rv) = &r.variable {
+                                if bound_vars.contains(rv.as_str())
+                                    || kinds.contains_key(rv.as_str())
+                                    || !merge_vars.insert(rv.clone())
+                                {
+                                    return Err(PolygraphError::Translation {
+                                        message: format!(
+                                            "VariableAlreadyBound: '{rv}' is already bound"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                // Register MERGE-introduced variables so subsequent RETURN/WITH clauses
+                // do not get false UndefinedVariable errors.
+                for v in merge_vars {
+                    let kind = m
+                        .pattern
+                        .elements
+                        .iter()
+                        .find_map(|e| match e {
+                            PatternElement::Node(n) if n.variable.as_deref() == Some(v.as_str()) => {
+                                Some(Kind::Node)
+                            }
+                            PatternElement::Relationship(r)
+                                if r.variable.as_deref() == Some(v.as_str()) =>
+                            {
+                                Some(Kind::Rel)
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(Kind::Node);
+                    kinds.insert(v.clone(), kind);
+                    bound_vars.insert(v);
+                }
+            }
             _ => {}
         }
     }
@@ -3480,7 +3569,16 @@ impl TranslationState {
                         }
                     } else {
                         if self.skip_write_clauses {
-                            // Silently skip merge; caller handles it separately
+                            // Silently skip merge; caller handles it separately.
+                            // Register any named node/rel variables from the MERGE pattern
+                            // so subsequent RETURN clauses can reference them.
+                            for elem in &m.pattern.elements {
+                                if let PatternElement::Node(n) = elem {
+                                    if let Some(v) = &n.variable {
+                                        self.node_vars.insert(v.clone());
+                                    }
+                                }
+                            }
                         } else {
                             return Err(PolygraphError::UnsupportedFeature {
                                 feature: format!(

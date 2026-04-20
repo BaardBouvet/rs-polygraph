@@ -135,6 +135,8 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 | dev     | 2199 | 204  | 2505  | 87.8% | Phase C: SyntaxError checks, 3VL single() |
 | dev     | 2228 | 175  | 2505  | 88.9% | date/time functions, WITH list propagation fixes |
 | dev     | 2248 | 155  | 2505  | 89.7% | null_vars tracking, subscript property access, temporal constructors in translate_function_call, const_int_vars for range(), path nullable tracking |
+| dev     | 2548 | 1241 | 3789  | 67.2% | Phase D vendored (create/delete/merge/remove/set/temporal); comprehensive temporal constructors (ISO week/ordinal/quarter/duration) |
+| dev     | 2595 | 999  | 3789  | 68.5% | Write clause support: REMOVE/SET via SPARQL Update, CREATE/DELETE semantic validation (VariableAlreadyBound, NoSingleRelationshipType, etc.) |
 | target  | —    | —    | 3,650 | ≥ 80% | all 37 categories |
 
 **Milestone**: ≥ 80% pass rate across the full 3,650-scenario suite.

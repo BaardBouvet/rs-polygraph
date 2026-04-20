@@ -116,6 +116,8 @@ pub enum SetItem {
     MergeMap { variable: Ident, map: MapLiteral },
     /// `n = expr`
     NodeReplace { variable: Ident, value: Expression },
+    /// `n:Label` — add one or more labels to a node
+    SetLabel { variable: Ident, labels: Vec<Label> },
 }
 
 /// A `DELETE` or `DETACH DELETE` clause.

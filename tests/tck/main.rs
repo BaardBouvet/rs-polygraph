@@ -561,6 +561,18 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                         SetItem::MergeMap { .. } | SetItem::NodeReplace { .. } => {
                             // Complex SET forms — skip (not yet implemented)
                         }
+                        SetItem::SetLabel { variable, labels } => {
+                            // SET n:Label → INSERT { ?n a <base:Label> } WHERE { ?n <base:__node> <base:__node> }
+                            let n_var = format!("?{variable}");
+                            for label in labels {
+                                let label_iri = format!("{BASE}{label}");
+                                let sentinel = format!("<{BASE}__node>");
+                                let update = format!(
+                                    "INSERT {{ {n_var} a <{label_iri}> }} WHERE {{ {n_var} {sentinel} {sentinel} }}"
+                                );
+                                updates.push(update);
+                            }
+                        }
                     }
                 }
             }

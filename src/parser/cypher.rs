@@ -342,6 +342,21 @@ fn build_pattern_element(pair: Pair<Rule>) -> Result<Vec<PatternElement>, Polygr
     Ok(elements)
 }
 
+fn build_node_labels(pair: Pair<Rule>) -> Result<Vec<Label>, PolygraphError> {
+    let mut labels = Vec::new();
+    for label_pair in pair.into_inner() {
+        if label_pair.as_rule() == Rule::node_label {
+            let name = label_pair
+                .into_inner()
+                .find(|p| p.as_rule() == Rule::schema_name)
+                .map(|p| p.as_str().trim_matches('`').to_string())
+                .unwrap_or_default();
+            labels.push(name);
+        }
+    }
+    Ok(labels)
+}
+
 fn build_node_pattern(pair: Pair<Rule>) -> Result<NodePattern, PolygraphError> {
     // node_pattern = { "(" ~ variable? ~ node_labels? ~ properties? ~ ")" }
     let mut variable = None;
@@ -554,9 +569,12 @@ fn build_set_item(pair: Pair<Rule>) -> Result<SetItem, PolygraphError> {
         }
         Rule::variable => {
             let var_name = ident_text(&children[0]);
-            // Is the second non-whitespace child "+=" or "=" ?
-            // Look for map_literal (merge) vs expression (replace)
+            // Determine which set_item variant based on what follows the variable:
+            //   n += {map}  → MergeMap
+            //   n:Label     → SetLabel
+            //   n = expr    → NodeReplace
             let has_map = children.iter().any(|p| p.as_rule() == Rule::map_literal);
+            let has_labels = children.iter().any(|p| p.as_rule() == Rule::node_labels);
             if has_map {
                 let map_pair = children
                     .into_iter()
@@ -566,6 +584,16 @@ fn build_set_item(pair: Pair<Rule>) -> Result<SetItem, PolygraphError> {
                 Ok(SetItem::MergeMap {
                     variable: var_name,
                     map,
+                })
+            } else if has_labels {
+                let labels_pair = children
+                    .into_iter()
+                    .find(|p| p.as_rule() == Rule::node_labels)
+                    .expect("set_item label has node_labels");
+                let labels = build_node_labels(labels_pair)?;
+                Ok(SetItem::SetLabel {
+                    variable: var_name,
+                    labels,
                 })
             } else {
                 let expr_pair = children
