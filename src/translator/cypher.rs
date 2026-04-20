@@ -1929,6 +1929,12 @@ struct TranslationState {
     /// instead of returning an UnsupportedFeature error. Used by callers that handle
     /// write operations separately (e.g., the TCK test harness).
     skip_write_clauses: bool,
+    /// Labels known for node variables from CREATE patterns (populated in skip_writes mode).
+    /// Maps variable name → list of label strings.
+    node_labels_from_create: std::collections::HashMap<String, Vec<String>>,
+    /// WITH alias → string lexical value of the literal it was bound to.
+    /// Used to fold expressions like `date(toString(alias))` at compile time.
+    with_lit_vars: std::collections::HashMap<String, String>,
 }
 
 impl TranslationState {
@@ -1964,6 +1970,8 @@ impl TranslationState {
             null_vars: Default::default(),
             const_int_vars: Default::default(),
             skip_write_clauses: false,
+            node_labels_from_create: Default::default(),
+            with_lit_vars: Default::default(),
         }
     }
 
@@ -3248,6 +3256,8 @@ impl TranslationState {
                         let prev_null_vars = std::mem::take(&mut self.null_vars);
                         // Save and reset const_int_vars for this new WITH scope.
                         let prev_const_ints = std::mem::take(&mut self.const_int_vars);
+                        // Save and reset with_lit_vars for this new WITH scope.
+                        let prev_lit_vars = std::mem::take(&mut self.with_lit_vars);
                         if let crate::ast::cypher::ReturnItems::Explicit(ref items) = w.items {
                             for item in items {
                                 let alias = match &item.alias {
@@ -3288,7 +3298,11 @@ impl TranslationState {
                                         }
                                         // Propagate const-int status for pass-through aliases.
                                         if let Some(n) = prev_const_ints.get(v.as_str()).copied() {
-                                            self.const_int_vars.insert(alias, n);
+                                            self.const_int_vars.insert(alias.clone(), n);
+                                        }
+                                        // Propagate lit-var status for pass-through aliases.
+                                        if let Some(s) = prev_lit_vars.get(v.as_str()).cloned() {
+                                            self.with_lit_vars.insert(alias, s);
                                         }
                                     }
                                     Expression::FunctionCall { name, args, .. }
@@ -3309,6 +3323,46 @@ impl TranslationState {
                                             if let Some(count) = count_opt {
                                                 self.const_int_vars.insert(alias, count as i64);
                                             }
+                                        }
+                                    }
+                                    Expression::FunctionCall { name: fname, args: fargs, .. } => {
+                                        // Evaluate temporal constructors to compile-time string
+                                        // values so that `date(toString(alias))` can be folded.
+                                        let lower = fname.to_lowercase();
+                                        let base = lower
+                                            .strip_suffix(".transaction")
+                                            .or_else(|| lower.strip_suffix(".statement"))
+                                            .or_else(|| lower.strip_suffix(".realtime"))
+                                            .unwrap_or(lower.as_str());
+                                        let lit_opt: Option<String> = match fargs.first() {
+                                            Some(Expression::Map(pairs)) => match base {
+                                                "date" => temporal_date_from_map(pairs),
+                                                "localtime" => temporal_localtime_from_map(pairs),
+                                                "time" => temporal_time_from_map(pairs),
+                                                "localdatetime" => {
+                                                    temporal_localdatetime_from_map(pairs)
+                                                }
+                                                "datetime" => temporal_datetime_from_map(pairs),
+                                                _ => None,
+                                            },
+                                            Some(Expression::Literal(
+                                                crate::ast::cypher::Literal::String(s),
+                                            )) => match base {
+                                                "date" => temporal_parse_date(s),
+                                                "localtime" => temporal_parse_localtime(s),
+                                                "time" => {
+                                                    temporal_parse_time(s)
+                                                }
+                                                "localdatetime" => {
+                                                    temporal_parse_localdatetime(s)
+                                                }
+                                                "datetime" => temporal_parse_datetime(s),
+                                                _ => None,
+                                            },
+                                            _ => None,
+                                        };
+                                        if let Some(s) = lit_opt {
+                                            self.with_lit_vars.insert(alias, s);
                                         }
                                     }
                                     _ => {}
@@ -3663,6 +3717,14 @@ impl TranslationState {
                             if let PatternElement::Node(n) = elem {
                                 if let Some(v) = &n.variable {
                                     self.node_vars.insert(v.clone());
+                                    // Record labels known for this variable.
+                                    let labels: Vec<String> = n
+                                        .labels
+                                        .iter()
+                                        .map(|l| l.clone())
+                                        .collect();
+                                    self.node_labels_from_create
+                                        .insert(v.clone(), labels);
                                 }
                             }
                         }
@@ -7767,6 +7829,18 @@ impl TranslationState {
                         {
                             return Ok(SparExpr::Variable(self.fresh_var("null")));
                         }
+                        // If the variable was created in skip_writes mode, return static labels.
+                        if name_lower == "labels" {
+                            if let Some(labels) = self.node_labels_from_create.get(v.as_str()).cloned() {
+                                let list_str = if labels.is_empty() {
+                                    "[]".to_string()
+                                } else {
+                                    let items: Vec<String> = labels.iter().map(|l| format!("'{l}'")).collect();
+                                    format!("[{}]", items.join(", "))
+                                };
+                                return Ok(SparExpr::Literal(SparLit::new_simple_literal(list_str)));
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -8102,6 +8176,32 @@ impl TranslationState {
                 // Null propagation: func(null) → null.
                 if let Some(Expression::Literal(Literal::Null)) = args.first() {
                     return Ok(SparExpr::Variable(self.fresh_var("null")));
+                }
+
+                // Fold: temporal_f(v) where v is a known WITH-bound literal.
+                // e.g. `WITH date({year:1984,...}) AS d … date(d)` → the same literal.
+                if let Some(Expression::Variable(v)) = args.first() {
+                    if let Some(s) = self.with_lit_vars.get(v.as_str()).cloned() {
+                        let folded = vec![Expression::Literal(Literal::String(s))];
+                        return self.translate_function_call(name, &folded, extra);
+                    }
+                }
+                // Fold: temporal_f(toString(v)) where v is a known WITH-bound literal.
+                // e.g. `date(toString(d))` → `date(lit_str)` → same literal as d.
+                if let Some(Expression::FunctionCall {
+                    name: fname,
+                    args: fargs,
+                    ..
+                }) = args.first()
+                {
+                    if fname.eq_ignore_ascii_case("toString") || fname.eq_ignore_ascii_case("str") {
+                        if let Some(Expression::Variable(v)) = fargs.first() {
+                            if let Some(s) = self.with_lit_vars.get(v.as_str()).cloned() {
+                                let folded = vec![Expression::Literal(Literal::String(s))];
+                                return self.translate_function_call(name, &folded, extra);
+                            }
+                        }
+                    }
                 }
 
                 // Strip the .transaction/.statement/.realtime suffix for dispatch.
