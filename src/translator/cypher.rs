@@ -8092,7 +8092,25 @@ impl TranslationState {
             // ── Temporal constructors ──────────────────────────────────────────
             // Produce typed (or plain) literals from map or string arguments.
             // All calendar arithmetic is performed at translation time.
-            "date" | "localtime" | "localdatetime" | "time" | "datetime" | "duration" => {
+            "date" | "localtime" | "localdatetime" | "time" | "datetime" | "duration"
+            // .transaction/.statement/.realtime variants return current temporal or null.
+            | "date.transaction" | "date.statement" | "date.realtime"
+            | "localtime.transaction" | "localtime.statement" | "localtime.realtime"
+            | "time.transaction" | "time.statement" | "time.realtime"
+            | "localdatetime.transaction" | "localdatetime.statement" | "localdatetime.realtime"
+            | "datetime.transaction" | "datetime.statement" | "datetime.realtime" => {
+                // Null propagation: func(null) → null.
+                if let Some(Expression::Literal(Literal::Null)) = args.first() {
+                    return Ok(SparExpr::Variable(self.fresh_var("null")));
+                }
+
+                // Strip the .transaction/.statement/.realtime suffix for dispatch.
+                let base_func = name_lower
+                    .strip_suffix(".transaction")
+                    .or_else(|| name_lower.strip_suffix(".statement"))
+                    .or_else(|| name_lower.strip_suffix(".realtime"))
+                    .unwrap_or(name_lower.as_str());
+
                 let xsd_time = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#time");
                 let xsd_dt =
                     NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime");
@@ -8101,7 +8119,7 @@ impl TranslationState {
 
                 // Map argument: date({year: …, month: …}) etc.
                 if let Some(Expression::Map(pairs)) = args.first() {
-                    let lit_opt: Option<SparLit> = match name_lower.as_str() {
+                    let lit_opt: Option<SparLit> = match base_func {
                         "date" => temporal_date_from_map(pairs)
                             .map(SparLit::new_simple_literal),
                         "localtime" => temporal_localtime_from_map(pairs)
@@ -8114,14 +8132,14 @@ impl TranslationState {
                             .map(|s| SparLit::new_typed_literal(s, xsd_dt)),
                         "duration" => temporal_duration_from_map(pairs)
                             .map(|s| SparLit::new_typed_literal(s, xsd_dur)),
-                        _ => unreachable!(),
+                        _ => None,
                     };
                     if let Some(lit) = lit_opt {
                         return Ok(SparExpr::Literal(lit));
                     }
                 // String argument: date('2015-07-21') etc.
                 } else if let Some(Expression::Literal(Literal::String(s))) = args.first() {
-                    let lit_opt: Option<SparLit> = match name_lower.as_str() {
+                    let lit_opt: Option<SparLit> = match base_func {
                         "date" => temporal_parse_date(s).map(SparLit::new_simple_literal),
                         "localtime" => {
                             temporal_parse_localtime(s).map(SparLit::new_simple_literal)
@@ -8134,7 +8152,7 @@ impl TranslationState {
                             .map(|v| SparLit::new_typed_literal(v, xsd_dt)),
                         "duration" => temporal_parse_duration(s)
                             .map(|v| SparLit::new_typed_literal(v, xsd_dur)),
-                        _ => unreachable!(),
+                        _ => None,
                     };
                     if let Some(lit) = lit_opt {
                         return Ok(SparExpr::Literal(lit));
