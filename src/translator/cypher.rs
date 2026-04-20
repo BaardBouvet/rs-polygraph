@@ -3343,6 +3343,7 @@ impl TranslationState {
                                                     temporal_localdatetime_from_map(pairs)
                                                 }
                                                 "datetime" => temporal_datetime_from_map(pairs),
+                                                "duration" => temporal_duration_from_map(pairs),
                                                 _ => None,
                                             },
                                             Some(Expression::Literal(
@@ -3357,6 +3358,7 @@ impl TranslationState {
                                                     temporal_parse_localdatetime(s)
                                                 }
                                                 "datetime" => temporal_parse_datetime(s),
+                                                "duration" => temporal_parse_duration(s),
                                                 _ => None,
                                             },
                                             _ => None,
@@ -10431,18 +10433,31 @@ fn temporal_quarter_to_md(y: i64, quarter: i64, doq: i64) -> (i64, i64) {
     (month, rem)
 }
 
+/// Evaluate a numeric expression to i64, handling literals and negation.
+fn eval_expr_to_i64(v: &Expression) -> Option<i64> {
+    match v {
+        Expression::Literal(Literal::Integer(n)) => Some(*n),
+        Expression::Literal(Literal::Float(f)) => Some(*f as i64),
+        Expression::Negate(inner) => eval_expr_to_i64(inner).map(|n| -n),
+        _ => None,
+    }
+}
+
+/// Evaluate a numeric expression to f64, handling literals and negation.
+fn eval_expr_to_f64(v: &Expression) -> Option<f64> {
+    match v {
+        Expression::Literal(Literal::Float(f)) => Some(*f),
+        Expression::Literal(Literal::Integer(n)) => Some(*n as f64),
+        Expression::Negate(inner) => eval_expr_to_f64(inner).map(|f| -f),
+        _ => None,
+    }
+}
+
 /// Extract integer value for a case-insensitive key from map pairs.
 fn temporal_get_i(pairs: &[(String, Expression)], key: &str) -> Option<i64> {
     pairs.iter().find_map(|(k, v)| {
         if k.eq_ignore_ascii_case(key) {
-            if let Expression::Literal(Literal::Integer(n)) = v {
-                Some(*n)
-            } else if let Expression::Literal(Literal::Float(f)) = v {
-                // Cypher allows float for duration fields; truncate toward zero.
-                Some(*f as i64)
-            } else {
-                None
-            }
+            eval_expr_to_i64(v)
         } else {
             None
         }
@@ -10453,11 +10468,7 @@ fn temporal_get_i(pairs: &[(String, Expression)], key: &str) -> Option<i64> {
 fn temporal_get_f(pairs: &[(String, Expression)], key: &str) -> Option<f64> {
     pairs.iter().find_map(|(k, v)| {
         if k.eq_ignore_ascii_case(key) {
-            match v {
-                Expression::Literal(Literal::Float(f)) => Some(*f),
-                Expression::Literal(Literal::Integer(n)) => Some(*n as f64),
-                _ => None,
-            }
+            eval_expr_to_f64(v)
         } else {
             None
         }
@@ -10686,35 +10697,84 @@ fn temporal_duration_from_map(pairs: &[(String, Expression)]) -> Option<String> 
         date_s.push_str(&format_duration_component(d, 'D'));
     }
 
-    // Combine sub-second components
-    let total_sec = seconds.unwrap_or(0.0)
-        + ms.unwrap_or(0.0) / 1000.0
-        + us.unwrap_or(0.0) / 1_000_000.0
-        + ns.unwrap_or(0.0) / 1_000_000_000.0;
+    // Combine sub-second time parts into integer nanoseconds, then normalize
+    // seconds → minutes using truncate-toward-zero carry.
+    let sec_f = seconds.unwrap_or(0.0);
+    let ms_f = ms.unwrap_or(0.0);
+    let us_f = us.unwrap_or(0.0);
+    let ns_f = ns.unwrap_or(0.0);
+    // Convert to nanoseconds (integer, rounding to nearest).
+    let total_ns: i64 = (sec_f * 1_000_000_000.0).round() as i64
+        + (ms_f * 1_000_000.0).round() as i64
+        + (us_f * 1_000.0).round() as i64
+        + ns_f.round() as i64;
+    // Extract whole seconds (truncate toward zero) and sub-second remainder.
+    let s_whole = if total_ns >= 0 {
+        total_ns / 1_000_000_000
+    } else {
+        -((-total_ns) / 1_000_000_000)
+    };
+    let remain_ns = total_ns - s_whole * 1_000_000_000;
+    // Carry whole seconds → minutes.
+    let carry_min = if s_whole >= 0 { s_whole / 60 } else { -((-s_whole) / 60) };
+    let s_final = s_whole - carry_min * 60;
+    // Combine carried minutes with explicit minute input.
+    let has_time = hours.is_some()
+        || minutes.is_some()
+        || seconds.is_some()
+        || ms.is_some()
+        || us.is_some()
+        || ns.is_some();
+    let min_total_f = minutes.unwrap_or(0.0) + carry_min as f64;
 
     let mut time_s = String::new();
     if let Some(h) = hours {
         time_s.push_str(&format_duration_component(h, 'H'));
     }
-    if let Some(m) = minutes {
-        time_s.push_str(&format_duration_component(m, 'M'));
+    if min_total_f != 0.0 {
+        time_s.push_str(&format_duration_component(min_total_f, 'M'));
     }
-    if total_sec != 0.0 || (seconds.is_some() || ms.is_some() || us.is_some() || ns.is_some()) {
-        if total_sec != 0.0 {
-            time_s.push_str(&format_duration_seconds(total_sec));
-        }
+    let sec_str = format_duration_secs(s_final, remain_ns);
+    if !sec_str.is_empty() {
+        time_s.push_str(&sec_str);
     }
 
     let mut result = "P".to_string();
     result.push_str(&date_s);
-    if !time_s.is_empty() {
+    if has_time {
         result.push('T');
         result.push_str(&time_s);
     }
-    if result == "P" {
-        result.push_str("T0S");
+    if result == "P" || result == "PT" {
+        result = "PT0S".to_string();
     }
     Some(result)
+}
+
+/// Format an integer-seconds + sub-second nanoseconds value as a duration seconds component.
+/// Returns an empty string if both are zero.
+fn format_duration_secs(s_whole: i64, remain_ns: i64) -> String {
+    if s_whole == 0 && remain_ns == 0 {
+        return String::new();
+    }
+    let neg = s_whole < 0 || (s_whole == 0 && remain_ns < 0);
+    let abs_sw = s_whole.unsigned_abs();
+    let abs_rn = remain_ns.unsigned_abs();
+    if abs_rn == 0 {
+        if neg {
+            format!("-{abs_sw}S")
+        } else {
+            format!("{abs_sw}S")
+        }
+    } else {
+        let frac = format!("{abs_rn:09}");
+        let frac = frac.trim_end_matches('0');
+        if neg {
+            format!("-{abs_sw}.{frac}S")
+        } else {
+            format!("{abs_sw}.{frac}S")
+        }
+    }
 }
 
 fn format_duration_component(v: f64, suffix: char) -> String {
