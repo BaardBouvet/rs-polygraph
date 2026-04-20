@@ -10527,9 +10527,67 @@ fn temporal_sub_second(pairs: &[(String, Expression)]) -> String {
     }
 }
 
+/// Compute ISO week components (iso_year, week 1-53, day_of_week 1=Mon..7=Sun)
+/// from a calendar date (y, m, d).
+fn date_to_iso_week(y: i64, m: i64, d: i64) -> (i64, i64, i64) {
+    let epoch = temporal_epoch(y, m, d);
+    let dow = ((epoch - 1) % 7 + 7) % 7 + 1; // 1=Mon, 7=Sun
+    // Thursday of the current ISO week
+    let thu_epoch = epoch - dow + 4;
+    let (thu_y, _, _) = temporal_from_epoch(thu_epoch);
+    let iso_year = thu_y;
+    let jan4_of_iso = temporal_epoch(iso_year, 1, 4);
+    let jan4_dow = ((jan4_of_iso - 1) % 7 + 7) % 7 + 1;
+    let w1_mon = jan4_of_iso - (jan4_dow - 1);
+    let week = (epoch - w1_mon) / 7 + 1;
+    (iso_year, week, dow)
+}
+
+/// Extract compile-time (year, month, day) triple from a `date(...)` expression.
+fn extract_base_date_ymd(v: &Expression) -> Option<(i64, i64, i64)> {
+    if let Expression::FunctionCall { name, args, .. } = v {
+        if name.eq_ignore_ascii_case("date") {
+            if let Some(arg) = args.first() {
+                let s = match arg {
+                    Expression::Literal(Literal::String(s)) => temporal_parse_date(s)?,
+                    Expression::Map(inner) => temporal_date_from_map(inner)?,
+                    _ => return None,
+                };
+                // Parse YYYY-MM-DD
+                let parts: Vec<&str> = s.splitn(3, '-').collect();
+                if parts.len() == 3 {
+                    let y: i64 = parts[0].parse().ok()?;
+                    let m: i64 = parts[1].parse().ok()?;
+                    let d: i64 = parts[2].parse().ok()?;
+                    return Some((y, m, d));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Construct a `date` literal from a map.  Returns `None` if the map is
 /// incomplete or contains runtime-variable references (e.g. `date: otherVar`).
 fn temporal_date_from_map(pairs: &[(String, Expression)]) -> Option<String> {
+    // Check for a `date` key providing a base date for week-based construction.
+    let base_ymd: Option<(i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
+        if k.eq_ignore_ascii_case("date") {
+            extract_base_date_ymd(v)
+        } else {
+            None
+        }
+    });
+
+    if let Some((by, bm, bd)) = base_ymd {
+        // Derive ISO week components from the base date.
+        let (base_iso_year, base_week, base_dow) = date_to_iso_week(by, bm, bd);
+        let iso_year = temporal_get_i(pairs, "year").unwrap_or(base_iso_year);
+        let week = temporal_get_i(pairs, "week").unwrap_or(base_week);
+        let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(base_dow);
+        return Some(temporal_week_to_date(iso_year, week, dow));
+    }
+
     let year = temporal_get_i(pairs, "year")?;
     if let Some(m) = temporal_get_i(pairs, "month") {
         let d = temporal_get_i(pairs, "day").unwrap_or(1);
@@ -10583,22 +10641,34 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
 
 /// Construct a `localdatetime` literal from a map.
 fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
-    let year = temporal_get_i(pairs, "year")?;
-    let date_part = if let Some(m) = temporal_get_i(pairs, "month") {
-        let d = temporal_get_i(pairs, "day").unwrap_or(1);
-        format!("{year:04}-{m:02}-{d:02}")
-    } else if let Some(w) = temporal_get_i(pairs, "week") {
-        let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(1);
-        temporal_week_to_date(year, w, dow)
-    } else if let Some(ord) = temporal_get_i(pairs, "ordinalDay") {
-        let (m, d) = temporal_ordinal_to_md(year, ord);
-        format!("{year:04}-{m:02}-{d:02}")
-    } else if let Some(q) = temporal_get_i(pairs, "quarter") {
-        let doq = temporal_get_i(pairs, "dayOfQuarter").unwrap_or(1);
-        let (m, d) = temporal_quarter_to_md(year, q, doq);
-        format!("{year:04}-{m:02}-{d:02}")
+    // Check for a `date` key as base for week-based construction.
+    let base_ymd: Option<(i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
+        if k.eq_ignore_ascii_case("date") { extract_base_date_ymd(v) } else { None }
+    });
+    let date_part = if let Some((by, bm, bd)) = base_ymd {
+        let (base_iso_year, base_week, base_dow) = date_to_iso_week(by, bm, bd);
+        let iso_year = temporal_get_i(pairs, "year").unwrap_or(base_iso_year);
+        let week = temporal_get_i(pairs, "week").unwrap_or(base_week);
+        let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(base_dow);
+        temporal_week_to_date(iso_year, week, dow)
     } else {
-        format!("{year:04}-01-01")
+        let year = temporal_get_i(pairs, "year")?;
+        if let Some(m) = temporal_get_i(pairs, "month") {
+            let d = temporal_get_i(pairs, "day").unwrap_or(1);
+            format!("{year:04}-{m:02}-{d:02}")
+        } else if let Some(w) = temporal_get_i(pairs, "week") {
+            let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(1);
+            temporal_week_to_date(year, w, dow)
+        } else if let Some(ord) = temporal_get_i(pairs, "ordinalDay") {
+            let (m, d) = temporal_ordinal_to_md(year, ord);
+            format!("{year:04}-{m:02}-{d:02}")
+        } else if let Some(q) = temporal_get_i(pairs, "quarter") {
+            let doq = temporal_get_i(pairs, "dayOfQuarter").unwrap_or(1);
+            let (m, d) = temporal_quarter_to_md(year, q, doq);
+            format!("{year:04}-{m:02}-{d:02}")
+        } else {
+            format!("{year:04}-01-01")
+        }
     };
     let h = temporal_get_i(pairs, "hour").unwrap_or(0);
     let min = temporal_get_i(pairs, "minute").unwrap_or(0);
@@ -10614,25 +10684,39 @@ fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<Str
 
 /// Construct a `datetime` literal from a map.
 fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
-    let year = temporal_get_i(pairs, "year")?;
-    // Extract month and date_part simultaneously for DST lookup
-    let (month, date_part) = if let Some(m) = temporal_get_i(pairs, "month") {
-        let d = temporal_get_i(pairs, "day").unwrap_or(1);
-        (m, format!("{year:04}-{m:02}-{d:02}"))
-    } else if let Some(w) = temporal_get_i(pairs, "week") {
-        let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(1);
-        let ds = temporal_week_to_date(year, w, dow);
+    // Check for a `date` key as base for week-based construction.
+    let base_ymd: Option<(i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
+        if k.eq_ignore_ascii_case("date") { extract_base_date_ymd(v) } else { None }
+    });
+    // Extract date_part and month (for DST timezone computation).
+    let (month, date_part) = if let Some((by, bm, bd)) = base_ymd {
+        let (base_iso_year, base_week, base_dow) = date_to_iso_week(by, bm, bd);
+        let iso_year = temporal_get_i(pairs, "year").unwrap_or(base_iso_year);
+        let week = temporal_get_i(pairs, "week").unwrap_or(base_week);
+        let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(base_dow);
+        let ds = temporal_week_to_date(iso_year, week, dow);
         let m: i64 = ds[5..7].parse().unwrap_or(1);
         (m, ds)
-    } else if let Some(ord) = temporal_get_i(pairs, "ordinalDay") {
-        let (m, d) = temporal_ordinal_to_md(year, ord);
-        (m, format!("{year:04}-{m:02}-{d:02}"))
-    } else if let Some(q) = temporal_get_i(pairs, "quarter") {
-        let doq = temporal_get_i(pairs, "dayOfQuarter").unwrap_or(1);
-        let (m, d) = temporal_quarter_to_md(year, q, doq);
-        (m, format!("{year:04}-{m:02}-{d:02}"))
     } else {
-        (1, format!("{year:04}-01-01"))
+        let year = temporal_get_i(pairs, "year")?;
+        if let Some(m) = temporal_get_i(pairs, "month") {
+            let d = temporal_get_i(pairs, "day").unwrap_or(1);
+            (m, format!("{year:04}-{m:02}-{d:02}"))
+        } else if let Some(w) = temporal_get_i(pairs, "week") {
+            let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(1);
+            let ds = temporal_week_to_date(year, w, dow);
+            let m: i64 = ds[5..7].parse().unwrap_or(1);
+            (m, ds)
+        } else if let Some(ord) = temporal_get_i(pairs, "ordinalDay") {
+            let (m, d) = temporal_ordinal_to_md(year, ord);
+            (m, format!("{year:04}-{m:02}-{d:02}"))
+        } else if let Some(q) = temporal_get_i(pairs, "quarter") {
+            let doq = temporal_get_i(pairs, "dayOfQuarter").unwrap_or(1);
+            let (m, d) = temporal_quarter_to_md(year, q, doq);
+            (m, format!("{year:04}-{m:02}-{d:02}"))
+        } else {
+            (1, format!("{year:04}-01-01"))
+        }
     };
     let h = temporal_get_i(pairs, "hour").unwrap_or(0);
     let min = temporal_get_i(pairs, "minute").unwrap_or(0);
