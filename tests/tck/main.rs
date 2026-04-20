@@ -134,7 +134,19 @@ fn term_to_string(term: &Term) -> String {
 ///   `"10:35:00-08:00"` → `Some("10:35-08:00")`
 ///   `"12:35:15+05:00"` → `None`  (seconds ≠ 0)
 ///   `"10:35:00"` → `None`  (no timezone, no stripping needed per Cypher convention)
+///   `"10:35:00Z"` → `Some("10:35Z")`
 fn strip_zero_seconds_from_time(v: &str) -> Option<String> {
+    // Handle "Z" UTC suffix: "HH:MM:00Z" → "HH:MM:Z" → "HH:MMZ"
+    if v.ends_with('Z') {
+        let body = &v[..v.len() - 1]; // strip trailing 'Z'
+        if body.len() == 8 && body.as_bytes().get(2) == Some(&b':') && body.as_bytes().get(5) == Some(&b':') {
+            if body.ends_with(":00") && !body[6..].contains('.') {
+                let hhmm = &body[..5];
+                return Some(format!("{hhmm}Z"));
+            }
+        }
+        return None;
+    }
     // Look for pattern HH:MM:00 followed by +/- timezone
     // The value should have exactly 8 chars before the timezone: "HH:MM:SS"
     let tz_start = v.find(['+', '-'].as_ref()).filter(|&i| i >= 8)?;
