@@ -8220,6 +8220,35 @@ impl TranslationState {
                     NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#duration");
 
                 // Map argument: date({year: …, month: …}) etc.
+                // First, expand any Variable refs in map values using with_lit_vars.
+                let expanded_map_arg: Option<Expression> = if let Some(Expression::Map(pairs)) = args.first() {
+                    let mut changed = false;
+                    let expanded: Vec<(String, Expression)> = pairs.iter().map(|(k, v)| {
+                        if let Expression::Variable(var) = v {
+                            if let Some(s) = self.with_lit_vars.get(var.as_str()) {
+                                changed = true;
+                                return (k.clone(), Expression::Literal(Literal::String(s.clone())));
+                            }
+                        }
+                        (k.clone(), v.clone())
+                    }).collect();
+                    if changed { Some(Expression::Map(expanded)) } else { None }
+                } else {
+                    None
+                };
+                let effective_args: &[Expression] = if expanded_map_arg.is_some() {
+                    // Use the expanded arg (will be picked up below).
+                    &[]  // trigger fallthrough; we handle below
+                } else {
+                    args
+                };
+                // If we have an expanded map, recurse with it.
+                if let Some(ref expanded) = expanded_map_arg {
+                    let new_args = vec![expanded.clone()];
+                    return self.translate_function_call(name, &new_args, extra);
+                }
+                let _ = effective_args; // not used after expansion path
+
                 if let Some(Expression::Map(pairs)) = args.first() {
                     let lit_opt: Option<SparLit> = match base_func {
                         "date" => temporal_date_from_map(pairs)
@@ -10543,10 +10572,11 @@ fn date_to_iso_week(y: i64, m: i64, d: i64) -> (i64, i64, i64) {
     (iso_year, week, dow)
 }
 
-/// Extract compile-time (year, month, day) triple from a `date(...)` expression.
+/// Extract compile-time (year, month, day) triple from a `date(...)` expression
+/// or from a string literal that represents a temporal value.
 fn extract_base_date_ymd(v: &Expression) -> Option<(i64, i64, i64)> {
-    if let Expression::FunctionCall { name, args, .. } = v {
-        if name.eq_ignore_ascii_case("date") {
+    match v {
+        Expression::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("date") => {
             if let Some(arg) = args.first() {
                 let s = match arg {
                     Expression::Literal(Literal::String(s)) => temporal_parse_date(s)?,
@@ -10562,9 +10592,24 @@ fn extract_base_date_ymd(v: &Expression) -> Option<(i64, i64, i64)> {
                     return Some((y, m, d));
                 }
             }
+            None
         }
+        Expression::Literal(Literal::String(s)) => {
+            // String from with_lit_vars (date, localdatetime, or datetime).
+            // Strip time part if present, then parse the date.
+            let ds = temporal_parse_date(s)?;
+            let parts: Vec<&str> = ds.splitn(3, '-').collect();
+            if parts.len() == 3 {
+                let y: i64 = parts[0].parse().ok()?;
+                let m: i64 = parts[1].parse().ok()?;
+                let d: i64 = parts[2].parse().ok()?;
+                Some((y, m, d))
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
-    None
 }
 
 /// Construct a `date` literal from a map.  Returns `None` if the map is
@@ -10580,12 +10625,46 @@ fn temporal_date_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     });
 
     if let Some((by, bm, bd)) = base_ymd {
-        // Derive ISO week components from the base date.
+        // Derive ALL components from the base date for defaults.
         let (base_iso_year, base_week, base_dow) = date_to_iso_week(by, bm, bd);
-        let iso_year = temporal_get_i(pairs, "year").unwrap_or(base_iso_year);
-        let week = temporal_get_i(pairs, "week").unwrap_or(base_week);
-        let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(base_dow);
-        return Some(temporal_week_to_date(iso_year, week, dow));
+        // Ordinal day within the year.
+        let base_ord = temporal_epoch(by, bm, bd) - temporal_epoch(by, 1, 1) + 1;
+        // Quarter and day-of-quarter.
+        let base_q = (bm - 1) / 3 + 1;
+        let base_doq: i64 = {
+            let qs = (base_q - 1) * 3 + 1;
+            let mut doq = bd;
+            for mo in qs..bm { doq += temporal_dim(by, mo); }
+            doq
+        };
+
+        // Dispatch on which override key(s) are present.
+        if temporal_get_i(pairs, "week").is_some() || temporal_get_i(pairs, "dayOfWeek").is_some() {
+            let iso_year = temporal_get_i(pairs, "year").unwrap_or(base_iso_year);
+            let week = temporal_get_i(pairs, "week").unwrap_or(base_week);
+            let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(base_dow);
+            return Some(temporal_week_to_date(iso_year, week, dow));
+        } else if let Some(ord) = temporal_get_i(pairs, "ordinalDay") {
+            let year = temporal_get_i(pairs, "year").unwrap_or(by);
+            let (m, d) = temporal_ordinal_to_md(year, ord);
+            return Some(format!("{year:04}-{m:02}-{d:02}"));
+        } else if temporal_get_i(pairs, "quarter").is_some()
+            || temporal_get_i(pairs, "dayOfQuarter").is_some()
+        {
+            let year = temporal_get_i(pairs, "year").unwrap_or(by);
+            let q = temporal_get_i(pairs, "quarter").unwrap_or(base_q);
+            let doq = temporal_get_i(pairs, "dayOfQuarter").unwrap_or(base_doq);
+            let (m, d) = temporal_quarter_to_md(year, q, doq);
+            return Some(format!("{year:04}-{m:02}-{d:02}"));
+        } else {
+            // Calendar date (year/month/day overrides).
+            let year = temporal_get_i(pairs, "year").unwrap_or(by);
+            let month = temporal_get_i(pairs, "month").unwrap_or(bm);
+            let day = temporal_get_i(pairs, "day").unwrap_or(bd);
+            // Avoid unused variable warnings.
+            let _ = base_ord;
+            return Some(format!("{year:04}-{month:02}-{day:02}"));
+        }
     }
 
     let year = temporal_get_i(pairs, "year")?;
@@ -10610,8 +10689,138 @@ fn temporal_date_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     Some(format!("{year:04}-01-01"))
 }
 
-/// Construct a `localtime` literal from a map.
+/// Extract a base time string from an expression value (for `time`/`localtime` map keys).
+/// Returns `temporal_parse_localtime` result (no TZ).
+fn extract_base_time_str(v: &Expression) -> Option<String> {
+    match v {
+        Expression::FunctionCall { name, args, .. }
+            if name.eq_ignore_ascii_case("localtime")
+                || name.eq_ignore_ascii_case("time")
+                || name.eq_ignore_ascii_case("localdatetime")
+                || name.eq_ignore_ascii_case("datetime") =>
+        {
+            if let Some(arg) = args.first() {
+                match arg {
+                    Expression::Literal(Literal::String(s)) => temporal_parse_localtime(s),
+                    Expression::Map(p) => temporal_localtime_from_map(p),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        Expression::Literal(Literal::String(s)) => temporal_parse_localtime(s),
+        _ => None,
+    }
+}
+
+/// Parse a localtime string "HH:MM[:SS[.frac]]" into (h, min, sec, sub_sec_ns).
+/// Returns None if the string cannot be parsed.
+fn parse_localtime_to_parts(s: &str) -> Option<(i64, i64, i64, i64)> {
+    if s.len() < 5 || s.as_bytes().get(2) != Some(&b':') {
+        return None;
+    }
+    let h: i64 = s[..2].parse().ok()?;
+    let min: i64 = s[3..5].parse().ok()?;
+    if s.len() == 5 {
+        return Some((h, min, 0, 0));
+    }
+    if s.as_bytes().get(5) != Some(&b':') {
+        return Some((h, min, 0, 0));
+    }
+    let sec_rest = &s[6..];
+    if let Some(dot) = sec_rest.find('.') {
+        let sec: i64 = sec_rest[..dot].parse().ok()?;
+        let frac_str = &sec_rest[dot + 1..];
+        // Pad/truncate to 9 digits for nanoseconds
+        let padded = format!("{:0<9}", &frac_str[..frac_str.len().min(9)]);
+        let ns: i64 = padded.parse().ok()?;
+        Some((h, min, sec, ns))
+    } else {
+        let sec: i64 = sec_rest.parse().ok()?;
+        Some((h, min, sec, 0))
+    }
+}
+
+/// Reconstruct a localtime string "HH:MM[:SS[.frac]]" from parts.
+fn localtime_parts_to_str(h: i64, min: i64, sec: i64, ns: i64) -> String {
+    if sec == 0 && ns == 0 {
+        return format!("{h:02}:{min:02}");
+    }
+    let frac = if ns == 0 {
+        String::new()
+    } else {
+        let frac_str = format!("{ns:09}");
+        format!(".{}", frac_str.trim_end_matches('0'))
+    };
+    format!("{h:02}:{min:02}:{sec:02}{frac}")
+}
+
+/// Extract the timezone offset (in seconds) from a time string with TZ suffix.
+fn extract_tz_offset_s(s: &str) -> Option<i64> {
+    if s.ends_with('Z') {
+        return Some(0);
+    }
+    let (_, tz_raw) = split_tz(s);
+    if tz_raw.is_empty() {
+        return None;
+    }
+    let tz = normalize_tz(tz_raw);
+    parse_tz_offset_s(&tz)
+}
+
+/// Parse a normalized TZ string like "+01:00" or "Z" to seconds.
+fn parse_tz_offset_s(tz: &str) -> Option<i64> {
+    if tz == "Z" || tz.is_empty() {
+        return Some(0);
+    }
+    if tz.starts_with('+') || tz.starts_with('-') {
+        let sign: i64 = if tz.starts_with('-') { -1 } else { 1 };
+        let rest = &tz[1..];
+        // Strip bracket suffix if present
+        let rest = if let Some(b) = rest.find('[') { &rest[..b] } else { rest };
+        let parts: Vec<&str> = rest.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            let h: i64 = parts[0].parse().ok()?;
+            let m: i64 = parts[1].parse().ok()?;
+            return Some(sign * (h * 3600 + m * 60));
+        }
+    }
+    None
+}
+
 fn temporal_localtime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
+    // Check for a `time` key providing base time components.
+    let base_time: Option<(i64, i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
+        if k.eq_ignore_ascii_case("time") {
+            let ts = extract_base_time_str(v)?;
+            parse_localtime_to_parts(&ts)
+        } else {
+            None
+        }
+    });
+
+    if let Some((bh, bmin, bsec, bns)) = base_time {
+        // Apply overrides over the base.
+        let h = temporal_get_i(pairs, "hour").unwrap_or(bh);
+        let min = temporal_get_i(pairs, "minute").unwrap_or(bmin);
+        let sec = temporal_get_i(pairs, "second").unwrap_or(bsec);
+        // Sub-second override: if any override is specified use those, else use base ns.
+        let ns = if temporal_get_i(pairs, "millisecond").is_some()
+            || temporal_get_i(pairs, "microsecond").is_some()
+            || temporal_get_i(pairs, "nanosecond").is_some()
+        {
+            let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+            let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+            let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+            ms * 1_000_000 + us * 1_000 + ns_v
+        } else {
+            bns
+        };
+        return Some(localtime_parts_to_str(h, min, sec, ns));
+    }
+
+    // Original logic: require hour.
     let h = temporal_get_i(pairs, "hour")?;
     let min = temporal_get_i(pairs, "minute").unwrap_or(0);
     let sec = temporal_get_i(pairs, "second");
@@ -10625,6 +10834,117 @@ fn temporal_localtime_from_map(pairs: &[(String, Expression)]) -> Option<String>
 
 /// Construct a `time` literal from a map.
 fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
+    // Check for a `time` key providing a base time.
+    let base_time_raw: Option<String> = pairs.iter().find_map(|(k, v)| {
+        if k.eq_ignore_ascii_case("time") {
+            // Get the raw time string (with potential TZ from original).
+            match v {
+                Expression::FunctionCall { name, args, .. } => {
+                    let ls = name.to_lowercase();
+                    let base = ls.as_str();
+                    if let Some(arg) = args.first() {
+                        match arg {
+                            Expression::Literal(Literal::String(s)) => {
+                                if base == "time" {
+                                    temporal_parse_time(s)
+                                } else {
+                                    temporal_parse_localtime(s)
+                                        .map(|lt| format!("{lt}Z"))
+                                }
+                            }
+                            Expression::Map(p) => {
+                                if base == "time" {
+                                    temporal_time_from_map(p)
+                                } else {
+                                    temporal_localtime_from_map(p)
+                                        .map(|lt| format!("{lt}Z"))
+                                }
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                }
+                Expression::Literal(Literal::String(s)) => {
+                    // Could be a localtime or time string
+                    temporal_parse_time(s)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    });
+
+    if let Some(base_str) = base_time_raw {
+        // Extract components from base_str (which includes TZ).
+        let (time_body, tz_raw_base) = split_tz(&base_str);
+        let base_parts = parse_localtime_to_parts(time_body)?;
+        let (bh, bmin, bsec, bns) = base_parts;
+        let base_tz_s = if tz_raw_base.is_empty() { 0 } else {
+            parse_tz_offset_s(&normalize_tz(tz_raw_base)).unwrap_or(0)
+        };
+
+        // Apply overrides.
+        let override_h = temporal_get_i(pairs, "hour");
+        let override_min = temporal_get_i(pairs, "minute");
+        let override_sec = temporal_get_i(pairs, "second");
+        let override_tz = temporal_get_s(pairs, "timezone");
+        let has_override_subsec = temporal_get_i(pairs, "millisecond").is_some()
+            || temporal_get_i(pairs, "microsecond").is_some()
+            || temporal_get_i(pairs, "nanosecond").is_some();
+
+        let new_tz_str = override_tz.as_deref().map(tc_tz_suffix);
+        let new_tz_s = new_tz_str.as_deref()
+            .and_then(|tz| parse_tz_offset_s(tz))
+            .unwrap_or(base_tz_s);
+        let tz_str = new_tz_str.unwrap_or_else(|| {
+            if tz_raw_base.is_empty() { "Z".to_owned() } else { normalize_tz(tz_raw_base) }
+        });
+
+        // Compute wall-clock time: if TZ changed, convert UTC then apply new TZ
+        let (h, min, sec, ns) = if new_tz_s != base_tz_s && override_tz.is_some() {
+            // Convert wall clock to UTC then to new TZ.
+            let base_wall_s = bh * 3600 + bmin * 60 + bsec;
+            let utc_s = base_wall_s - base_tz_s;
+            let new_wall_s = utc_s + new_tz_s;
+            let new_h = ((new_wall_s / 3600) % 24 + 24) % 24;
+            let new_min = (new_wall_s % 3600) / 60;
+            let new_sec_v = new_wall_s % 60;
+            (
+                override_h.unwrap_or(new_h),
+                override_min.unwrap_or(new_min.abs()),
+                override_sec.unwrap_or(new_sec_v.abs()),
+                if has_override_subsec {
+                    let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+                    let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+                    let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+                    ms * 1_000_000 + us * 1_000 + ns_v
+                } else {
+                    bns
+                }
+            )
+        } else {
+            (
+                override_h.unwrap_or(bh),
+                override_min.unwrap_or(bmin),
+                override_sec.unwrap_or(bsec),
+                if has_override_subsec {
+                    let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+                    let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+                    let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+                    ms * 1_000_000 + us * 1_000 + ns_v
+                } else {
+                    bns
+                }
+            )
+        };
+
+        let time_s = localtime_parts_to_str(h, min, sec, ns);
+        return Some(format!("{time_s}{tz_str}"));
+    }
+
     let h = temporal_get_i(pairs, "hour")?;
     let min = temporal_get_i(pairs, "minute").unwrap_or(0);
     let tz = temporal_get_s(pairs, "timezone")
@@ -10645,12 +10965,44 @@ fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<Str
     let base_ymd: Option<(i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
         if k.eq_ignore_ascii_case("date") { extract_base_date_ymd(v) } else { None }
     });
+    // Check for a `time` key as base for time components.
+    let base_time_parts: Option<(i64, i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
+        if k.eq_ignore_ascii_case("time") {
+            let ts = extract_base_time_str(v)?;
+            parse_localtime_to_parts(&ts)
+        } else {
+            None
+        }
+    });
+
     let date_part = if let Some((by, bm, bd)) = base_ymd {
         let (base_iso_year, base_week, base_dow) = date_to_iso_week(by, bm, bd);
-        let iso_year = temporal_get_i(pairs, "year").unwrap_or(base_iso_year);
-        let week = temporal_get_i(pairs, "week").unwrap_or(base_week);
-        let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(base_dow);
-        temporal_week_to_date(iso_year, week, dow)
+        // Apply date overrides on top of base.
+        let has_week = temporal_get_i(pairs, "week").is_some();
+        let has_ord = temporal_get_i(pairs, "ordinalDay").is_some();
+        let has_q = temporal_get_i(pairs, "quarter").is_some();
+        if has_week {
+            let iso_year = temporal_get_i(pairs, "year").unwrap_or(base_iso_year);
+            let week = temporal_get_i(pairs, "week").unwrap_or(base_week);
+            let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(base_dow);
+            temporal_week_to_date(iso_year, week, dow)
+        } else if has_ord {
+            let year = temporal_get_i(pairs, "year").unwrap_or(by);
+            let ord = temporal_get_i(pairs, "ordinalDay").unwrap();
+            let (m, d) = temporal_ordinal_to_md(year, ord);
+            format!("{year:04}-{m:02}-{d:02}")
+        } else if has_q {
+            let year = temporal_get_i(pairs, "year").unwrap_or(by);
+            let q = temporal_get_i(pairs, "quarter").unwrap();
+            let doq = temporal_get_i(pairs, "dayOfQuarter").unwrap_or(1);
+            let (m, d) = temporal_quarter_to_md(year, q, doq);
+            format!("{year:04}-{m:02}-{d:02}")
+        } else {
+            let year = temporal_get_i(pairs, "year").unwrap_or(by);
+            let m = temporal_get_i(pairs, "month").unwrap_or(bm);
+            let d = temporal_get_i(pairs, "day").unwrap_or(bd);
+            format!("{year:04}-{m:02}-{d:02}")
+        }
     } else {
         let year = temporal_get_i(pairs, "year")?;
         if let Some(m) = temporal_get_i(pairs, "month") {
@@ -10670,6 +11022,26 @@ fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<Str
             format!("{year:04}-01-01")
         }
     };
+
+    if let Some((bh, bmin, bsec, bns)) = base_time_parts {
+        let h = temporal_get_i(pairs, "hour").unwrap_or(bh);
+        let min = temporal_get_i(pairs, "minute").unwrap_or(bmin);
+        let sec = temporal_get_i(pairs, "second").unwrap_or(bsec);
+        let ns = if temporal_get_i(pairs, "millisecond").is_some()
+            || temporal_get_i(pairs, "microsecond").is_some()
+            || temporal_get_i(pairs, "nanosecond").is_some()
+        {
+            let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+            let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+            let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+            ms * 1_000_000 + us * 1_000 + ns_v
+        } else {
+            bns
+        };
+        let time_part = localtime_parts_to_str(h, min, sec, ns);
+        return Some(format!("{date_part}T{time_part}"));
+    }
+
     let h = temporal_get_i(pairs, "hour").unwrap_or(0);
     let min = temporal_get_i(pairs, "minute").unwrap_or(0);
     let sec = temporal_get_i(pairs, "second");
@@ -10688,15 +11060,45 @@ fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> 
     let base_ymd: Option<(i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
         if k.eq_ignore_ascii_case("date") { extract_base_date_ymd(v) } else { None }
     });
+    // Check for a `time` key as base for time components.
+    let base_time_parts: Option<(i64, i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
+        if k.eq_ignore_ascii_case("time") {
+            let ts = extract_base_time_str(v)?;
+            parse_localtime_to_parts(&ts)
+        } else {
+            None
+        }
+    });
     // Extract date_part and month (for DST timezone computation).
     let (month, date_part) = if let Some((by, bm, bd)) = base_ymd {
         let (base_iso_year, base_week, base_dow) = date_to_iso_week(by, bm, bd);
-        let iso_year = temporal_get_i(pairs, "year").unwrap_or(base_iso_year);
-        let week = temporal_get_i(pairs, "week").unwrap_or(base_week);
-        let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(base_dow);
-        let ds = temporal_week_to_date(iso_year, week, dow);
-        let m: i64 = ds[5..7].parse().unwrap_or(1);
-        (m, ds)
+        let has_week = temporal_get_i(pairs, "week").is_some();
+        let has_ord = temporal_get_i(pairs, "ordinalDay").is_some();
+        let has_q = temporal_get_i(pairs, "quarter").is_some();
+        if has_week {
+            let iso_year = temporal_get_i(pairs, "year").unwrap_or(base_iso_year);
+            let week = temporal_get_i(pairs, "week").unwrap_or(base_week);
+            let dow = temporal_get_i(pairs, "dayOfWeek").unwrap_or(base_dow);
+            let ds = temporal_week_to_date(iso_year, week, dow);
+            let m: i64 = ds[5..7].parse().unwrap_or(1);
+            (m, ds)
+        } else if has_ord {
+            let year = temporal_get_i(pairs, "year").unwrap_or(by);
+            let ord = temporal_get_i(pairs, "ordinalDay").unwrap();
+            let (m, d) = temporal_ordinal_to_md(year, ord);
+            (m, format!("{year:04}-{m:02}-{d:02}"))
+        } else if has_q {
+            let year = temporal_get_i(pairs, "year").unwrap_or(by);
+            let q = temporal_get_i(pairs, "quarter").unwrap();
+            let doq = temporal_get_i(pairs, "dayOfQuarter").unwrap_or(1);
+            let (m, d) = temporal_quarter_to_md(year, q, doq);
+            (m, format!("{year:04}-{m:02}-{d:02}"))
+        } else {
+            let year = temporal_get_i(pairs, "year").unwrap_or(by);
+            let m = temporal_get_i(pairs, "month").unwrap_or(bm);
+            let d = temporal_get_i(pairs, "day").unwrap_or(bd);
+            (m, format!("{year:04}-{m:02}-{d:02}"))
+        }
     } else {
         let year = temporal_get_i(pairs, "year")?;
         if let Some(m) = temporal_get_i(pairs, "month") {
@@ -10718,11 +11120,29 @@ fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> 
             (1, format!("{year:04}-01-01"))
         }
     };
-    let h = temporal_get_i(pairs, "hour").unwrap_or(0);
-    let min = temporal_get_i(pairs, "minute").unwrap_or(0);
     let tz = temporal_get_s(pairs, "timezone")
         .map(|s| tc_tz_suffix_month(&s, month))
         .unwrap_or_else(|| "Z".to_string());
+    if let Some((bh, bmin, bsec, bns)) = base_time_parts {
+        let h = temporal_get_i(pairs, "hour").unwrap_or(bh);
+        let min = temporal_get_i(pairs, "minute").unwrap_or(bmin);
+        let sec = temporal_get_i(pairs, "second").unwrap_or(bsec);
+        let ns = if temporal_get_i(pairs, "millisecond").is_some()
+            || temporal_get_i(pairs, "microsecond").is_some()
+            || temporal_get_i(pairs, "nanosecond").is_some()
+        {
+            let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+            let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+            let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+            ms * 1_000_000 + us * 1_000 + ns_v
+        } else {
+            bns
+        };
+        let time_part = localtime_parts_to_str(h, min, sec, ns);
+        return Some(format!("{date_part}T{time_part}{tz}"));
+    }
+    let h = temporal_get_i(pairs, "hour").unwrap_or(0);
+    let min = temporal_get_i(pairs, "minute").unwrap_or(0);
     let sec = temporal_get_i(pairs, "second");
     let frac = temporal_sub_second(pairs);
     let time_part = match sec {
@@ -10884,8 +11304,11 @@ fn format_duration_seconds(s: f64) -> String {
 }
 
 /// Parse an ISO 8601 date string to canonical "YYYY-MM-DD".
+/// Also handles datetime strings by stripping the time part.
 fn temporal_parse_date(s: &str) -> Option<String> {
     let s = s.trim();
+    // If string contains 'T', strip the time part (accepts datetime strings).
+    let s = if let Some(t_pos) = s.find('T') { &s[..t_pos] } else { s };
     // Extended calendar: YYYY-MM-DD
     if s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-') {
         let y: i64 = s[..4].parse().ok()?;
@@ -10959,6 +11382,8 @@ fn temporal_parse_date(s: &str) -> Option<String> {
 /// Parse an ISO 8601 local time string (no timezone).
 fn temporal_parse_localtime(s: &str) -> Option<String> {
     let s = s.trim();
+    // If string contains 'T', extract the time part only (from datetime/localdatetime strings).
+    let s = if let Some(t_pos) = s.find('T') { &s[t_pos + 1..] } else { s };
     // Try stripping 'Z' or '+HH:MM' suffix for localtime (ignore timezone)
     let s = if s.ends_with('Z') { &s[..s.len() - 1] } else { s };
     // Remove timezone offset if present
@@ -11009,9 +11434,17 @@ fn temporal_parse_localtime(s: &str) -> Option<String> {
 
 /// Parse an ISO 8601 time string (with timezone).
 fn temporal_parse_time(s: &str) -> Option<String> {
-    let (time_body, tz) = split_tz(s);
+    let s = s.trim();
+    // If string contains 'T', extract the time part only.
+    let s = if let Some(t_pos) = s.find('T') { &s[t_pos + 1..] } else { s };
+    let (time_body, tz_raw) = split_tz(s);
     let local = temporal_parse_localtime(time_body)?;
-    let tz = normalize_tz(tz);
+    // time() requires a timezone; default to Z (UTC) when none present.
+    let tz = if tz_raw.is_empty() {
+        "Z".to_owned()
+    } else {
+        normalize_tz(tz_raw)
+    };
     Some(format!("{local}{tz}"))
 }
 
