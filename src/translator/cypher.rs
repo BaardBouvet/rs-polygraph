@@ -1432,6 +1432,65 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                     }
                 }
             }
+            Clause::Set(s) => {
+                // UndefinedVariable: SET RHS references a variable not in scope.
+                for item in &s.items {
+                    let (var_opt, rhs_opt): (Option<String>, Option<&Expression>) = match item {
+                        crate::ast::cypher::SetItem::Property { key: _, value, .. } => {
+                            (None, Some(value))
+                        }
+                        crate::ast::cypher::SetItem::NodeReplace { value, .. } => {
+                            (None, Some(value))
+                        }
+                        crate::ast::cypher::SetItem::MergeMap { .. }
+                        | crate::ast::cypher::SetItem::SetLabel { .. } => (None, None),
+                    };
+                    let _ = var_opt; // unused for now
+                    if let Some(rhs) = rhs_opt {
+                        fn collect_set_rhs_vars(expr: &Expression, vars: &mut Vec<String>) {
+                            match expr {
+                                Expression::Variable(v) => vars.push(v.clone()),
+                                Expression::Property(base, _) => {
+                                    collect_set_rhs_vars(base, vars)
+                                }
+                                Expression::FunctionCall { args, .. } => {
+                                    for a in args {
+                                        collect_set_rhs_vars(a, vars);
+                                    }
+                                }
+                                Expression::Add(a, b)
+                                | Expression::Subtract(a, b)
+                                | Expression::Multiply(a, b)
+                                | Expression::Divide(a, b)
+                                | Expression::Comparison(a, _, b) => {
+                                    collect_set_rhs_vars(a, vars);
+                                    collect_set_rhs_vars(b, vars);
+                                }
+                                Expression::Not(e)
+                                | Expression::Negate(e)
+                                | Expression::IsNull(e)
+                                | Expression::IsNotNull(e) => collect_set_rhs_vars(e, vars),
+                                _ => {}
+                            }
+                        }
+                        if seen_match || !bound_vars.is_empty() {
+                            let mut rhs_vars = Vec::new();
+                            collect_set_rhs_vars(rhs, &mut rhs_vars);
+                            for v in rhs_vars {
+                                if !bound_vars.contains(v.as_str())
+                                    && !kinds.contains_key(v.as_str())
+                                {
+                                    return Err(PolygraphError::Translation {
+                                        message: format!(
+                                            "UndefinedVariable: variable '{v}' not defined"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Clause::Create(c) => {
                 // VariableAlreadyBound: a CREATE pattern variable was already introduced by
                 // a preceding MATCH/WITH/UNWIND, or reused within the same CREATE in a way
@@ -1662,6 +1721,50 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         .unwrap_or(Kind::Node);
                     kinds.insert(v.clone(), kind);
                     bound_vars.insert(v);
+                }
+                // UndefinedVariable in ON CREATE SET / ON MATCH SET actions.
+                for action in &m.actions {
+                    for item in &action.items {
+                        let rhs_opt: Option<&Expression> = match item {
+                            crate::ast::cypher::SetItem::Property { value, .. } => Some(value),
+                            crate::ast::cypher::SetItem::NodeReplace { value, .. } => Some(value),
+                            _ => None,
+                        };
+                        if let Some(rhs) = rhs_opt {
+                            fn collect_merge_action_vars(
+                                expr: &Expression,
+                                vars: &mut Vec<String>,
+                            ) {
+                                match expr {
+                                    Expression::Variable(v) => vars.push(v.clone()),
+                                    Expression::Property(base, _) => {
+                                        collect_merge_action_vars(base, vars)
+                                    }
+                                    Expression::Add(a, b)
+                                    | Expression::Subtract(a, b)
+                                    | Expression::Multiply(a, b)
+                                    | Expression::Divide(a, b) => {
+                                        collect_merge_action_vars(a, vars);
+                                        collect_merge_action_vars(b, vars);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let mut rhs_vars = Vec::new();
+                            collect_merge_action_vars(rhs, &mut rhs_vars);
+                            for v in rhs_vars {
+                                if !bound_vars.contains(v.as_str())
+                                    && !kinds.contains_key(v.as_str())
+                                {
+                                    return Err(PolygraphError::Translation {
+                                        message: format!(
+                                            "UndefinedVariable: variable '{v}' not defined"
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             }
             _ => {}

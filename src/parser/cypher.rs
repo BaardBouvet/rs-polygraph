@@ -518,13 +518,41 @@ fn build_create_clause(pair: Pair<Rule>) -> Result<CreateClause, PolygraphError>
 }
 
 fn build_merge_clause(pair: Pair<Rule>) -> Result<MergeClause, PolygraphError> {
-    // merge_clause = { kw_MERGE ~ pattern }
-    let pat_pair = pair
-        .into_inner()
-        .find(|p| p.as_rule() == Rule::pattern)
-        .expect("merge_clause has pattern");
+    // merge_clause = { kw_MERGE ~ pattern ~ merge_action* }
+    // merge_action = { kw_ON ~ (kw_MATCH | kw_CREATE) ~ set_clause }
+    use crate::ast::cypher::MergeAction;
+    let mut pattern = None;
+    let mut actions = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::pattern => {
+                pattern = Some(build_pattern(inner)?);
+            }
+            Rule::merge_action => {
+                let mut is_create = false;
+                let mut set_items = Vec::new();
+                for child in inner.into_inner() {
+                    match child.as_rule() {
+                        Rule::kw_CREATE => is_create = true,
+                        Rule::kw_MATCH => is_create = false,
+                        Rule::set_clause => {
+                            let sc = build_set_clause(child)?;
+                            set_items = sc.items;
+                        }
+                        _ => {}
+                    }
+                }
+                actions.push(MergeAction {
+                    on_create: is_create,
+                    items: set_items,
+                });
+            }
+            _ => {}
+        }
+    }
     Ok(MergeClause {
-        pattern: build_pattern(pat_pair)?,
+        pattern: pattern.expect("merge_clause has pattern"),
+        actions,
     })
 }
 

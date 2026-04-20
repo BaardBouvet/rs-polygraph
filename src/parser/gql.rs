@@ -226,7 +226,7 @@ fn build_merge_clause(pair: Pair<Rule>) -> Result<MergeClause, PolygraphError> {
         .into_inner()
         .find(|p| p.as_rule() == Rule::pattern)
         .expect("merge_clause has pattern");
-    Ok(MergeClause { pattern: build_pattern(pat_pair)? })
+    Ok(MergeClause { pattern: build_pattern(pat_pair)?, actions: Vec::new() })
 }
 
 fn build_set_clause(pair: Pair<Rule>) -> Result<SetClause, PolygraphError> {

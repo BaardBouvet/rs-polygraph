@@ -95,6 +95,15 @@ pub struct CreateClause {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergeClause {
     pub pattern: Pattern,
+    /// ON MATCH SET / ON CREATE SET actions attached to this MERGE clause.
+    pub actions: Vec<MergeAction>,
+}
+
+/// An `ON MATCH SET` or `ON CREATE SET` action within a MERGE clause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeAction {
+    pub on_create: bool, // true = ON CREATE SET, false = ON MATCH SET
+    pub items: Vec<SetItem>,
 }
 
 /// A `SET` clause.
