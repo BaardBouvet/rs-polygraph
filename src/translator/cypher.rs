@@ -66,9 +66,30 @@ pub fn translate(
     base_iri: Option<&str>,
     rdf_star: bool,
 ) -> Result<TranslationResult, PolygraphError> {
+    translate_impl(query, base_iri, rdf_star, false)
+}
+
+/// Like `translate` but silently skips write clauses (SET/REMOVE/MERGE/CREATE/DELETE)
+/// instead of returning an error.  Callers are responsible for executing write
+/// operations separately before running the generated SELECT.
+pub fn translate_skip_writes(
+    query: &CypherQuery,
+    base_iri: Option<&str>,
+    rdf_star: bool,
+) -> Result<TranslationResult, PolygraphError> {
+    translate_impl(query, base_iri, rdf_star, true)
+}
+
+fn translate_impl(
+    query: &CypherQuery,
+    base_iri: Option<&str>,
+    rdf_star: bool,
+    skip_writes: bool,
+) -> Result<TranslationResult, PolygraphError> {
     validate_semantics(query)?;
     let base = base_iri.unwrap_or(DEFAULT_BASE).to_string();
     let mut state = TranslationState::new(base.clone(), rdf_star);
+    state.skip_write_clauses = skip_writes;
     let pattern = state.translate_query(query)?;
     let sparql_query = Query::Select {
         dataset: None,
@@ -1372,6 +1393,188 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                 // Register the UNWIND variable as bound (type unknown — don't constrain kinds).
                 bound_vars.insert(u.variable.clone());
             }
+            Clause::Delete(d) => {
+                // InvalidDelete: deleting a label predicate (n:Person) or rel-type (r:T)
+                // or any non-entity expression is a SyntaxError/runtime error.
+                for expr in &d.expressions {
+                    match expr {
+                        Expression::LabelCheck { .. } => {
+                            return Err(PolygraphError::Translation {
+                                message: "InvalidDelete: cannot delete a label predicate; \
+                                          use REMOVE to remove labels"
+                                    .to_string(),
+                            });
+                        }
+                        Expression::Literal(_)
+                        | Expression::Add(_, _)
+                        | Expression::Subtract(_, _)
+                        | Expression::Multiply(_, _)
+                        | Expression::Divide(_, _) => {
+                            return Err(PolygraphError::Translation {
+                                message: "InvalidArgumentType: DELETE requires a node or \
+                                          relationship, not a literal or arithmetic expression"
+                                    .to_string(),
+                            });
+                        }
+                        Expression::Variable(v) => {
+                            if (seen_match || !bound_vars.is_empty())
+                                && !bound_vars.contains(v.as_str())
+                                && !kinds.contains_key(v.as_str())
+                            {
+                                return Err(PolygraphError::Translation {
+                                    message: format!(
+                                        "UndefinedVariable: variable '{v}' not defined"
+                                    ),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Clause::Create(c) => {
+                // VariableAlreadyBound: a CREATE pattern variable was already introduced by
+                // a preceding MATCH/WITH/UNWIND, or reused within the same CREATE in a way
+                // that would re-bind it (adding labels/props, or standalone node pattern).
+                //
+                // NB: A bound variable CAN appear in a CREATE pattern as an endpoint of a
+                // relationship without labels/props — e.g. `(a)-[:R]->(b)` when both `a`
+                // and `b` were previously bound.  That is NOT VariableAlreadyBound.
+                //
+                // It IS an error when:
+                //   1. The node element has labels (would add new labels to existing node), OR
+                //   2. The node element has properties (would set properties on existing node), OR
+                //   3. The pattern contains only a single element (standalone `(a)` creation).
+                let mut create_vars: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+
+                /// Collect variable names referenced in a property map literal.
+                fn collect_prop_vars(
+                    props: &Option<crate::ast::cypher::MapLiteral>,
+                    vars: &mut Vec<String>,
+                ) {
+                    if let Some(map) = props {
+                        for (_, v) in map {
+                            collect_create_expr_vars(v, vars);
+                        }
+                    }
+                }
+
+                fn collect_create_expr_vars(expr: &Expression, vars: &mut Vec<String>) {
+                    match expr {
+                        Expression::Variable(v) => vars.push(v.clone()),
+                        Expression::Property(base, _) => collect_create_expr_vars(base, vars),
+                        Expression::FunctionCall { args, .. } => {
+                            for a in args {
+                                collect_create_expr_vars(a, vars);
+                            }
+                        }
+                        Expression::Add(a, b)
+                        | Expression::Subtract(a, b)
+                        | Expression::Multiply(a, b)
+                        | Expression::Divide(a, b) => {
+                            collect_create_expr_vars(a, vars);
+                            collect_create_expr_vars(b, vars);
+                        }
+                        _ => {}
+                    }
+                }
+
+                for pattern in &c.pattern.0 {
+                    let is_standalone = pattern.elements.len() == 1;
+                    for elem in &pattern.elements {
+                        match elem {
+                            PatternElement::Node(n) => {
+                                if let Some(v) = &n.variable {
+                                    let already_bound = bound_vars.contains(v.as_str())
+                                        || kinds.contains_key(v.as_str())
+                                        || !create_vars.insert(v.clone());
+                                    if already_bound {
+                                        let adds_labels = !n.labels.is_empty();
+                                        let adds_props = n.properties.is_some();
+                                        if adds_labels || adds_props || is_standalone {
+                                            return Err(PolygraphError::Translation {
+                                                message: format!(
+                                                    "VariableAlreadyBound: '{v}' is already bound"
+                                                ),
+                                            });
+                                        }
+                                        // else: valid endpoint reuse in a relationship pattern
+                                    }
+                                }
+                                // UndefinedVariable in node properties
+                                let mut prop_vars = Vec::new();
+                                collect_prop_vars(&n.properties, &mut prop_vars);
+                                for pv in prop_vars {
+                                    if !bound_vars.contains(pv.as_str())
+                                        && !kinds.contains_key(pv.as_str())
+                                        && !create_vars.contains(pv.as_str())
+                                    {
+                                        return Err(PolygraphError::Translation {
+                                            message: format!(
+                                                "UndefinedVariable: variable '{pv}' not defined"
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
+                            PatternElement::Relationship(r) => {
+                                // NoSingleRelationshipType: CREATE must have exactly 1 rel type.
+                                if r.rel_types.is_empty() {
+                                    return Err(PolygraphError::Translation {
+                                        message: "NoSingleRelationshipType: \
+                                                  relationship in CREATE must have exactly one type"
+                                            .to_string(),
+                                    });
+                                }
+                                if r.rel_types.len() > 1 {
+                                    return Err(PolygraphError::Translation {
+                                        message: "NoSingleRelationshipType: \
+                                                  relationship in CREATE cannot have multiple types"
+                                            .to_string(),
+                                    });
+                                }
+                                // RequiresDirectedRelationship: undirected in CREATE
+                                if r.direction
+                                    == crate::ast::cypher::Direction::Both
+                                {
+                                    return Err(PolygraphError::Translation {
+                                        message: "RequiresDirectedRelationship: \
+                                                  relationship in CREATE must have a direction"
+                                            .to_string(),
+                                    });
+                                }
+                                // CreatingVarLength: variable-length rels in CREATE are invalid.
+                                if r.range.is_some() {
+                                    return Err(PolygraphError::Translation {
+                                        message: "CreatingVarLength: \
+                                                  variable-length relationship in CREATE \
+                                                  is not supported"
+                                            .to_string(),
+                                    });
+                                }
+                                // VariableAlreadyBound for relationship variables
+                                if let Some(rv) = &r.variable {
+                                    if bound_vars.contains(rv.as_str())
+                                        || kinds.contains_key(rv.as_str())
+                                        || !create_vars.insert(rv.clone())
+                                    {
+                                        return Err(PolygraphError::Translation {
+                                            message: format!(
+                                                "VariableAlreadyBound: '{rv}' is already bound"
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Register CREATE-created variables so subsequent clauses see them as bound.
+                for v in create_vars {
+                    bound_vars.insert(v);
+                }
+            }
             _ => {}
         }
     }
@@ -1502,6 +1705,10 @@ struct TranslationState {
     /// Each entry is (result_var, subquery_pattern).  The caller joins these
     /// into the outer pattern after translating the containing expression.
     pending_subqueries: Vec<(Variable, GraphPattern)>,
+    /// When true, write clauses (SET/REMOVE/MERGE/CREATE/DELETE) are silently skipped
+    /// instead of returning an UnsupportedFeature error. Used by callers that handle
+    /// write operations separately (e.g., the TCK test harness).
+    skip_write_clauses: bool,
 }
 
 impl TranslationState {
@@ -1536,6 +1743,7 @@ impl TranslationState {
             unwind_list_source: Default::default(),
             null_vars: Default::default(),
             const_int_vars: Default::default(),
+            skip_write_clauses: false,
         }
     }
 
@@ -3219,12 +3427,26 @@ impl TranslationState {
                     // The actual insertion is engine-level; here we emit the BGP
                     // shape only and flag via PolygraphError::UnsupportedFeature
                     // for now (SPARQL Update requires a separate spargebra::Update).
-                    return Err(PolygraphError::UnsupportedFeature {
-                        feature: format!(
-                            "CREATE clause (SPARQL Update, Phase 4+): {} pattern(s)",
-                            c.pattern.0.len()
-                        ),
-                    });
+                    if !self.skip_write_clauses {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: format!(
+                                "CREATE clause (SPARQL Update, Phase 4+): {} pattern(s)",
+                                c.pattern.0.len()
+                            ),
+                        });
+                    }
+                    // Skip: caller handles CREATE as INSERT DATA separately.
+                    // Register any named node variables from the CREATE pattern so that
+                    // subsequent RETURN clauses can reference them.
+                    for pat in &c.pattern.0 {
+                        for elem in &pat.elements {
+                            if let PatternElement::Node(n) = elem {
+                                if let Some(v) = &n.variable {
+                                    self.node_vars.insert(v.clone());
+                                }
+                            }
+                        }
+                    }
                 }
                 Clause::Merge(m) => {
                     // Simple MERGE (b) with no labels/properties on the pattern node
@@ -3257,21 +3479,28 @@ impl TranslationState {
                             pending_filters.push(f);
                         }
                     } else {
-                        return Err(PolygraphError::UnsupportedFeature {
-                            feature: format!(
-                                "MERGE clause (SPARQL Update, Phase 4+): {}",
-                                m.pattern.variable.as_deref().unwrap_or("anon")
-                            ),
-                        });
+                        if self.skip_write_clauses {
+                            // Silently skip merge; caller handles it separately
+                        } else {
+                            return Err(PolygraphError::UnsupportedFeature {
+                                feature: format!(
+                                    "MERGE clause (SPARQL Update, Phase 4+): {}",
+                                    m.pattern.variable.as_deref().unwrap_or("anon")
+                                ),
+                            });
+                        }
                     }
                 }
                 Clause::Set(s) => {
-                    return Err(PolygraphError::UnsupportedFeature {
-                        feature: format!(
-                            "SET clause (SPARQL Update, Phase 4+): {} item(s)",
-                            s.items.len()
-                        ),
-                    });
+                    if !self.skip_write_clauses {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: format!(
+                                "SET clause (SPARQL Update, Phase 4+): {} item(s)",
+                                s.items.len()
+                            ),
+                        });
+                    }
+                    // Skip: caller handles SET as a SPARQL UPDATE separately.
                 }
                 Clause::Delete(d) => {
                     // If the query has a subsequent RETURN clause AND the RETURN
@@ -3306,24 +3535,31 @@ impl TranslationState {
                         }
                     });
                     if !return_safe {
-                        return Err(PolygraphError::UnsupportedFeature {
-                            feature: format!(
-                                "{} clause (SPARQL Update, Phase 4+): {} expression(s)",
-                                if d.detach { "DETACH DELETE" } else { "DELETE" },
-                                d.expressions.len()
-                            ),
-                        });
+                        if self.skip_write_clauses {
+                            // Silently skip delete; caller handles it separately
+                        } else {
+                            return Err(PolygraphError::UnsupportedFeature {
+                                feature: format!(
+                                    "{} clause (SPARQL Update, Phase 4+): {} expression(s)",
+                                    if d.detach { "DETACH DELETE" } else { "DELETE" },
+                                    d.expressions.len()
+                                ),
+                            });
+                        }
                     }
                     // DELETE with safe RETURN (e.g. type(r)): skip the deletion,
                     // the SELECT will still produce the correct metadata values.
                 }
                 Clause::Remove(r) => {
-                    return Err(PolygraphError::UnsupportedFeature {
-                        feature: format!(
-                            "REMOVE clause (SPARQL Update, Phase 4+): {} item(s)",
-                            r.items.len()
-                        ),
-                    });
+                    if !self.skip_write_clauses {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: format!(
+                                "REMOVE clause (SPARQL Update, Phase 4+): {} item(s)",
+                                r.items.len()
+                            ),
+                        });
+                    }
+                    // Skip: caller handles the REMOVE as a SPARQL DELETE separately.
                 }
                 Clause::Call(c) => {
                     // CALL procedure stubs — emit a warning-level error.

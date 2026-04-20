@@ -83,6 +83,25 @@ impl Transpiler {
         })
     }
 
+    /// Like `cypher_to_sparql` but silently skips write clauses (SET/REMOVE/MERGE/CREATE/DELETE).
+    /// The caller is responsible for executing write operations separately.
+    pub fn cypher_to_sparql_skip_writes(
+        cypher: &str,
+        engine: &dyn sparql_engine::TargetEngine,
+    ) -> Result<TranspileOutput, PolygraphError> {
+        let ast = parser::parse_cypher(cypher)?;
+        let result = translator::cypher::translate_skip_writes(
+            &ast,
+            engine.base_iri(),
+            engine.supports_rdf_star(),
+        )?;
+        let sparql = engine.finalize(result.sparql)?;
+        Ok(TranspileOutput {
+            sparql,
+            schema: result.schema,
+        })
+    }
+
     /// Transpile an ISO GQL query to SPARQL.
     ///
     /// Returns a [`TranspileOutput`] containing the SPARQL string and a
