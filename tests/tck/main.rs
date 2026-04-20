@@ -576,6 +576,59 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                     }
                 }
             }
+            Clause::Merge(m) => {
+                // MERGE (n:Label {prop: val}): INSERT the node IF NOT EXISTS.
+                // Only handle simple node patterns (single node, no relationship).
+                if m.pattern.elements.len() == 1 {
+                    if let PatternElement::Node(node) = &m.pattern.elements[0] {
+                        if !node.labels.is_empty() || node.properties.is_some() {
+                            let var_name = node
+                                .variable
+                                .as_deref()
+                                .unwrap_or("__merge_n");
+                            let n_var = format!("?{var_name}");
+
+                            // INSERT template: create a fresh blank node with labels+props.
+                            let mut insert_triples: Vec<String> = Vec::new();
+                            insert_triples.push(format!("_:n <{BASE}__node> <{BASE}__node>"));
+                            for label in &node.labels {
+                                insert_triples.push(format!(
+                                    "_:n <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"
+                                ));
+                            }
+                            if let Some(props) = &node.properties {
+                                for (key, val) in props {
+                                    if let Some(lit) = expr_to_sparql_lit(val) {
+                                        insert_triples.push(format!("_:n <{BASE}{key}> {lit}"));
+                                    }
+                                }
+                            }
+
+                            // NOT EXISTS conditions to check if matching node already exists.
+                            let mut exists_conds: Vec<String> = Vec::new();
+                            exists_conds.push(format!("{n_var} <{BASE}__node> <{BASE}__node>"));
+                            for label in &node.labels {
+                                exists_conds.push(format!(
+                                    "{n_var} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"
+                                ));
+                            }
+                            if let Some(props) = &node.properties {
+                                for (key, val) in props {
+                                    if let Some(lit) = expr_to_sparql_lit(val) {
+                                        exists_conds.push(format!("{n_var} <{BASE}{key}> {lit}"));
+                                    }
+                                }
+                            }
+
+                            let insert_body = insert_triples.join(" . ");
+                            let exists_body = exists_conds.join(" . ");
+                            updates.push(format!(
+                                "INSERT {{ {insert_body} }} WHERE {{ FILTER NOT EXISTS {{ {exists_body} }} }}"
+                            ));
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }

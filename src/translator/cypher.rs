@@ -3698,9 +3698,36 @@ impl TranslationState {
                         if let Some(f) = opt_filter {
                             pending_filters.push(f);
                         }
+                    } else if self.skip_write_clauses && m.pattern.elements.len() == 1 {
+                        // For skip_writes: MERGE with labels/props on a single node →
+                        // translate as MATCH so the re-translated SELECT finds the node
+                        // that write_clauses_to_updates will have INSERTed if missing.
+                        let match_clause = MatchClause {
+                            optional: false,
+                            pattern: crate::ast::cypher::PatternList(vec![m.pattern.clone()]),
+                            where_: None,
+                        };
+                        let (match_pattern, opt_filter2, where_extra) =
+                            self.translate_match_clause(&match_clause, &mut extra_triples)?;
+                        current = join_patterns(current, match_pattern);
+                        for tp in where_extra {
+                            current = GraphPattern::LeftJoin {
+                                left: Box::new(current),
+                                right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
+                                expression: None,
+                            };
+                        }
+                        if let Some(f) = opt_filter2 {
+                            pending_filters.push(f);
+                        }
+                        // Also register the path variable if present.
+                        if let Some(pv) = &m.pattern.variable {
+                            self.node_vars.insert(pv.clone());
+                        }
                     } else {
                         if self.skip_write_clauses {
-                            // Silently skip merge; caller handles it separately.
+                            // Silently skip relationship MERGE or other complex MERGE;
+                            // the caller handles it as a SPARQL UPDATE separately.
                             // Register any named node/rel/path variables from the MERGE
                             // pattern so subsequent RETURN clauses can reference them.
                             for elem in &m.pattern.elements {
@@ -3710,7 +3737,6 @@ impl TranslationState {
                                     }
                                 }
                             }
-                            // Also register the path variable if present.
                             if let Some(pv) = &m.pattern.variable {
                                 self.node_vars.insert(pv.clone());
                             }
