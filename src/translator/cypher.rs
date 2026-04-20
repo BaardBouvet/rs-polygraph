@@ -115,11 +115,7 @@ fn bool_to_int_for_order(e: SparExpr) -> SparExpr {
 ///       `absorb = true^^xsd:boolean`  for AND (false absorbs AND → result not null).
 ///
 /// For `(a AND b) IS NULL`: set `absorbing_is_true = true`.
-fn make_bool_op_is_null(
-    lvar: &Variable,
-    rvar: &Variable,
-    absorbing_is_true: bool,
-) -> SparExpr {
+fn make_bool_op_is_null(lvar: &Variable, rvar: &Variable, absorbing_is_true: bool) -> SparExpr {
     // The absorbing value for the operator (the one that prevents null propagation).
     // OR has true as absorber (null OR true = true, not null → IS NULL = false).
     // AND has false as absorber (null AND false = false, not null → IS NULL = false).
@@ -818,7 +814,9 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                     for item in items {
                         if matches!(&item.expression, Expression::PatternPredicate(_)) {
                             return Err(PolygraphError::Translation {
-                                message: "UnexpectedSyntax: pattern predicate not allowed in RETURN".to_string(),
+                                message:
+                                    "UnexpectedSyntax: pattern predicate not allowed in RETURN"
+                                        .to_string(),
                             });
                         }
                     }
@@ -1339,9 +1337,10 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         kinds: &std::collections::HashMap<String, Kind>,
                     ) -> bool {
                         match expr {
-                            Expression::PatternPredicate(pattern) => {
-                                !pattern.elements.iter().any(|e| matches!(e, PatternElement::Relationship(_)))
-                            }
+                            Expression::PatternPredicate(pattern) => !pattern
+                                .elements
+                                .iter()
+                                .any(|e| matches!(e, PatternElement::Relationship(_))),
                             // Bare node/relationship variable used as a boolean predicate.
                             Expression::Variable(v) => {
                                 matches!(kinds.get(v.as_str()), Some(Kind::Node) | Some(Kind::Rel))
@@ -1548,15 +1547,9 @@ impl TranslationState {
             Expression::Literal(Literal::Integer(n)) => Some(*n),
             Expression::Negate(e) => Some(-self.try_eval_to_int(e)?),
             Expression::Variable(v) => self.const_int_vars.get(v.as_str()).copied(),
-            Expression::Add(a, b) => {
-                Some(self.try_eval_to_int(a)? + self.try_eval_to_int(b)?)
-            }
-            Expression::Subtract(a, b) => {
-                Some(self.try_eval_to_int(a)? - self.try_eval_to_int(b)?)
-            }
-            Expression::Multiply(a, b) => {
-                Some(self.try_eval_to_int(a)? * self.try_eval_to_int(b)?)
-            }
+            Expression::Add(a, b) => Some(self.try_eval_to_int(a)? + self.try_eval_to_int(b)?),
+            Expression::Subtract(a, b) => Some(self.try_eval_to_int(a)? - self.try_eval_to_int(b)?),
+            Expression::Multiply(a, b) => Some(self.try_eval_to_int(a)? * self.try_eval_to_int(b)?),
             _ => None,
         }
     }
@@ -2847,7 +2840,9 @@ impl TranslationState {
                                         // WITH null AS x → x is known to be null
                                         self.null_vars.insert(alias);
                                     }
-                                    Expression::Literal(crate::ast::cypher::Literal::Integer(n)) => {
+                                    Expression::Literal(crate::ast::cypher::Literal::Integer(
+                                        n,
+                                    )) => {
                                         // WITH <integer> AS x → x is a compile-time integer
                                         self.const_int_vars.insert(alias, *n);
                                     }
@@ -2868,16 +2863,21 @@ impl TranslationState {
                                             self.const_int_vars.insert(alias, n);
                                         }
                                     }
-                                    Expression::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("size") => {
+                                    Expression::FunctionCall { name, args, .. }
+                                        if name.eq_ignore_ascii_case("size") =>
+                                    {
                                         // size(literal_list) → compile-time integer
                                         if let Some(arg) = args.first() {
-                                            let count_opt = count_list_elements(arg).or_else(|| {
-                                                if let Expression::Variable(v) = arg {
-                                                    prev_list_vars.get(v.as_str()).and_then(count_list_elements)
-                                                } else {
-                                                    None
-                                                }
-                                            });
+                                            let count_opt =
+                                                count_list_elements(arg).or_else(|| {
+                                                    if let Expression::Variable(v) = arg {
+                                                        prev_list_vars
+                                                            .get(v.as_str())
+                                                            .and_then(count_list_elements)
+                                                    } else {
+                                                        None
+                                                    }
+                                                });
                                             if let Some(count) = count_opt {
                                                 self.const_int_vars.insert(alias, count as i64);
                                             }
@@ -3031,18 +3031,26 @@ impl TranslationState {
                             // For other aggregates (SUM/MIN/MAX): always use FILTER.
                             // For all-null: skip FILTER (FILTER would cause 0-row GROUP → 0 results).
                             let has_distinct_gc = aggregates.iter().any(|(_, ae)| {
-                                matches!(ae, AggregateExpression::FunctionCall {
-                                    name: AggregateFunction::GroupConcat { .. },
-                                    distinct: true,
-                                    ..
-                                })
+                                matches!(
+                                    ae,
+                                    AggregateExpression::FunctionCall {
+                                        name: AggregateFunction::GroupConcat { .. },
+                                        distinct: true,
+                                        ..
+                                    }
+                                )
                             });
                             for null_var_name in self.unwind_null_vars.clone() {
-                                let is_pure_gc = has_distinct_gc && !aggregates.iter().any(|(_, ae)| {
-                                    !matches!(ae, AggregateExpression::FunctionCall {
-                                        name: AggregateFunction::GroupConcat { .. }, ..
-                                    })
-                                });
+                                let is_pure_gc = has_distinct_gc
+                                    && !aggregates.iter().any(|(_, ae)| {
+                                        !matches!(
+                                            ae,
+                                            AggregateExpression::FunctionCall {
+                                                name: AggregateFunction::GroupConcat { .. },
+                                                ..
+                                            }
+                                        )
+                                    });
                                 // Only add FILTER for mixed-null vars (not all-null).
                                 let should_filter = if is_pure_gc {
                                     self.unwind_mixed_null_vars.contains(&null_var_name)
@@ -4221,7 +4229,10 @@ impl TranslationState {
                     .expect("multi_type has ≥2 types");
                 let path = if rel.direction == Direction::Both {
                     // Undirected multi-type: Alternative(types) | Reverse(Alternative(types))
-                    PPE::Alternative(Box::new(path.clone()), Box::new(PPE::Reverse(Box::new(path))))
+                    PPE::Alternative(
+                        Box::new(path.clone()),
+                        Box::new(PPE::Reverse(Box::new(path))),
+                    )
                 } else {
                     path
                 };
@@ -5657,16 +5668,10 @@ impl TranslationState {
                             );
                             // Reverse comparison: src_l=dst_r AND pred AND dst_l=src_r
                             let rev = SparExpr::And(
-                                Box::new(SparExpr::SameTerm(
-                                    Box::new(ls),
-                                    Box::new(rd),
-                                )),
+                                Box::new(SparExpr::SameTerm(Box::new(ls), Box::new(rd))),
                                 Box::new(SparExpr::And(
                                     Box::new(pred_eq),
-                                    Box::new(SparExpr::SameTerm(
-                                        Box::new(ld),
-                                        Box::new(rs),
-                                    )),
+                                    Box::new(SparExpr::SameTerm(Box::new(ld), Box::new(rs))),
                                 )),
                             );
                             let eq = SparExpr::Or(Box::new(fwd), Box::new(rev));
@@ -5746,7 +5751,8 @@ impl TranslationState {
                         if fname.to_ascii_lowercase() == "keys" {
                             if let Some(Expression::Variable(v)) = fargs.first() {
                                 // Special case: literal_key IN keys(node) → EXISTS { ?node <base:key> ?__val }
-                                if let Expression::Literal(Literal::String(key_str)) = lhs.as_ref() {
+                                if let Expression::Literal(Literal::String(key_str)) = lhs.as_ref()
+                                {
                                     if self.node_vars.contains(v.as_str()) {
                                         let node_var = Variable::new_unchecked(v.clone());
                                         let prop_iri = self.iri(key_str);
@@ -6310,7 +6316,8 @@ impl TranslationState {
                 // combine with AND (all), OR (any/none's NOT), etc.
                 if let Some(items) = self.resolve_literal_list(list) {
                     let pred = predicate.as_deref();
-                    return self.translate_quantifier_over_literal(kind, variable, &items, pred, extra);
+                    return self
+                        .translate_quantifier_over_literal(kind, variable, &items, pred, extra);
                 }
                 // For runtime collections, we can't translate statically.
                 Err(PolygraphError::UnsupportedFeature {
@@ -6468,7 +6475,7 @@ impl TranslationState {
                         if let Some(pred_expr) = predicate {
                             let subst_pred = substitute_var_in_expr(pred_expr, variable, item);
                             match try_eval_bool_const(&subst_pred) {
-                                Some(Some(true)) => {} // item passes filter
+                                Some(Some(true)) => {}                      // item passes filter
                                 Some(Some(false)) | Some(None) => continue, // item filtered out or null
                                 None => {
                                     // Can't evaluate statically → give up on compile-time expansion
@@ -6597,7 +6604,9 @@ impl TranslationState {
         if !proj_extra.is_empty() {
             inner_pattern = GraphPattern::LeftJoin {
                 left: Box::new(inner_pattern),
-                right: Box::new(GraphPattern::Bgp { patterns: proj_extra }),
+                right: Box::new(GraphPattern::Bgp {
+                    patterns: proj_extra,
+                }),
                 expression: None,
             };
         }
@@ -6660,10 +6669,7 @@ impl TranslationState {
                 spargebra::algebra::Function::Concat,
                 vec![
                     SparExpr::Literal(SparLit::new_simple_literal("'")),
-                    SparExpr::FunctionCall(
-                        spargebra::algebra::Function::Str,
-                        vec![proj_ref],
-                    ),
+                    SparExpr::FunctionCall(spargebra::algebra::Function::Str, vec![proj_ref]),
                     SparExpr::Literal(SparLit::new_simple_literal("'")),
                 ],
             )),
@@ -6694,7 +6700,10 @@ impl TranslationState {
             spargebra::algebra::Function::Concat,
             vec![
                 SparExpr::Literal(SparLit::new_simple_literal("[")),
-                SparExpr::Coalesce(vec![SparExpr::Variable(gc_var), SparExpr::Literal(SparLit::new_simple_literal(""))]),
+                SparExpr::Coalesce(vec![
+                    SparExpr::Variable(gc_var),
+                    SparExpr::Literal(SparLit::new_simple_literal("")),
+                ]),
                 SparExpr::Literal(SparLit::new_simple_literal("]")),
             ],
         );
@@ -6886,7 +6895,8 @@ impl TranslationState {
                         )));
                     }
                     // InvalidArgumentType: length() on a node or relationship variable.
-                    if self.node_vars.contains(v.as_str()) || self.edge_map.contains_key(v.as_str()) {
+                    if self.node_vars.contains(v.as_str()) || self.edge_map.contains_key(v.as_str())
+                    {
                         return Err(PolygraphError::Translation {
                             message: format!(
                                 "InvalidArgumentType: length() cannot be applied to a node or relationship variable '{v}'"
@@ -6981,20 +6991,36 @@ impl TranslationState {
                     // size(pattern_comprehension) → count the number of pattern matches.
                     // translate_pattern_comprehension now returns a list string, so we
                     // need to run a separate COUNT subquery instead.
-                    if let Expression::PatternComprehension { pattern, predicate, .. } = arg {
+                    if let Expression::PatternComprehension {
+                        pattern, predicate, ..
+                    } = arg
+                    {
                         let mut inner_triples: Vec<TriplePattern> = Vec::new();
                         let mut inner_paths: Vec<GraphPattern> = Vec::new();
                         self.translate_pattern(pattern, &mut inner_triples, &mut inner_paths)?;
-                        let anchor_vars: Vec<Variable> = pattern.elements.iter()
+                        let anchor_vars: Vec<Variable> = pattern
+                            .elements
+                            .iter()
                             .filter_map(|e| {
                                 if let crate::ast::cypher::PatternElement::Node(n) = e {
-                                    n.variable.as_ref()
-                                        .filter(|v| self.node_vars.contains(v.as_str()) || self.edge_map.contains_key(v.as_str()))
+                                    n.variable
+                                        .as_ref()
+                                        .filter(|v| {
+                                            self.node_vars.contains(v.as_str())
+                                                || self.edge_map.contains_key(v.as_str())
+                                        })
                                         .map(|v| Variable::new_unchecked(v.clone()))
-                                } else { None }
-                            }).collect();
-                        let mut inner_pattern = GraphPattern::Bgp { patterns: inner_triples };
-                        for gp in inner_paths { inner_pattern = join_patterns(inner_pattern, gp); }
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let mut inner_pattern = GraphPattern::Bgp {
+                            patterns: inner_triples,
+                        };
+                        for gp in inner_paths {
+                            inner_pattern = join_patterns(inner_pattern, gp);
+                        }
                         if let Some(pred) = predicate {
                             let mut pred_extra: Vec<TriplePattern> = Vec::new();
                             let pred_sparql = self.translate_expr(pred, &mut pred_extra)?;
@@ -7005,17 +7031,25 @@ impl TranslationState {
                                     expression: None,
                                 };
                             }
-                            inner_pattern = GraphPattern::Filter { inner: Box::new(inner_pattern), expr: pred_sparql };
+                            inner_pattern = GraphPattern::Filter {
+                                inner: Box::new(inner_pattern),
+                                expr: pred_sparql,
+                            };
                         }
                         let cnt_var = self.fresh_var("pc_cnt");
-                        let count_agg = spargebra::algebra::AggregateExpression::CountSolutions { distinct: false };
+                        let count_agg = spargebra::algebra::AggregateExpression::CountSolutions {
+                            distinct: false,
+                        };
                         let subquery = GraphPattern::Group {
                             inner: Box::new(inner_pattern),
                             variables: anchor_vars,
                             aggregates: vec![(cnt_var.clone(), count_agg)],
                         };
                         self.pending_subqueries.push((cnt_var.clone(), subquery));
-                        let zero = SparExpr::Literal(SparLit::new_typed_literal("0", NamedNode::new_unchecked(XSD_INTEGER)));
+                        let zero = SparExpr::Literal(SparLit::new_typed_literal(
+                            "0",
+                            NamedNode::new_unchecked(XSD_INTEGER),
+                        ));
                         return Ok(SparExpr::Coalesce(vec![SparExpr::Variable(cnt_var), zero]));
                     }
                     // size([a, b, c]) or size([a] + [b, c]) → element count as integer
@@ -7028,7 +7062,13 @@ impl TranslationState {
                     // Special case: size([x IN literal_list WHERE pred]) with a runtime predicate.
                     // The predicate may reference SPARQL variables (e.g. UNWIND variables).
                     // Generate: IF(pred_1, 1, 0) + IF(pred_2, 1, 0) + ... for each literal element.
-                    if let Expression::ListComprehension { variable, list, predicate: Some(pred), .. } = arg {
+                    if let Expression::ListComprehension {
+                        variable,
+                        list,
+                        predicate: Some(pred),
+                        ..
+                    } = arg
+                    {
                         if let Some(items) = self.resolve_literal_list(list) {
                             let zero = SparExpr::Literal(SparLit::new_typed_literal(
                                 "0",
@@ -7059,7 +7099,8 @@ impl TranslationState {
                                                     Box::new(one.clone()),
                                                     Box::new(zero.clone()),
                                                 );
-                                                sum = SparExpr::Add(Box::new(sum), Box::new(if_expr));
+                                                sum =
+                                                    SparExpr::Add(Box::new(sum), Box::new(if_expr));
                                             }
                                             Err(_) => {
                                                 all_ok = false;
@@ -7242,9 +7283,11 @@ impl TranslationState {
                 // properties(null) = null
                 // properties(map_literal) = map_literal (identity for literal maps)
                 // properties(nullable_var) = null (no graph data support; only null case)
-                let arg = args.first().ok_or_else(|| PolygraphError::UnsupportedFeature {
-                    feature: "properties() requires an argument".to_string(),
-                })?;
+                let arg = args
+                    .first()
+                    .ok_or_else(|| PolygraphError::UnsupportedFeature {
+                        feature: "properties() requires an argument".to_string(),
+                    })?;
                 match arg {
                     Expression::Literal(Literal::Null) => {
                         return Ok(SparExpr::Variable(self.fresh_var("null")));
@@ -7258,7 +7301,9 @@ impl TranslationState {
                         let vname = v.clone();
                         // If the variable is statically known to be null (via null_vars)
                         // or is nullable (from OPTIONAL MATCH that didn't match), return null.
-                        if self.null_vars.contains(vname.as_str()) || self.nullable_vars.contains(vname.as_str()) {
+                        if self.null_vars.contains(vname.as_str())
+                            || self.nullable_vars.contains(vname.as_str())
+                        {
                             return Ok(SparExpr::Variable(self.fresh_var("null")));
                         }
                         // If it's a known map alias, serialize it.
@@ -7637,7 +7682,8 @@ impl TranslationState {
                             if let (Some(h), Some(min)) =
                                 (get_i(pairs, "hour"), get_i(pairs, "minute"))
                             {
-                                let tz = get_s(pairs, "timezone").unwrap_or_else(|| "Z".to_string());
+                                let tz =
+                                    get_s(pairs, "timezone").unwrap_or_else(|| "Z".to_string());
                                 let s = match (get_i(pairs, "second"), get_i(pairs, "nanosecond")) {
                                     (None, _) => format!("{h:02}:{min:02}:00{tz}"),
                                     (Some(sec), None) => {
@@ -7665,8 +7711,8 @@ impl TranslationState {
                                 get_i(pairs, "hour"),
                                 get_i(pairs, "minute"),
                             ) {
-                                let tz = get_s(pairs, "timezone")
-                                    .unwrap_or_else(|| "Z".to_string());
+                                let tz =
+                                    get_s(pairs, "timezone").unwrap_or_else(|| "Z".to_string());
                                 let s = match (get_i(pairs, "second"), get_i(pairs, "nanosecond")) {
                                     (None, _) => {
                                         format!("{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}:00{tz}")
@@ -7896,14 +7942,12 @@ impl TranslationState {
                 // VALUES(?x ?y) that contains all (sub-list-encoding, element) pairs.
                 if let Some(outer_list) = self.unwind_list_source.get(list_var.as_str()).cloned() {
                     if let Expression::List(sub_lists) = &outer_list {
-                        let x_var =
-                            Variable::new_unchecked(list_var.clone());
-                        let y_var =
-                            Variable::new(u.variable.as_str()).map_err(|_| {
-                                PolygraphError::UnsupportedFeature {
-                                    feature: "invalid variable name in UNWIND".to_string(),
-                                }
-                            })?;
+                        let x_var = Variable::new_unchecked(list_var.clone());
+                        let y_var = Variable::new(u.variable.as_str()).map_err(|_| {
+                            PolygraphError::UnsupportedFeature {
+                                feature: "invalid variable name in UNWIND".to_string(),
+                            }
+                        })?;
                         let mut rows: Vec<Vec<Option<GroundTerm>>> = Vec::new();
                         for sub_list_expr in sub_lists {
                             let x_encoded = serialize_list_element(sub_list_expr);
@@ -8156,35 +8200,33 @@ impl TranslationState {
             Expression::FunctionCall { name, args, .. } => {
                 let fname = name.to_ascii_lowercase();
                 // Helper: extract an integer literal from map pairs by key (case-insensitive).
-                let get_int =
-                    |pairs: &Vec<(String, Expression)>, key: &str| -> Option<i64> {
-                        pairs.iter().find_map(|(k, v)| {
-                            if k.eq_ignore_ascii_case(key) {
-                                if let Expression::Literal(Literal::Integer(n)) = v {
-                                    Some(*n)
-                                } else {
-                                    None
-                                }
+                let get_int = |pairs: &Vec<(String, Expression)>, key: &str| -> Option<i64> {
+                    pairs.iter().find_map(|(k, v)| {
+                        if k.eq_ignore_ascii_case(key) {
+                            if let Expression::Literal(Literal::Integer(n)) = v {
+                                Some(*n)
                             } else {
                                 None
                             }
-                        })
-                    };
+                        } else {
+                            None
+                        }
+                    })
+                };
                 // Helper: extract a string literal from map pairs by key (case-insensitive).
-                let get_str =
-                    |pairs: &Vec<(String, Expression)>, key: &str| -> Option<String> {
-                        pairs.iter().find_map(|(k, v)| {
-                            if k.eq_ignore_ascii_case(key) {
-                                if let Expression::Literal(Literal::String(s)) = v {
-                                    Some(s.clone())
-                                } else {
-                                    None
-                                }
+                let get_str = |pairs: &Vec<(String, Expression)>, key: &str| -> Option<String> {
+                    pairs.iter().find_map(|(k, v)| {
+                        if k.eq_ignore_ascii_case(key) {
+                            if let Expression::Literal(Literal::String(s)) = v {
+                                Some(s.clone())
                             } else {
                                 None
                             }
-                        })
-                    };
+                        } else {
+                            None
+                        }
+                    })
+                };
                 match fname.as_str() {
                     "date" => {
                         if let Some(Expression::Map(pairs)) = args.first() {
@@ -8206,17 +8248,18 @@ impl TranslationState {
                             if let (Some(h), Some(min)) =
                                 (get_int(pairs, "hour"), get_int(pairs, "minute"))
                             {
-                                let s =
-                                    match (get_int(pairs, "second"), get_int(pairs, "nanosecond"))
-                                    {
-                                        (None, _) => format!("{h:02}:{min:02}"),
-                                        (Some(sec), None) => {
-                                            format!("{h:02}:{min:02}:{sec:02}")
-                                        }
-                                        (Some(sec), Some(ns)) => {
-                                            format!("{h:02}:{min:02}:{sec:02}.{ns:09}")
-                                        }
-                                    };
+                                let s = match (
+                                    get_int(pairs, "second"),
+                                    get_int(pairs, "nanosecond"),
+                                ) {
+                                    (None, _) => format!("{h:02}:{min:02}"),
+                                    (Some(sec), None) => {
+                                        format!("{h:02}:{min:02}:{sec:02}")
+                                    }
+                                    (Some(sec), Some(ns)) => {
+                                        format!("{h:02}:{min:02}:{sec:02}.{ns:09}")
+                                    }
+                                };
                                 return Ok(SparLit::new_simple_literal(s).into());
                             }
                         }
@@ -8241,9 +8284,7 @@ impl TranslationState {
                                         format!("{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}")
                                     }
                                     (Some(sec), None) => {
-                                        format!(
-                                            "{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}:{sec:02}"
-                                        )
+                                        format!("{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}:{sec:02}")
                                     }
                                     (Some(sec), Some(ns)) => {
                                         format!(
@@ -8337,8 +8378,7 @@ impl TranslationState {
                         })
                     }
                     _ => Err(PolygraphError::UnsupportedFeature {
-                        feature: "complex expression in inline property map (Phase 4)"
-                            .to_string(),
+                        feature: "complex expression in inline property map (Phase 4)".to_string(),
                     }),
                 }
             }
@@ -8589,12 +8629,10 @@ fn predicate_uses_numeric_arithmetic(expr: &Expression, var: &str) -> bool {
             expr_references_var(e, var) || predicate_uses_numeric_arithmetic(e, var)
         }
         Expression::Comparison(a, _, b) => {
-            predicate_uses_numeric_arithmetic(a, var)
-                || predicate_uses_numeric_arithmetic(b, var)
+            predicate_uses_numeric_arithmetic(a, var) || predicate_uses_numeric_arithmetic(b, var)
         }
         Expression::Or(a, b) | Expression::And(a, b) | Expression::Xor(a, b) => {
-            predicate_uses_numeric_arithmetic(a, var)
-                || predicate_uses_numeric_arithmetic(b, var)
+            predicate_uses_numeric_arithmetic(a, var) || predicate_uses_numeric_arithmetic(b, var)
         }
         _ => false,
     }
@@ -8610,10 +8648,18 @@ fn substitute_var_in_expr(expr: &Expression, var: &str, replacement: &Expression
     match expr {
         Expression::Variable(v) if v.as_str() == var => replacement.clone(),
         // Unary
-        Expression::Not(e) => Expression::Not(Box::new(substitute_var_in_expr(e, var, replacement))),
-        Expression::Negate(e) => Expression::Negate(Box::new(substitute_var_in_expr(e, var, replacement))),
-        Expression::IsNull(e) => Expression::IsNull(Box::new(substitute_var_in_expr(e, var, replacement))),
-        Expression::IsNotNull(e) => Expression::IsNotNull(Box::new(substitute_var_in_expr(e, var, replacement))),
+        Expression::Not(e) => {
+            Expression::Not(Box::new(substitute_var_in_expr(e, var, replacement)))
+        }
+        Expression::Negate(e) => {
+            Expression::Negate(Box::new(substitute_var_in_expr(e, var, replacement)))
+        }
+        Expression::IsNull(e) => {
+            Expression::IsNull(Box::new(substitute_var_in_expr(e, var, replacement)))
+        }
+        Expression::IsNotNull(e) => {
+            Expression::IsNotNull(Box::new(substitute_var_in_expr(e, var, replacement)))
+        }
         // Binary logical
         Expression::Or(a, b) => Expression::Or(
             Box::new(substitute_var_in_expr(a, var, replacement)),
@@ -8668,48 +8714,83 @@ fn substitute_var_in_expr(expr: &Expression, var: &str, replacement: &Expression
         ),
         Expression::ListSlice { list, start, end } => Expression::ListSlice {
             list: Box::new(substitute_var_in_expr(list, var, replacement)),
-            start: start.as_ref().map(|e| Box::new(substitute_var_in_expr(e, var, replacement))),
-            end: end.as_ref().map(|e| Box::new(substitute_var_in_expr(e, var, replacement))),
+            start: start
+                .as_ref()
+                .map(|e| Box::new(substitute_var_in_expr(e, var, replacement))),
+            end: end
+                .as_ref()
+                .map(|e| Box::new(substitute_var_in_expr(e, var, replacement))),
         },
         // Function call: substitute all args
-        Expression::FunctionCall { name, distinct, args } => Expression::FunctionCall {
+        Expression::FunctionCall {
+            name,
+            distinct,
+            args,
+        } => Expression::FunctionCall {
             name: name.clone(),
             distinct: *distinct,
-            args: args.iter().map(|a| substitute_var_in_expr(a, var, replacement)).collect(),
+            args: args
+                .iter()
+                .map(|a| substitute_var_in_expr(a, var, replacement))
+                .collect(),
         },
         // List literal: substitute element-wise
         Expression::List(items) => Expression::List(
-            items.iter().map(|i| substitute_var_in_expr(i, var, replacement)).collect(),
+            items
+                .iter()
+                .map(|i| substitute_var_in_expr(i, var, replacement))
+                .collect(),
         ),
         // Nested quantifier: stop at inner variable shadowing
-        Expression::QuantifierExpr { kind, variable: inner_var, list, predicate }
-            if inner_var.as_str() != var =>
-        {
-            Expression::QuantifierExpr {
-                kind: kind.clone(),
-                variable: inner_var.clone(),
-                list: Box::new(substitute_var_in_expr(list, var, replacement)),
-                predicate: predicate.as_ref().map(|p| Box::new(substitute_var_in_expr(p, var, replacement))),
-            }
-        }
+        Expression::QuantifierExpr {
+            kind,
+            variable: inner_var,
+            list,
+            predicate,
+        } if inner_var.as_str() != var => Expression::QuantifierExpr {
+            kind: kind.clone(),
+            variable: inner_var.clone(),
+            list: Box::new(substitute_var_in_expr(list, var, replacement)),
+            predicate: predicate
+                .as_ref()
+                .map(|p| Box::new(substitute_var_in_expr(p, var, replacement))),
+        },
         // List comprehension: stop at inner variable shadowing
-        Expression::ListComprehension { variable: lc_var, list, predicate, projection }
-            if lc_var.as_str() != var =>
-        {
-            Expression::ListComprehension {
-                variable: lc_var.clone(),
-                list: Box::new(substitute_var_in_expr(list, var, replacement)),
-                predicate: predicate.as_ref().map(|p| Box::new(substitute_var_in_expr(p, var, replacement))),
-                projection: projection.as_ref().map(|p| Box::new(substitute_var_in_expr(p, var, replacement))),
-            }
-        }
-        Expression::CaseExpression { operand, whens, else_expr } => Expression::CaseExpression {
-            operand: operand.as_ref().map(|o| Box::new(substitute_var_in_expr(o, var, replacement))),
-            whens: whens.iter().map(|(w, t)| (
-                substitute_var_in_expr(w, var, replacement),
-                substitute_var_in_expr(t, var, replacement),
-            )).collect(),
-            else_expr: else_expr.as_ref().map(|e| Box::new(substitute_var_in_expr(e, var, replacement))),
+        Expression::ListComprehension {
+            variable: lc_var,
+            list,
+            predicate,
+            projection,
+        } if lc_var.as_str() != var => Expression::ListComprehension {
+            variable: lc_var.clone(),
+            list: Box::new(substitute_var_in_expr(list, var, replacement)),
+            predicate: predicate
+                .as_ref()
+                .map(|p| Box::new(substitute_var_in_expr(p, var, replacement))),
+            projection: projection
+                .as_ref()
+                .map(|p| Box::new(substitute_var_in_expr(p, var, replacement))),
+        },
+        Expression::CaseExpression {
+            operand,
+            whens,
+            else_expr,
+        } => Expression::CaseExpression {
+            operand: operand
+                .as_ref()
+                .map(|o| Box::new(substitute_var_in_expr(o, var, replacement))),
+            whens: whens
+                .iter()
+                .map(|(w, t)| {
+                    (
+                        substitute_var_in_expr(w, var, replacement),
+                        substitute_var_in_expr(t, var, replacement),
+                    )
+                })
+                .collect(),
+            else_expr: else_expr
+                .as_ref()
+                .map(|e| Box::new(substitute_var_in_expr(e, var, replacement))),
         },
         // Everything else (literals, map, label check, etc.) is left unchanged
         _ => expr.clone(),
@@ -9237,17 +9318,15 @@ fn try_eval_bool_const(expr: &Expression) -> Option<Option<bool>> {
                     Expression::Modulo(a, b) => {
                         let av = to_f64(a)?;
                         let bv = to_f64(b)?;
-                        if bv == 0.0 { None } else { Some(av % bv) }
+                        if bv == 0.0 {
+                            None
+                        } else {
+                            Some(av % bv)
+                        }
                     }
-                    Expression::Add(a, b) => {
-                        Some(to_f64(a)? + to_f64(b)?)
-                    }
-                    Expression::Subtract(a, b) => {
-                        Some(to_f64(a)? - to_f64(b)?)
-                    }
-                    Expression::Multiply(a, b) => {
-                        Some(to_f64(a)? * to_f64(b)?)
-                    }
+                    Expression::Add(a, b) => Some(to_f64(a)? + to_f64(b)?),
+                    Expression::Subtract(a, b) => Some(to_f64(a)? - to_f64(b)?),
+                    Expression::Multiply(a, b) => Some(to_f64(a)? * to_f64(b)?),
                     _ => None,
                 }
             }
