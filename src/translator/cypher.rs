@@ -1722,9 +1722,37 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                     kinds.insert(v.clone(), kind);
                     bound_vars.insert(v);
                 }
+                // Also register the path variable (e.g. `MERGE p = (a {num: 1})`).
+                if let Some(pv) = &m.pattern.variable {
+                    kinds.insert(pv.clone(), Kind::Path);
+                    bound_vars.insert(pv.clone());
+                }
                 // UndefinedVariable in ON CREATE SET / ON MATCH SET actions.
                 for action in &m.actions {
                     for item in &action.items {
+                        // Check subject variable (the thing being SET)
+                        let subject_var: &str = match item {
+                            crate::ast::cypher::SetItem::Property { variable, .. } => {
+                                variable.as_str()
+                            }
+                            crate::ast::cypher::SetItem::NodeReplace { variable, .. } => {
+                                variable.as_str()
+                            }
+                            crate::ast::cypher::SetItem::MergeMap { variable, .. } => {
+                                variable.as_str()
+                            }
+                            crate::ast::cypher::SetItem::SetLabel { variable, .. } => {
+                                variable.as_str()
+                            }
+                        };
+                        if !bound_vars.contains(subject_var) && !kinds.contains_key(subject_var) {
+                            return Err(PolygraphError::Translation {
+                                message: format!(
+                                    "UndefinedVariable: variable '{subject_var}' not defined"
+                                ),
+                            });
+                        }
+                        // Also check RHS expression variables.
                         let rhs_opt: Option<&Expression> = match item {
                             crate::ast::cypher::SetItem::Property { value, .. } => Some(value),
                             crate::ast::cypher::SetItem::NodeReplace { value, .. } => Some(value),
@@ -3673,14 +3701,18 @@ impl TranslationState {
                     } else {
                         if self.skip_write_clauses {
                             // Silently skip merge; caller handles it separately.
-                            // Register any named node/rel variables from the MERGE pattern
-                            // so subsequent RETURN clauses can reference them.
+                            // Register any named node/rel/path variables from the MERGE
+                            // pattern so subsequent RETURN clauses can reference them.
                             for elem in &m.pattern.elements {
                                 if let PatternElement::Node(n) = elem {
                                     if let Some(v) = &n.variable {
                                         self.node_vars.insert(v.clone());
                                     }
                                 }
+                            }
+                            // Also register the path variable if present.
+                            if let Some(pv) = &m.pattern.variable {
+                                self.node_vars.insert(pv.clone());
                             }
                         } else {
                             return Err(PolygraphError::UnsupportedFeature {
