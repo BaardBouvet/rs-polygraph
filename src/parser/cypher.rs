@@ -574,10 +574,21 @@ fn build_set_item(pair: Pair<Rule>) -> Result<SetItem, PolygraphError> {
     // Detect variant by first child rule
     match children[0].as_rule() {
         Rule::prop_access_expr => {
-            // prop_access_expr = { variable ~ "." ~ prop_name }
+            // prop_access_expr = { (variable | "(" ~ variable ~ ")") ~ "." ~ prop_name }
             let mut acc_inner = children.remove(0).into_inner();
-            let variable = ident_text(&acc_inner.next().expect("prop_access_expr has variable"));
-            // skip "."
+            // Skip any leading "(" — the first variable is what we want.
+            let variable = {
+                let first = acc_inner.next().expect("prop_access_expr has variable or paren");
+                if first.as_rule() == Rule::variable {
+                    ident_text(&first)
+                } else {
+                    // Parenthesized: skip the "(" and get the variable inside.
+                    acc_inner
+                        .find(|p| p.as_rule() == Rule::variable)
+                        .map(|p| ident_text(&p))
+                        .expect("prop_access_expr paren has variable")
+                }
+            };
             let key_pair = acc_inner
                 .find(|p| p.as_rule() == Rule::prop_name)
                 .expect("prop_access_expr has prop_name");
@@ -676,7 +687,17 @@ fn build_remove_item(pair: Pair<Rule>) -> Result<RemoveItem, PolygraphError> {
     match children[0].as_rule() {
         Rule::prop_access_expr => {
             let mut acc_inner = children.remove(0).into_inner();
-            let variable = ident_text(&acc_inner.next().expect("prop_access_expr var"));
+            let variable = {
+                let first = acc_inner.next().expect("prop_access_expr var");
+                if first.as_rule() == Rule::variable {
+                    ident_text(&first)
+                } else {
+                    acc_inner
+                        .find(|p| p.as_rule() == Rule::variable)
+                        .map(|p| ident_text(&p))
+                        .expect("prop_access_expr paren var")
+                }
+            };
             let key = acc_inner
                 .find(|p| p.as_rule() == Rule::prop_name)
                 .expect("prop_access_expr key")

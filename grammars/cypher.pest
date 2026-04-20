@@ -211,7 +211,7 @@ set_item        = { prop_access_expr ~ "=" ~ expression
                   | variable ~ "+=" ~ map_literal
                   | variable ~ "=" ~ expression
                   | variable ~ node_labels }
-prop_access_expr = { variable ~ "." ~ prop_name }
+prop_access_expr = { (variable | "(" ~ variable ~ ")") ~ "." ~ prop_name }
 
 // [DETACH] DELETE
 delete_clause   = { detach_marker? ~ kw_DELETE ~ expression ~ ("," ~ expression)* }
