@@ -3886,10 +3886,45 @@ impl TranslationState {
                         // OPTIONAL BGP will correctly find the value (when created) or return null (when matched).
                     } else {
                         if self.skip_write_clauses {
-                            // Silently skip relationship MERGE or other complex MERGE;
-                            // the caller handles it as a SPARQL UPDATE separately.
-                            // Register any named node/rel/path variables from the MERGE
-                            // pattern so subsequent RETURN clauses can reference them.
+                            // In skip_writes mode: if the MERGE has a relationship variable,
+                            // translate as MATCH so the newly-created edge is found by SELECT.
+                            // If no rel variable is referenced (anonymous edges), silently skip
+                            // to avoid over-matching (finding all edges of that type).
+                            let has_rel_var = m.pattern.elements.iter().any(|e| {
+                                if let PatternElement::Relationship(r) = e {
+                                    r.variable.is_some()
+                                } else {
+                                    false
+                                }
+                            });
+                            if has_rel_var {
+                                let match_clause = MatchClause {
+                                    optional: false,
+                                    pattern: crate::ast::cypher::PatternList(vec![m.pattern.clone()]),
+                                    where_: None,
+                                };
+                                // Try to translate as MATCH; fall back to silently skip on error
+                                // (e.g. complex list properties in the MERGE pattern).
+                                match self.translate_match_clause(&match_clause, &mut extra_triples) {
+                                    Ok((match_pattern, opt_filter, where_extra)) => {
+                                        current = join_patterns(current, match_pattern);
+                                        for tp in where_extra {
+                                            current = GraphPattern::LeftJoin {
+                                                left: Box::new(current),
+                                                right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
+                                                expression: None,
+                                            };
+                                        }
+                                        if let Some(f) = opt_filter {
+                                            pending_filters.push(f);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Complex expression in MERGE pattern — silently skip.
+                                    }
+                                }
+                            }
+                            // Register named variables from the pattern.
                             for elem in &m.pattern.elements {
                                 if let PatternElement::Node(n) = elem {
                                     if let Some(v) = &n.variable {

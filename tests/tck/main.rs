@@ -489,7 +489,7 @@ fn emit_create_pattern_with_bindings(
 /// The SELECT query (for the RETURN part) should be generated separately using
 /// `Transpiler::cypher_to_sparql_skip_writes`.
 fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
-    use polygraph::ast::cypher::{Clause, Expression, Literal, PatternElement, RemoveItem, SetItem};
+    use polygraph::ast::cypher::{Clause, Direction, Expression, Literal, PatternElement, RemoveItem, SetItem};
 
     let query = match parse_cypher(cypher) {
         Ok(q) => q,
@@ -502,6 +502,11 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
     // Track UNWIND variable and values for loop expansion in MERGE/CREATE.
     let mut loop_values: Vec<Expression> = vec![Expression::Literal(Literal::Null)];
     let mut unwind_var_name: Option<String> = None;
+    // Track MATCH node constraints for use in relationship MERGE.
+    let mut match_node_triples: HashMap<String, Vec<String>> = HashMap::new();
+    // Track pairs of node vars that must be connected by some edge (from MATCH edge patterns).
+    // This prevents undirected relationship MERGE from creating edges between all cross-pairs.
+    let mut match_connected_node_pairs: Vec<(String, String)> = Vec::new();
 
     for clause in &query.clauses {
         match clause {
@@ -513,6 +518,42 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                         unwind_var_name = Some(u.variable.clone());
                     }
                     _ => {}
+                }
+            }
+            Clause::Match(mc) => {
+                // Track node variable constraints for use in relationship MERGE.
+                for pattern in &mc.pattern.0 {
+                    let mut prev_node_var: Option<String> = None;
+                    for elem in &pattern.elements {
+                        match elem {
+                            PatternElement::Node(node) => {
+                                if let Some(var) = &node.variable {
+                                    let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+                                    let mut triples = Vec::new();
+                                    triples.push(format!("?{var} <{BASE}__node> <{BASE}__node>"));
+                                    for label in &node.labels {
+                                        triples.push(format!("?{var} <{rdf_type}> <{BASE}{label}>"));
+                                    }
+                                    if let Some(props) = &node.properties {
+                                        for (key, val) in props {
+                                            if let Some(lit) = expr_to_sparql_lit(val) {
+                                                triples.push(format!("?{var} <{BASE}{key}> {lit}"));
+                                            }
+                                        }
+                                    }
+                                    match_node_triples.insert(var.clone(), triples);
+                                }
+                                // Track edge connection from previous node.
+                                if let Some(ref prev) = prev_node_var {
+                                    if let Some(ref curr) = node.variable {
+                                        match_connected_node_pairs.push((prev.clone(), curr.clone()));
+                                    }
+                                }
+                                prev_node_var = node.variable.clone();
+                            }
+                            PatternElement::Relationship(_) => {} // handled at next Node
+                        }
+                    }
                 }
             }
             Clause::Create(c) => {
@@ -742,6 +783,120 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                     }
                                 }
                             }
+                        }
+                    }
+                } else if m.pattern.elements.len() >= 3 {
+                    // Relationship MERGE: MERGE (src)-[r:TYPE]->(dst) or similar.
+                    if let (
+                        PatternElement::Node(src_node),
+                        PatternElement::Relationship(rel),
+                        PatternElement::Node(dst_node),
+                    ) = (
+                        &m.pattern.elements[0],
+                        &m.pattern.elements[1],
+                        &m.pattern.elements[2],
+                    ) {
+                        let src_name = src_node.variable.as_deref().unwrap_or("__src");
+                        let dst_name = dst_node.variable.as_deref().unwrap_or("__dst");
+                        // Collect WHERE conditions: start with known match constraints, fall back to __node sentinel.
+                        let default_src = vec![format!("?{src_name} <{BASE}__node> <{BASE}__node>")];
+                        let default_dst = vec![format!("?{dst_name} <{BASE}__node> <{BASE}__node>")];
+                        let src_triples = match_node_triples.get(src_name).unwrap_or(&default_src);
+                        let dst_triples = match_node_triples.get(dst_name).unwrap_or(&default_dst);
+                        // Add src node constraints from the MERGE pattern itself.
+                        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+                        let mut src_conds: Vec<String> = src_triples.clone();
+                        for label in &src_node.labels {
+                            let cond = format!("?{src_name} <{rdf_type}> <{BASE}{label}>");
+                            if !src_conds.contains(&cond) {
+                                src_conds.push(cond);
+                            }
+                        }
+                        let mut dst_conds: Vec<String> = dst_triples.clone();
+                        for label in &dst_node.labels {
+                            let cond = format!("?{dst_name} <{rdf_type}> <{BASE}{label}>");
+                            if !dst_conds.contains(&cond) {
+                                dst_conds.push(cond);
+                            }
+                        }
+                        for rt in &rel.rel_types {
+                            let type_iri = format!("{BASE}{rt}");
+                            // Direction: Right or Both → src→dst; Left → dst→src.
+                            let (actual_src, actual_dst) = match rel.direction {
+                                Direction::Left => (dst_name, src_name),
+                                _ => (src_name, dst_name),
+                            };
+                            // Build INSERT: the edge triple plus any relationship properties.
+                            let mut insert_parts: Vec<String> =
+                                vec![format!("?{actual_src} <{type_iri}> ?{actual_dst}")];
+                            if let Some(props) = &rel.properties {
+                                for (key, val) in props {
+                                    if let Some(lit) = expr_to_sparql_lit(val) {
+                                        insert_parts.push(format!(
+                                            "<< ?{actual_src} <{type_iri}> ?{actual_dst} >> <{BASE}{key}> {lit}"
+                                        ));
+                                    }
+                                }
+                            }
+                            // Include ON CREATE SET items for the relationship.
+                            for action in &m.actions {
+                                if action.on_create {
+                                    for item in &action.items {
+                                        if let SetItem::Property { key, value, .. } = item {
+                                            if let Some(lit) = expr_to_sparql_lit(value) {
+                                                insert_parts.push(format!(
+                                                    "<< ?{actual_src} <{type_iri}> ?{actual_dst} >> <{BASE}{key}> {lit}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let insert_body = insert_parts.join(" . ");
+                            // WHERE: src+dst constraints + relationship property predicates + NOT EXISTS.
+                            let mut where_parts = src_conds.clone();
+                            where_parts.extend(dst_conds.clone());
+                            // For undirected MERGE, check both directions in NOT EXISTS.
+                            let mut not_exists_parts: Vec<String> =
+                                vec![format!("?{actual_src} <{type_iri}> ?{actual_dst}")];
+                            if let Some(props) = &rel.properties {
+                                for (key, val) in props {
+                                    if let Some(lit) = expr_to_sparql_lit(val) {
+                                        not_exists_parts.push(format!(
+                                            "<< ?{actual_src} <{type_iri}> ?{actual_dst} >> <{BASE}{key}> {lit}"
+                                        ));
+                                    }
+                                }
+                            }
+                            let not_exists_str = if matches!(rel.direction, Direction::Both) {
+                                // Undirected: check either direction.
+                                let rev_parts: Vec<String> = not_exists_parts.iter()
+                                    .map(|p| p.replace(&format!("?{actual_src} <{type_iri}> ?{actual_dst}"),
+                                                       &format!("?{actual_dst} <{type_iri}> ?{actual_src}")))
+                                    .collect();
+                                format!("{{ {} }} UNION {{ {} }}", not_exists_parts.join(" . "), rev_parts.join(" . "))
+                            } else {
+                                not_exists_parts.join(" . ")
+                            };
+                            where_parts.push(format!("FILTER NOT EXISTS {{ {not_exists_str} }}"));
+                            // For undirected MERGE following an undirected MATCH-edge pattern:
+                            // restrict the INSERT to node pairs that must be edge-connected
+                            // (prevents creating edges between all cross-pairs of matching nodes).
+                            let is_connected_pair = match_connected_node_pairs.iter().any(|(a, b)| {
+                                (a.as_str() == src_name && b.as_str() == dst_name) ||
+                                (a.as_str() == dst_name && b.as_str() == src_name)
+                            });
+                            if matches!(rel.direction, Direction::Both) && is_connected_pair {
+                                // Add constraint: src and dst must be connected by SOME edge.
+                                let anyrel = format!("?__anyrel_{}_{}", src_name, dst_name);
+                                where_parts.push(format!(
+                                    "{{ ?{actual_src} {anyrel} ?{actual_dst} }} UNION {{ ?{actual_dst} {anyrel} ?{actual_src} . FILTER(!(?{actual_src} = ?{actual_dst})) }}"
+                                ));
+                            }
+                            let where_body = where_parts.join(" . ");
+                            updates.push(format!(
+                                "INSERT {{ {insert_body} }} WHERE {{ {where_body} }}"
+                            ));
                         }
                     }
                 }
