@@ -1932,6 +1932,9 @@ struct TranslationState {
     /// Labels known for node variables from CREATE patterns (populated in skip_writes mode).
     /// Maps variable name → list of label strings.
     node_labels_from_create: std::collections::HashMap<String, Vec<String>>,
+    /// Properties known for node/relationship variables from CREATE patterns (skip_writes mode).
+    /// Maps variable name → {property_key → Expression value}.
+    node_props_from_create: std::collections::HashMap<String, std::collections::HashMap<String, Expression>>,
     /// WITH alias → string lexical value of the literal it was bound to.
     /// Used to fold expressions like `date(toString(alias))` at compile time.
     with_lit_vars: std::collections::HashMap<String, String>,
@@ -1971,6 +1974,7 @@ impl TranslationState {
             const_int_vars: Default::default(),
             skip_write_clauses: false,
             node_labels_from_create: Default::default(),
+            node_props_from_create: Default::default(),
             with_lit_vars: Default::default(),
         }
     }
@@ -2082,6 +2086,19 @@ impl TranslationState {
                     None
                 }
             }),
+            Expression::Property(base_expr, key) => {
+                // n.prop where n is a CREATE/SET variable with known list value
+                if let Expression::Variable(v) = base_expr.as_ref() {
+                    if let Some(val_expr) = self
+                        .node_props_from_create
+                        .get(v.as_str())
+                        .and_then(|m| m.get(key.as_str()))
+                    {
+                        return self.resolve_literal_list(val_expr);
+                    }
+                }
+                None
+            }
             Expression::Subscript(coll, idx) => {
                 // Recursively resolve: list[n] where the element is itself a list
                 if let Some(n) = get_literal_int(idx) {
@@ -3727,6 +3744,14 @@ impl TranslationState {
                                         .collect();
                                     self.node_labels_from_create
                                         .insert(v.clone(), labels);
+                                    // Record properties known for this variable.
+                                    if let Some(props) = &n.properties {
+                                        let mut prop_map: std::collections::HashMap<String, Expression> = Default::default();
+                                        for (key, val) in props {
+                                            prop_map.insert(key.clone(), val.clone());
+                                        }
+                                        self.node_props_from_create.insert(v.clone(), prop_map);
+                                    }
                                 }
                             }
                         }
@@ -3823,7 +3848,45 @@ impl TranslationState {
                             ),
                         });
                     }
-                    // Skip: caller handles SET as a SPARQL UPDATE separately.
+                    // Skip: record SET n.prop = val for subsequent RETURN use.
+                    for item in &s.items {
+                        match item {
+                            crate::ast::cypher::SetItem::Property { variable, key, value } => {
+                                // Only track if value doesn't reference the same (variable.key)
+                                // to avoid infinite recursion in translate_expr.
+                                if !expr_references_prop(value, variable, key) {
+                                    self.node_props_from_create
+                                        .entry(variable.clone())
+                                        .or_default()
+                                        .insert(key.clone(), value.clone());
+                                }
+                            }
+                            crate::ast::cypher::SetItem::NodeReplace { variable, value } => {
+                                // n = {k: v, ...}: record all map keys (only literal-safe)
+                                if let Expression::Map(pairs) = value {
+                                    for (k, v) in pairs {
+                                        if !expr_references_prop(v, variable, k) {
+                                            self.node_props_from_create
+                                                .entry(variable.clone())
+                                                .or_default()
+                                                .insert(k.clone(), v.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            crate::ast::cypher::SetItem::MergeMap { variable, map } => {
+                                for (k, v) in map {
+                                    if !expr_references_prop(v, variable, k) {
+                                        self.node_props_from_create
+                                            .entry(variable.clone())
+                                            .or_default()
+                                            .insert(k.clone(), v.clone());
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 Clause::Delete(d) => {
                     // If the query has a subsequent RETURN clause AND the RETURN
@@ -5923,6 +5986,16 @@ impl TranslationState {
                     if self.null_vars.contains(v.as_str()) {
                         return Ok(SparExpr::Variable(self.fresh_var("null")));
                     }
+                    // If this variable was created in skip_writes mode, return the
+                    // value from the CREATE property map (e.g. n.num where n created with {num: x}).
+                    if let Some(prop_val) = self
+                        .node_props_from_create
+                        .get(v.as_str())
+                        .and_then(|m| m.get(key.as_str()))
+                        .cloned()
+                    {
+                        return self.translate_expr(&prop_val, extra);
+                    }
                 }
                 // First try compile-time map resolution: if base_expr resolves to a literal
                 // map (e.g. list[n] where list[n] is a Map literal), access the key directly.
@@ -7674,7 +7747,26 @@ impl TranslationState {
                             }
                         }
                     }
-                    // size(string) → STRLEN(string)
+                    // size(string) → STRLEN(string), but if the arg resolves to a
+                    // compile-time list (e.g. n.prop where SET n.prop = [1,2,3]),
+                    // return the element count directly.
+                    if let Expression::Property(base_expr, key) = arg {
+                        if let Expression::Variable(v) = base_expr.as_ref() {
+                            if let Some(list_expr) = self
+                                .node_props_from_create
+                                .get(v.as_str())
+                                .and_then(|m| m.get(key.as_str()))
+                                .cloned()
+                            {
+                                if let Some(count) = count_list_elements(&list_expr) {
+                                    return Ok(SparExpr::Literal(SparLit::new_typed_literal(
+                                        count.to_string(),
+                                        NamedNode::new_unchecked(XSD_INTEGER),
+                                    )));
+                                }
+                            }
+                        }
+                    }
                     let translated = self.translate_expr(arg, extra)?;
                     Ok(SparExpr::FunctionCall(Function::StrLen, vec![translated]))
                 } else {
@@ -9231,6 +9323,50 @@ fn collect_pattern_vars(pattern_list: &crate::ast::cypher::PatternList) -> Vec<S
         }
     }
     vars
+}
+
+/// Returns true if `expr` references `variable.key` (the specific property access).
+/// Used to detect circular SET assignments.
+fn expr_references_prop(expr: &Expression, variable: &str, key: &str) -> bool {
+    match expr {
+        Expression::Property(base, k) => {
+            if k == key {
+                if let Expression::Variable(v) = base.as_ref() {
+                    if v == variable {
+                        return true;
+                    }
+                }
+            }
+            expr_references_prop(base, variable, key)
+        }
+        Expression::Variable(_) | Expression::Literal(_) => false,
+        Expression::IsNull(e)
+        | Expression::IsNotNull(e)
+        | Expression::Not(e)
+        | Expression::Negate(e) => expr_references_prop(e, variable, key),
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Xor(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b)
+        | Expression::Modulo(a, b)
+        | Expression::Power(a, b)
+        | Expression::Comparison(a, _, b) => {
+            expr_references_prop(a, variable, key) || expr_references_prop(b, variable, key)
+        }
+        Expression::List(items) => {
+            items.iter().any(|e| expr_references_prop(e, variable, key))
+        }
+        Expression::Map(pairs) => pairs
+            .iter()
+            .any(|(_, v)| expr_references_prop(v, variable, key)),
+        Expression::FunctionCall { args, .. } => {
+            args.iter().any(|e| expr_references_prop(e, variable, key))
+        }
+        _ => false,
+    }
 }
 
 /// Returns true if `expr` references a variable with the given name.
