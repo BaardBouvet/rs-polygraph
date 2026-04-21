@@ -5753,6 +5753,7 @@ impl TranslationState {
                             None => NamedNodePattern::NamedNode(edge.pred.clone()),
                         };
                         // RDF 1.2 reification: ?reif rdf:reifies <<(src pred dst)>>, ?reif <prop> ?result
+                        // Both triples are pushed together; caller must group them in one OPTIONAL.
                         let reif_var = self.fresh_var(&format!("__rdf12_reif_{key}"));
                         let rdf_reifies = NamedNode::new_unchecked(
                             "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",

@@ -533,10 +533,22 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             let prop_iri = format!("{BASE}{key}");
                             let del_var = format!("?{variable}_{key}_del");
                             let n_var = format!("?{variable}");
+                            // Node property removal (via __node sentinel):
                             let update = format!(
                                 "DELETE {{ {n_var} <{prop_iri}> {del_var} }} WHERE {{ {n_var} <{BASE}__node> <{BASE}__node> . OPTIONAL {{ {n_var} <{prop_iri}> {del_var} }} }}"
                             );
                             updates.push(update);
+                            // Relationship property removal via rdf:reifies (avoids << >> in DELETE template):
+                            let src_var = format!("?{variable}_src");
+                            let pred_var = format!("?{variable}_pred");
+                            let dst_var = format!("?{variable}_dst");
+                            let edge_del = format!("?{variable}_{key}_edel");
+                            let reif_var = format!("?{variable}_{key}_reif");
+                            let rdf_reifies_iri = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+                            let rel_update = format!(
+                                "DELETE {{ {reif_var} <{prop_iri}> {edge_del} }} WHERE {{ {src_var} {pred_var} {dst_var} . {reif_var} <{rdf_reifies_iri}> <<( {src_var} {pred_var} {dst_var} )>> . OPTIONAL {{ {reif_var} <{prop_iri}> {edge_del} }} }}"
+                            );
+                            updates.push(rel_update);
                         }
                         RemoveItem::Label { variable, labels } => {
                             // REMOVE n:Label → DELETE { ?n a <base:Label> } WHERE { ?n a <base:Label> }
@@ -685,6 +697,51 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             updates.push(format!(
                                 "INSERT {{ {insert_body} }} WHERE {{ FILTER NOT EXISTS {{ {exists_body} }} }}"
                             ));
+
+                            // ON MATCH SET: apply to any matched node (after the INSERT attempt).
+                            // These fire when the node already existed (MATCH case).
+                            // Build base WHERE clause matching the MERGE node pattern.
+                            let mut match_conds: Vec<String> = Vec::new();
+                            match_conds.push(format!("{n_var} <{BASE}__node> <{BASE}__node>"));
+                            for label in &node.labels {
+                                match_conds.push(format!(
+                                    "{n_var} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"
+                                ));
+                            }
+                            if let Some(props) = &node.properties {
+                                for (key, val) in props {
+                                    if let Some(lit) = resolve_val(val, &bindings_map) {
+                                        match_conds.push(format!("{n_var} <{BASE}{key}> {lit}"));
+                                    }
+                                }
+                            }
+                            let match_where = match_conds.join(" . ");
+                            for action in &m.actions {
+                                if !action.on_create {
+                                    for item in &action.items {
+                                        match item {
+                                            SetItem::Property { key, value, .. } => {
+                                                if let Some(lit_str) = resolve_val(value, &bindings_map) {
+                                                    let prop_iri = format!("{BASE}{key}");
+                                                    let old_var = format!("?{var_name}_{key}_old");
+                                                    updates.push(format!(
+                                                        "DELETE {{ {n_var} <{prop_iri}> {old_var} }} INSERT {{ {n_var} <{prop_iri}> {lit_str} }} WHERE {{ {match_where} . OPTIONAL {{ {n_var} <{prop_iri}> {old_var} }} }}"
+                                                    ));
+                                                }
+                                            }
+                                            SetItem::SetLabel { labels, .. } => {
+                                                for label in labels {
+                                                    let label_iri = format!("{BASE}{label}");
+                                                    updates.push(format!(
+                                                        "INSERT {{ {n_var} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{label_iri}> }} WHERE {{ {match_where} }}"
+                                                    ));
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
