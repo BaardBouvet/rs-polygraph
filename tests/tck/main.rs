@@ -489,7 +489,7 @@ fn emit_create_pattern_with_bindings(
 /// The SELECT query (for the RETURN part) should be generated separately using
 /// `Transpiler::cypher_to_sparql_skip_writes`.
 fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
-    use polygraph::ast::cypher::{Clause, PatternElement, RemoveItem, SetItem};
+    use polygraph::ast::cypher::{Clause, Expression, Literal, PatternElement, RemoveItem, SetItem};
 
     let query = match parse_cypher(cypher) {
         Ok(q) => q,
@@ -499,9 +499,22 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
     let mut updates: Vec<String> = Vec::new();
     let mut node_map: HashMap<String, String> = HashMap::new();
     let mut counter: usize = 0;
+    // Track UNWIND variable and values for loop expansion in MERGE/CREATE.
+    let mut loop_values: Vec<Expression> = vec![Expression::Literal(Literal::Null)];
+    let mut unwind_var_name: Option<String> = None;
 
     for clause in &query.clauses {
         match clause {
+            Clause::Unwind(u) => {
+                // Track UNWIND expansion for subsequent MERGE/CREATE clauses.
+                match &u.expression {
+                    Expression::List(items) => {
+                        loop_values = items.clone();
+                        unwind_var_name = Some(u.variable.clone());
+                    }
+                    _ => {}
+                }
+            }
             Clause::Create(c) => {
                 // CREATE in query context (with RETURN): insert immediately
                 let mut triples: Vec<String> = Vec::new();
@@ -587,67 +600,97 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             .unwrap_or("__merge_n");
                         let n_var = format!("?{var_name}");
 
-                        // INSERT template: create a fresh blank node with labels+props.
-                        let mut insert_triples: Vec<String> = Vec::new();
-                        insert_triples.push(format!("_:n <{BASE}__node> <{BASE}__node>"));
-                        for label in &node.labels {
-                            insert_triples.push(format!(
-                                "_:n <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"
-                            ));
-                        }
-                        if let Some(props) = &node.properties {
-                            for (key, val) in props {
-                                if let Some(lit) = expr_to_sparql_lit(val) {
-                                    insert_triples.push(format!("_:n <{BASE}{key}> {lit}"));
+                        // Expand the MERGE for each UNWIND iteration.
+                        let loop_count = loop_values.len();
+                        for iter in 0..loop_count {
+                            // Build bindings for this iteration.
+                            let mut bindings_map: HashMap<String, &Expression> = HashMap::new();
+                            if let Some(ref lv) = unwind_var_name {
+                                if let Some(val) = loop_values.get(iter) {
+                                    bindings_map.insert(lv.clone(), val);
                                 }
                             }
-                        }
 
-                        // Include ON CREATE SET properties and labels in the INSERT (not a separate update)
-                        // so they're only applied when the node is actually being CREATED.
-                        for action in &m.actions {
-                            if action.on_create {
-                                for item in &action.items {
-                                    match item {
-                                        SetItem::Property { key, value, .. } => {
-                                            if let Some(lit_str) = expr_to_sparql_lit(value) {
-                                                insert_triples.push(format!("_:n <{BASE}{key}> {lit_str}"));
-                                            }
+                            // Helper: resolve a property expression with current bindings.
+                            let resolve_val = |val: &Expression, bindings: &HashMap<String, &Expression>| -> Option<String> {
+                                match val {
+                                    Expression::Variable(v) => {
+                                        if let Some(bound) = bindings.get(v.as_str()) {
+                                            expr_to_sparql_lit(bound)
+                                        } else {
+                                            None
                                         }
-                                        SetItem::SetLabel { labels, .. } => {
-                                            for label in labels {
-                                                insert_triples.push(format!("_:n <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"));
-                                            }
-                                        }
-                                        _ => {}
+                                    }
+                                    _ => expr_to_sparql_lit(val),
+                                }
+                            };
+
+                            // INSERT template: create a fresh blank node with labels+props.
+                            let bnode = format!("_:n{iter}");
+                            let mut insert_triples: Vec<String> = Vec::new();
+                            insert_triples.push(format!("{bnode} <{BASE}__node> <{BASE}__node>"));
+                            for label in &node.labels {
+                                insert_triples.push(format!(
+                                    "{bnode} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"
+                                ));
+                            }
+                            if let Some(props) = &node.properties {
+                                for (key, val) in props {
+                                    if let Some(lit) = resolve_val(val, &bindings_map) {
+                                        insert_triples.push(format!("{bnode} <{BASE}{key}> {lit}"));
                                     }
                                 }
                             }
-                        }
 
-                        // NOT EXISTS conditions to check if matching node already exists.
-                        let mut exists_conds: Vec<String> = Vec::new();
-                        exists_conds.push(format!("{n_var} <{BASE}__node> <{BASE}__node>"));
-                        for label in &node.labels {
-                            exists_conds.push(format!(
-                                "{n_var} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"
-                            ));
-                        }
-                        if let Some(props) = &node.properties {
-                            for (key, val) in props {
-                                if let Some(lit) = expr_to_sparql_lit(val) {
-                                    exists_conds.push(format!("{n_var} <{BASE}{key}> {lit}"));
+                            // Include ON CREATE SET properties and labels in the INSERT (not a separate update)
+                            // so they're only applied when the node is actually being CREATED.
+                            for action in &m.actions {
+                                if action.on_create {
+                                    for item in &action.items {
+                                        match item {
+                                            SetItem::Property { key, value, .. } => {
+                                                if let Some(lit_str) = resolve_val(value, &bindings_map) {
+                                                    insert_triples.push(format!("{bnode} <{BASE}{key}> {lit_str}"));
+                                                }
+                                            }
+                                            SetItem::SetLabel { labels, .. } => {
+                                                for label in labels {
+                                                    insert_triples.push(format!("{bnode} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"));
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
                                 }
                             }
-                        }
 
-                        let insert_body = insert_triples.join(" . ");
-                        let exists_body = exists_conds.join(" . ");
-                        updates.push(format!(
-                            "INSERT {{ {insert_body} }} WHERE {{ FILTER NOT EXISTS {{ {exists_body} }} }}"
-                        ));
+                            // NOT EXISTS conditions to check if matching node already exists.
+                            let mut exists_conds: Vec<String> = Vec::new();
+                            exists_conds.push(format!("{n_var} <{BASE}__node> <{BASE}__node>"));
+                            for label in &node.labels {
+                                exists_conds.push(format!(
+                                    "{n_var} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"
+                                ));
+                            }
+                            if let Some(props) = &node.properties {
+                                for (key, val) in props {
+                                    if let Some(lit) = resolve_val(val, &bindings_map) {
+                                        exists_conds.push(format!("{n_var} <{BASE}{key}> {lit}"));
+                                    }
+                                }
+                            }
+
+                            let insert_body = insert_triples.join(" . ");
+                            let exists_body = exists_conds.join(" . ");
+                            updates.push(format!(
+                                "INSERT {{ {insert_body} }} WHERE {{ FILTER NOT EXISTS {{ {exists_body} }} }}"
+                            ));
+                        }
                     }
                 }
+                // Reset loop state after MERGE (same as after CREATE).
+                loop_values = vec![Expression::Literal(Literal::Null)];
+                unwind_var_name = None;
             }
             _ => {}
         }
