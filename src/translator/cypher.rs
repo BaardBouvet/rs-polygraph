@@ -1938,6 +1938,9 @@ struct TranslationState {
     /// Tracks (variable, property_key) pairs that were SET by a SET clause in skip_writes mode.
     /// Used to distinguish SET-updated properties from CREATE-initialized ones.
     set_tracked_vars: std::collections::HashSet<(String, String)>,
+    /// Labels being REMOVED in skip_writes mode. Maps variable name → set of label strings.
+    /// When a label is in this map, it is skipped in MATCH pattern label constraints.
+    remove_tracked_labels: std::collections::HashMap<String, std::collections::HashSet<String>>,
     /// WITH alias → string lexical value of the literal it was bound to.
     /// Used to fold expressions like `date(toString(alias))` at compile time.
     with_lit_vars: std::collections::HashMap<String, String>,
@@ -1979,6 +1982,7 @@ impl TranslationState {
             node_labels_from_create: Default::default(),
             node_props_from_create: Default::default(),
             set_tracked_vars: Default::default(),
+            remove_tracked_labels: Default::default(),
             with_lit_vars: Default::default(),
         }
     }
@@ -2599,24 +2603,37 @@ impl TranslationState {
         // sub-select scope boundaries when nullable variables must be checked).
         let mut last_with_vars: Option<Vec<Variable>> = None;
 
-        // In skip_writes mode, pre-scan SET clauses so that MATCH+WHERE filters
-        // on SET-updated properties can use the new (post-UPDATE) value as the
-        // comparison target. This prevents old-value WHERE filters from failing
-        // because the graph has already been updated before the SELECT runs.
+        // In skip_writes mode, pre-scan SET and REMOVE clauses so that MATCH patterns
+        // can be adjusted to find nodes/relationships after updates have been applied.
         if self.skip_write_clauses {
             for clause in clauses {
-                if let Clause::Set(s) = clause {
-                    for item in &s.items {
-                        if let crate::ast::cypher::SetItem::Property { variable, key, value } = item {
-                            if !expr_references_prop(value, variable, key) {
-                                self.set_tracked_vars.insert((variable.clone(), key.clone()));
-                                self.node_props_from_create
-                                    .entry(variable.clone())
-                                    .or_default()
-                                    .insert(key.clone(), value.clone());
+                match clause {
+                    Clause::Set(s) => {
+                        for item in &s.items {
+                            if let crate::ast::cypher::SetItem::Property { variable, key, value } = item {
+                                if !expr_references_prop(value, variable, key) {
+                                    self.set_tracked_vars.insert((variable.clone(), key.clone()));
+                                    self.node_props_from_create
+                                        .entry(variable.clone())
+                                        .or_default()
+                                        .insert(key.clone(), value.clone());
+                                }
                             }
                         }
                     }
+                    Clause::Remove(r) => {
+                        for item in &r.items {
+                            if let crate::ast::cypher::RemoveItem::Label { variable, labels } = item {
+                                for label in labels {
+                                    self.remove_tracked_labels
+                                        .entry(variable.clone())
+                                        .or_default()
+                                        .insert(label.clone());
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -4355,7 +4372,26 @@ impl TranslationState {
         }
 
         // One triple per label: `?n rdf:type <base:Label>`
+        // In skip_writes mode, skip labels that are being REMOVED (they won't
+        // be present in the graph after the REMOVE UPDATE has run).
+        let skip_labels: std::collections::HashSet<&str> = if self.skip_write_clauses {
+            if let Some(ref vname) = node.variable {
+                if let Some(removed) = self.remove_tracked_labels.get(vname.as_str()) {
+                    removed.iter().map(|s| s.as_str()).collect()
+                } else {
+                    Default::default()
+                }
+            } else {
+                Default::default()
+            }
+        } else {
+            Default::default()
+        };
+
         for label in &node.labels {
+            if skip_labels.contains(label.as_str()) {
+                continue; // label is being removed; don't filter by it
+            }
             triples.push(TriplePattern {
                 subject: node_var.clone(),
                 predicate: self.rdf_type().into(),
@@ -4384,7 +4420,11 @@ impl TranslationState {
         // sentinel so the variable is bound to real graph nodes rather than
         // returning 1 empty row from an empty BGP.
         // Convention: every graph node has exactly one `<base:__node> <base:__node>` triple.
-        if node.labels.is_empty() && !has_props {
+        // Also add sentinel when ALL labels have been skipped due to REMOVE tracking.
+        let effective_label_count = node.labels.iter()
+            .filter(|l| !skip_labels.contains(l.as_str()))
+            .count();
+        if effective_label_count == 0 && !has_props {
             triples.push(TriplePattern {
                 subject: node_var.clone(),
                 predicate: self.iri("__node").into(),
