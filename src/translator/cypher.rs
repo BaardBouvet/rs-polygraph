@@ -3048,6 +3048,45 @@ impl TranslationState {
                                     if let Expression::Variable(var_name) = &item.expression {
                                         let alias =
                                             item.alias.as_deref().unwrap_or(var_name.as_str());
+                                        // Also project source variables from node_props_from_create
+                                        // so that property bindings like n.num = ?x survive the
+                                        // WITH projection boundary (skip_writes mode).
+                                        if let Some(prop_map) =
+                                            self.node_props_from_create.get(alias).cloned()
+                                        {
+                                            for (_, val_expr) in &prop_map {
+                                                fn collect_expr_vars(
+                                                    e: &Expression,
+                                                    out: &mut Vec<Variable>,
+                                                ) {
+                                                    match e {
+                                                        Expression::Variable(v) => {
+                                                            let sv = Variable::new_unchecked(
+                                                                v.clone(),
+                                                            );
+                                                            if !out.contains(&sv) {
+                                                                out.push(sv);
+                                                            }
+                                                        }
+                                                        Expression::Add(l, r)
+                                                        | Expression::Subtract(l, r)
+                                                        | Expression::Multiply(l, r)
+                                                        | Expression::Divide(l, r)
+                                                        | Expression::Modulo(l, r) => {
+                                                            collect_expr_vars(l, out);
+                                                            collect_expr_vars(r, out);
+                                                        }
+                                                        Expression::FunctionCall { args, .. } => {
+                                                            for a in args {
+                                                                collect_expr_vars(a, out);
+                                                            }
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                                collect_expr_vars(val_expr, &mut inner_vars);
+                                            }
+                                        }
                                         if let Some(edge) = self.edge_map.get(alias).cloned() {
                                             // Project src variable
                                             if let TermPattern::Variable(sv) = &edge.src {
@@ -3729,28 +3768,33 @@ impl TranslationState {
                         });
                     }
                     // Skip: caller handles CREATE as INSERT DATA separately.
-                    // Register any named node variables from the CREATE pattern so that
-                    // subsequent RETURN clauses can reference them.
+                    // Register any named node/relationship variables from the CREATE pattern
+                    // so that subsequent RETURN clauses can reference them.
                     for pat in &c.pattern.0 {
                         for elem in &pat.elements {
-                            if let PatternElement::Node(n) = elem {
-                                if let Some(v) = &n.variable {
-                                    self.node_vars.insert(v.clone());
-                                    // Record labels known for this variable.
-                                    let labels: Vec<String> = n
-                                        .labels
-                                        .iter()
-                                        .map(|l| l.clone())
-                                        .collect();
-                                    self.node_labels_from_create
-                                        .insert(v.clone(), labels);
-                                    // Record properties known for this variable.
-                                    if let Some(props) = &n.properties {
-                                        let mut prop_map: std::collections::HashMap<String, Expression> = Default::default();
-                                        for (key, val) in props {
-                                            prop_map.insert(key.clone(), val.clone());
+                            match elem {
+                                PatternElement::Node(n) => {
+                                    if let Some(v) = &n.variable {
+                                        self.node_vars.insert(v.clone());
+                                        // Record labels.
+                                        let labels: Vec<String> = n.labels.iter().map(|l| l.clone()).collect();
+                                        self.node_labels_from_create.insert(v.clone(), labels);
+                                        // Record properties.
+                                        if let Some(props) = &n.properties {
+                                            let prop_map: std::collections::HashMap<String, Expression> =
+                                                props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                            self.node_props_from_create.insert(v.clone(), prop_map);
                                         }
-                                        self.node_props_from_create.insert(v.clone(), prop_map);
+                                    }
+                                }
+                                PatternElement::Relationship(r) => {
+                                    if let Some(v) = &r.variable {
+                                        // Record relationship properties.
+                                        if let Some(props) = &r.properties {
+                                            let prop_map: std::collections::HashMap<String, Expression> =
+                                                props.iter().map(|(k, vv)| (k.clone(), vv.clone())).collect();
+                                            self.node_props_from_create.insert(v.clone(), prop_map);
+                                        }
                                     }
                                 }
                             }
@@ -3759,9 +3803,11 @@ impl TranslationState {
                 }
                 Clause::Merge(m) => {
                     // Simple MERGE (b) with no labels/properties on the pattern node
-                    // can be translated as MATCH (b) when nodes may already exist
-                    // (the TCK data always has existing nodes for these cases).
-                    let is_simple_node_merge = m.pattern.elements.len() == 1 && {
+                    // can be translated as MATCH (b) ONLY in skip_writes mode (where the
+                    // write_clauses_to_updates has already inserted the node if needed).
+                    // In non-skip-writes mode, always return a write-clause error so the
+                    // caller knows to invoke write_clauses_to_updates + skip_writes.
+                    let is_simple_node_merge = self.skip_write_clauses && m.pattern.elements.len() == 1 && {
                         if let PatternElement::Node(node) = &m.pattern.elements[0] {
                             node.labels.is_empty() && node.properties.is_none()
                         } else {
@@ -3812,6 +3858,44 @@ impl TranslationState {
                         // Also register the path variable if present.
                         if let Some(pv) = &m.pattern.variable {
                             self.node_vars.insert(pv.clone());
+                        }
+                        // Register node labels and properties from the MERGE pattern so
+                        // RETURN labels(a) / a.prop can resolve statically (skip_writes mode).
+                        if let PatternElement::Node(node) = &m.pattern.elements[0] {
+                            if let Some(v) = &node.variable {
+                                if !node.labels.is_empty() {
+                                    self.node_labels_from_create.insert(v.clone(), node.labels.clone());
+                                }
+                                if let Some(props) = &node.properties {
+                                    let mut prop_map = std::collections::HashMap::new();
+                                    for (k, val) in props {
+                                        if !expr_references_prop(val, v, k) {
+                                            prop_map.insert(k.clone(), val.clone());
+                                        }
+                                    }
+                                    if !prop_map.is_empty() {
+                                        self.node_props_from_create.insert(v.clone(), prop_map);
+                                    }
+                                }
+                            }
+                        }
+                        // Track ON CREATE SET properties.
+                        for action in &m.actions {
+                            if action.on_create {
+                                for item in &action.items {
+                                    match item {
+                                        crate::ast::cypher::SetItem::Property { variable, key, value } => {
+                                            if !expr_references_prop(value, variable, key) {
+                                                self.node_props_from_create
+                                                    .entry(variable.clone())
+                                                    .or_default()
+                                                    .insert(key.clone(), value.clone());
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
                         }
                     } else {
                         if self.skip_write_clauses {
@@ -5662,6 +5746,16 @@ impl TranslationState {
                     Some(alias) if alias != &var_name => Variable::new_unchecked(alias.clone()),
                     _ => self.fresh_var(&format!("{}_{}", var_name, key)),
                 };
+                // Check if this property is known from CREATE/SET tracking (skip_writes mode).
+                // Return a BIND expression instead of a BGP triple so that the value
+                // comes from the known expression rather than a missing RDF triple.
+                if let Some(prop_val) = self.node_props_from_create.get(&var_name)
+                    .and_then(|m| m.get(key.as_str()))
+                    .cloned()
+                {
+                    let sparql_expr = self.translate_expr(&prop_val, extra)?;
+                    return Ok((result_var, None, Some(sparql_expr)));
+                }
                 // Check whether base_var is a relationship variable.
                 if let Some(edge) = self.edge_map.get(&var_name).cloned() {
                     let prop_iri = self.iri(key);

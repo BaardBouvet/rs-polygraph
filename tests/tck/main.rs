@@ -581,50 +581,66 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                 // Only handle simple node patterns (single node, no relationship).
                 if m.pattern.elements.len() == 1 {
                     if let PatternElement::Node(node) = &m.pattern.elements[0] {
-                        if !node.labels.is_empty() || node.properties.is_some() {
-                            let var_name = node
-                                .variable
-                                .as_deref()
-                                .unwrap_or("__merge_n");
-                            let n_var = format!("?{var_name}");
+                        let var_name = node
+                            .variable
+                            .as_deref()
+                            .unwrap_or("__merge_n");
+                        let n_var = format!("?{var_name}");
 
-                            // INSERT template: create a fresh blank node with labels+props.
-                            let mut insert_triples: Vec<String> = Vec::new();
-                            insert_triples.push(format!("_:n <{BASE}__node> <{BASE}__node>"));
-                            for label in &node.labels {
-                                insert_triples.push(format!(
-                                    "_:n <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"
-                                ));
-                            }
-                            if let Some(props) = &node.properties {
-                                for (key, val) in props {
-                                    if let Some(lit) = expr_to_sparql_lit(val) {
-                                        insert_triples.push(format!("_:n <{BASE}{key}> {lit}"));
-                                    }
-                                }
-                            }
-
-                            // NOT EXISTS conditions to check if matching node already exists.
-                            let mut exists_conds: Vec<String> = Vec::new();
-                            exists_conds.push(format!("{n_var} <{BASE}__node> <{BASE}__node>"));
-                            for label in &node.labels {
-                                exists_conds.push(format!(
-                                    "{n_var} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"
-                                ));
-                            }
-                            if let Some(props) = &node.properties {
-                                for (key, val) in props {
-                                    if let Some(lit) = expr_to_sparql_lit(val) {
-                                        exists_conds.push(format!("{n_var} <{BASE}{key}> {lit}"));
-                                    }
-                                }
-                            }
-
-                            let insert_body = insert_triples.join(" . ");
-                            let exists_body = exists_conds.join(" . ");
-                            updates.push(format!(
-                                "INSERT {{ {insert_body} }} WHERE {{ FILTER NOT EXISTS {{ {exists_body} }} }}"
+                        // INSERT template: create a fresh blank node with labels+props.
+                        let mut insert_triples: Vec<String> = Vec::new();
+                        insert_triples.push(format!("_:n <{BASE}__node> <{BASE}__node>"));
+                        for label in &node.labels {
+                            insert_triples.push(format!(
+                                "_:n <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"
                             ));
+                        }
+                        if let Some(props) = &node.properties {
+                            for (key, val) in props {
+                                if let Some(lit) = expr_to_sparql_lit(val) {
+                                    insert_triples.push(format!("_:n <{BASE}{key}> {lit}"));
+                                }
+                            }
+                        }
+
+                        // NOT EXISTS conditions to check if matching node already exists.
+                        let mut exists_conds: Vec<String> = Vec::new();
+                        exists_conds.push(format!("{n_var} <{BASE}__node> <{BASE}__node>"));
+                        for label in &node.labels {
+                            exists_conds.push(format!(
+                                "{n_var} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"
+                            ));
+                        }
+                        if let Some(props) = &node.properties {
+                            for (key, val) in props {
+                                if let Some(lit) = expr_to_sparql_lit(val) {
+                                    exists_conds.push(format!("{n_var} <{BASE}{key}> {lit}"));
+                                }
+                            }
+                        }
+
+                        let insert_body = insert_triples.join(" . ");
+                        let exists_body = exists_conds.join(" . ");
+                        updates.push(format!(
+                            "INSERT {{ {insert_body} }} WHERE {{ FILTER NOT EXISTS {{ {exists_body} }} }}"
+                        ));
+
+                        // Handle ON CREATE SET clauses
+                        for action in &m.actions {
+                            if action.on_create {
+                                for item in &action.items {
+                                    if let SetItem::Property { variable, key, value } = item {
+                                        if let Some(lit_str) = expr_to_sparql_lit(value) {
+                                            let prop_iri = format!("{BASE}{key}");
+                                            let v = format!("?{variable}");
+                                            // Only set if property doesn't already exist
+                                            updates.push(format!(
+                                                "INSERT {{ {v} <{prop_iri}> {lit_str} }} WHERE {{ {v} <{BASE}__node> <{BASE}__node> . FILTER NOT EXISTS {{ {v} <{prop_iri}> ?_exist }} }}"
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
