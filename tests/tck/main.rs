@@ -345,6 +345,55 @@ fn expr_to_sparql_lit(expr: &Expression) -> Option<String> {
     }
 }
 
+/// Convert a SET value expression to a SPARQL expression string for BIND clauses.
+/// Substitutes `Property(variable, key)` with `?{variable}_{key}_old` (the "old"
+/// value variable used in the DELETE/WHERE part of the update).
+/// Returns None if the expression contains unsupported constructs.
+fn expr_to_sparql_update_expr(expr: &Expression, var: &str) -> Option<String> {
+    match expr {
+        Expression::Literal(Literal::Integer(n)) => Some(format!("{n}")),
+        Expression::Literal(Literal::Float(f)) => Some(format!(
+            "\"{}\"^^<http://www.w3.org/2001/XMLSchema#double>", f
+        )),
+        Expression::Literal(Literal::String(s)) => {
+            let escaped = s.replace('"', "\\\"");
+            Some(format!("\"{escaped}\""))
+        }
+        Expression::Literal(Literal::Boolean(b)) => {
+            Some(if *b { "true" } else { "false" }.to_owned())
+        }
+        Expression::Property(base, key) => {
+            if let Expression::Variable(v) = base.as_ref() {
+                // Substitute property reference with the "old" variable name
+                Some(format!("?{v}_{key}_old"))
+            } else {
+                None
+            }
+        }
+        Expression::Add(a, b) => {
+            let la = expr_to_sparql_update_expr(a, var)?;
+            let ra = expr_to_sparql_update_expr(b, var)?;
+            Some(format!("({la} + {ra})"))
+        }
+        Expression::Subtract(a, b) => {
+            let la = expr_to_sparql_update_expr(a, var)?;
+            let ra = expr_to_sparql_update_expr(b, var)?;
+            Some(format!("({la} - {ra})"))
+        }
+        Expression::Multiply(a, b) => {
+            let la = expr_to_sparql_update_expr(a, var)?;
+            let ra = expr_to_sparql_update_expr(b, var)?;
+            Some(format!("({la} * {ra})"))
+        }
+        Expression::Divide(a, b) => {
+            let la = expr_to_sparql_update_expr(a, var)?;
+            let ra = expr_to_sparql_update_expr(b, var)?;
+            Some(format!("({la} / {ra})"))
+        }
+        _ => None,
+    }
+}
+
 /// Serialize a list element for embedding inside a `"[...]"` string literal.
 /// Uses single quotes for strings to avoid nesting double-quote issues.
 fn list_elem_to_str(expr: &Expression) -> Option<String> {
@@ -614,14 +663,36 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             key,
                             value,
                         } => {
+                            let prop_iri = format!("{BASE}{key}");
+                            let old_var = format!("?{variable}_{key}_old");
+                            let new_var = format!("?{variable}_{key}_new");
+                            let n_var = format!("?{variable}");
                             if let Some(lit_str) = expr_to_sparql_lit(value) {
-                                let prop_iri = format!("{BASE}{key}");
-                                let old_var = format!("?{variable}_{key}_old");
-                                let n_var = format!("?{variable}");
+                                // Literal value: simple DELETE+INSERT
                                 let update = format!(
                                     "DELETE {{ {n_var} <{prop_iri}> {old_var} }} INSERT {{ {n_var} <{prop_iri}> {lit_str} }} WHERE {{ {n_var} <{BASE}__node> <{BASE}__node> . OPTIONAL {{ {n_var} <{prop_iri}> {old_var} }} }}"
                                 );
                                 updates.push(update);
+                            } else if let Some(expr_str) = expr_to_sparql_update_expr(value, variable) {
+                                // Expression value: use BIND to compute new value
+                                // (e.g., SET n.num = n.num + 1 → BIND(?n_num_old + 1 AS ?n_num_new))
+                                // FILTER(BOUND(?new)) is required: if BIND fails (e.g., type error for
+                                // string + arithmetic), without this guard DELETE would still remove
+                                // the old value leaving the property empty.
+                                let update = format!(
+                                    "DELETE {{ {n_var} <{prop_iri}> {old_var} }} INSERT {{ {n_var} <{prop_iri}> {new_var} }} WHERE {{ {n_var} <{BASE}__node> <{BASE}__node> . {n_var} <{prop_iri}> {old_var} . BIND({expr_str} AS {new_var}) . FILTER(BOUND({new_var})) }}"
+                                );
+                                updates.push(update);
+                                // Also try relationship property update via rdf:reifies
+                                let src_var = format!("?{variable}_src");
+                                let pred_var = format!("?{variable}_pred");
+                                let dst_var = format!("?{variable}_dst");
+                                let reif_var = format!("?{variable}_{key}_reif");
+                                let rdf_reifies_iri = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+                                let rel_update = format!(
+                                    "DELETE {{ {reif_var} <{prop_iri}> {old_var} }} INSERT {{ {reif_var} <{prop_iri}> {new_var} }} WHERE {{ {src_var} {pred_var} {dst_var} . {reif_var} <{rdf_reifies_iri}> <<( {src_var} {pred_var} {dst_var} )>> . {reif_var} <{prop_iri}> {old_var} . BIND({expr_str} AS {new_var}) . FILTER(BOUND({new_var})) }}"
+                                );
+                                updates.push(rel_update);
                             }
                         }
                         SetItem::MergeMap { .. } | SetItem::NodeReplace { .. } => {
