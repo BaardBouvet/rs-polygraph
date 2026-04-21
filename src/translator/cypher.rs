@@ -3879,24 +3879,11 @@ impl TranslationState {
                                 }
                             }
                         }
-                        // Track ON CREATE SET properties.
-                        for action in &m.actions {
-                            if action.on_create {
-                                for item in &action.items {
-                                    match item {
-                                        crate::ast::cypher::SetItem::Property { variable, key, value } => {
-                                            if !expr_references_prop(value, variable, key) {
-                                                self.node_props_from_create
-                                                    .entry(variable.clone())
-                                                    .or_default()
-                                                    .insert(key.clone(), value.clone());
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
+                        // Note: ON CREATE SET properties are NOT tracked in node_props_from_create
+                        // because in skip_writes mode we cannot statically determine at translation
+                        // time whether MERGE will CREATE or MATCH. The write handler (write_clauses_to_updates)
+                        // inserts ON CREATE SET properties into the graph only when creating, so the
+                        // OPTIONAL BGP will correctly find the value (when created) or return null (when matched).
                     } else {
                         if self.skip_write_clauses {
                             // Silently skip relationship MERGE or other complex MERGE;
@@ -7915,13 +7902,38 @@ impl TranslationState {
                 }
             }
             "tail" => {
-                // tail(list) → all but first. Approximate with STRAFTER.
+                // tail(list) → all but first element.
                 if let Some(arg) = args.first() {
+                    // Try compile-time resolution first (e.g. for skips_writes SET tracking).
+                    if let Some(items) = self.resolve_literal_list(arg) {
+                        let tail_items: Vec<Expression> =
+                            if items.is_empty() { vec![] } else { items[1..].to_vec() };
+                        let serialized = serialize_list_literal(&tail_items);
+                        return Ok(SparExpr::Literal(SparLit::new_simple_literal(serialized)));
+                    }
+                    // Runtime fallback: string manipulation on "[a, b, c]" representation.
+                    // tail("[a, b, c]") = "[b, c]"
+                    // = IF(CONTAINS(s, ", "), CONCAT("[", STRAFTER(s, ", ")), "[]")
                     let translated = self.translate_expr(arg, extra)?;
-                    let sep = SparExpr::Literal(SparLit::new_simple_literal(" "));
-                    Ok(SparExpr::FunctionCall(
-                        Function::StrAfter,
-                        vec![translated, sep],
+                    let sep = SparExpr::Literal(SparLit::new_simple_literal(", "));
+                    let contains_sep = SparExpr::FunctionCall(
+                        Function::Contains,
+                        vec![translated.clone(), sep.clone()],
+                    );
+                    let after_sep = SparExpr::FunctionCall(
+                        Function::Concat,
+                        vec![
+                            SparExpr::Literal(SparLit::new_simple_literal("[")),
+                            SparExpr::FunctionCall(
+                                Function::StrAfter,
+                                vec![translated, sep],
+                            ),
+                        ],
+                    );
+                    Ok(SparExpr::If(
+                        Box::new(contains_sep),
+                        Box::new(after_sep),
+                        Box::new(SparExpr::Literal(SparLit::new_simple_literal("[]"))),
                     ))
                 } else {
                     Err(PolygraphError::UnsupportedFeature {

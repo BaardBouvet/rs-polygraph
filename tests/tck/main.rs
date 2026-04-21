@@ -603,6 +603,28 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             }
                         }
 
+                        // Include ON CREATE SET properties and labels in the INSERT (not a separate update)
+                        // so they're only applied when the node is actually being CREATED.
+                        for action in &m.actions {
+                            if action.on_create {
+                                for item in &action.items {
+                                    match item {
+                                        SetItem::Property { key, value, .. } => {
+                                            if let Some(lit_str) = expr_to_sparql_lit(value) {
+                                                insert_triples.push(format!("_:n <{BASE}{key}> {lit_str}"));
+                                            }
+                                        }
+                                        SetItem::SetLabel { labels, .. } => {
+                                            for label in labels {
+                                                insert_triples.push(format!("_:n <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}>"));
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+
                         // NOT EXISTS conditions to check if matching node already exists.
                         let mut exists_conds: Vec<String> = Vec::new();
                         exists_conds.push(format!("{n_var} <{BASE}__node> <{BASE}__node>"));
@@ -624,24 +646,6 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                         updates.push(format!(
                             "INSERT {{ {insert_body} }} WHERE {{ FILTER NOT EXISTS {{ {exists_body} }} }}"
                         ));
-
-                        // Handle ON CREATE SET clauses
-                        for action in &m.actions {
-                            if action.on_create {
-                                for item in &action.items {
-                                    if let SetItem::Property { variable, key, value } = item {
-                                        if let Some(lit_str) = expr_to_sparql_lit(value) {
-                                            let prop_iri = format!("{BASE}{key}");
-                                            let v = format!("?{variable}");
-                                            // Only set if property doesn't already exist
-                                            updates.push(format!(
-                                                "INSERT {{ {v} <{prop_iri}> {lit_str} }} WHERE {{ {v} <{BASE}__node> <{BASE}__node> . FILTER NOT EXISTS {{ {v} <{prop_iri}> ?_exist }} }}"
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }
