@@ -3863,8 +3863,19 @@ impl TranslationState {
                         // RETURN labels(a) / a.prop can resolve statically (skip_writes mode).
                         if let PatternElement::Node(node) = &m.pattern.elements[0] {
                             if let Some(v) = &node.variable {
-                                if !node.labels.is_empty() {
-                                    self.node_labels_from_create.insert(v.clone(), node.labels.clone());
+                                let mut all_labels = node.labels.clone();
+                                // Also include any ON CREATE SET labels (for empty-graph scenarios).
+                                for action in &m.actions {
+                                    if action.on_create {
+                                        for item in &action.items {
+                                            if let crate::ast::cypher::SetItem::SetLabel { labels, .. } = item {
+                                                for l in labels { if !all_labels.contains(l) { all_labels.push(l.clone()); } }
+                                            }
+                                        }
+                                    }
+                                }
+                                if !all_labels.is_empty() {
+                                    self.node_labels_from_create.insert(v.clone(), all_labels);
                                 }
                                 if let Some(props) = &node.properties {
                                     let mut prop_map = std::collections::HashMap::new();
