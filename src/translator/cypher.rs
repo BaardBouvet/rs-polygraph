@@ -1935,6 +1935,9 @@ struct TranslationState {
     /// Properties known for node/relationship variables from CREATE patterns (skip_writes mode).
     /// Maps variable name → {property_key → Expression value}.
     node_props_from_create: std::collections::HashMap<String, std::collections::HashMap<String, Expression>>,
+    /// Tracks (variable, property_key) pairs that were SET by a SET clause in skip_writes mode.
+    /// Used to distinguish SET-updated properties from CREATE-initialized ones.
+    set_tracked_vars: std::collections::HashSet<(String, String)>,
     /// WITH alias → string lexical value of the literal it was bound to.
     /// Used to fold expressions like `date(toString(alias))` at compile time.
     with_lit_vars: std::collections::HashMap<String, String>,
@@ -1975,6 +1978,7 @@ impl TranslationState {
             skip_write_clauses: false,
             node_labels_from_create: Default::default(),
             node_props_from_create: Default::default(),
+            set_tracked_vars: Default::default(),
             with_lit_vars: Default::default(),
         }
     }
@@ -2594,6 +2598,28 @@ impl TranslationState {
         // The output variables of the most recent WITH clause (used to build
         // sub-select scope boundaries when nullable variables must be checked).
         let mut last_with_vars: Option<Vec<Variable>> = None;
+
+        // In skip_writes mode, pre-scan SET clauses so that MATCH+WHERE filters
+        // on SET-updated properties can use the new (post-UPDATE) value as the
+        // comparison target. This prevents old-value WHERE filters from failing
+        // because the graph has already been updated before the SELECT runs.
+        if self.skip_write_clauses {
+            for clause in clauses {
+                if let Clause::Set(s) = clause {
+                    for item in &s.items {
+                        if let crate::ast::cypher::SetItem::Property { variable, key, value } = item {
+                            if !expr_references_prop(value, variable, key) {
+                                self.set_tracked_vars.insert((variable.clone(), key.clone()));
+                                self.node_props_from_create
+                                    .entry(variable.clone())
+                                    .or_default()
+                                    .insert(key.clone(), value.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         for clause in clauses {
             match clause {
@@ -4039,7 +4065,12 @@ impl TranslationState {
                     });
                     if !return_safe {
                         if self.skip_write_clauses {
-                            // Silently skip delete; caller handles it separately
+                            // RETURN accesses a property of a deleted entity — this is a
+                            // runtime error in Cypher (DeletedEntityAccess). Propagate an
+                            // error so the TCK harness recognises it as a runtime failure.
+                            return Err(PolygraphError::Translation {
+                                message: "DeletedEntityAccess: accessing property of deleted entity in RETURN".to_string(),
+                            });
                         } else {
                             return Err(PolygraphError::UnsupportedFeature {
                                 feature: format!(
@@ -6341,6 +6372,102 @@ impl TranslationState {
                 }
             }
             Expression::Comparison(lhs, op, rhs) => {
+                // In skip_writes mode: if either side is a Property of a SET-tracked variable,
+                // the graph has already been updated before the SELECT runs. The WHERE filter
+                // used the OLD value to identify the node; we must now look up the property
+                // from the graph and compare against the NEW (post-SET) value instead.
+                // E.g., WHERE n.name = 'Andres' + SET n.name = 'Michael' →
+                //   generate: ?n <name> ?fresh . FILTER(?fresh = 'Michael')
+                // Special case: SET n.name = null (property deletion) → skip filter (always TRUE)
+                // because the property will no longer exist after UPDATE.
+                if self.skip_write_clauses && matches!(op, CompOp::Eq | CompOp::Ne) {
+                    // Helper closure: returns Some(new_val) if the expression is a
+                    // SET-tracked property with a non-null new value, None otherwise.
+                    let get_set_new_val =
+                        |expr: &Expression,
+                         tracked: &std::collections::HashSet<(String, String)>,
+                         props: &std::collections::HashMap<
+                            String,
+                            std::collections::HashMap<String, Expression>,
+                        >|
+                         -> Option<Expression> {
+                            if let Expression::Property(base, key) = expr {
+                                if let Expression::Variable(v) = base.as_ref() {
+                                    if tracked.contains(&(v.clone(), key.clone())) {
+                                        return props
+                                            .get(v.as_str())
+                                            .and_then(|m| m.get(key.as_str()))
+                                            .cloned();
+                                    }
+                                }
+                            }
+                            None
+                        };
+
+                    let lhs_set = get_set_new_val(lhs, &self.set_tracked_vars, &self.node_props_from_create);
+                    let rhs_set = get_set_new_val(rhs, &self.set_tracked_vars, &self.node_props_from_create);
+
+                    if let Some(new_val) = lhs_set {
+                        // If new value is null (property deleted), skip filter → always TRUE.
+                        if matches!(new_val, Expression::Literal(crate::ast::cypher::Literal::Null)) {
+                            return Ok(SparExpr::Literal(SparLit::new_typed_literal(
+                                "true",
+                                NamedNode::new_unchecked(XSD_BOOLEAN),
+                            )));
+                        }
+                        // Non-null: compare graph value to new value.
+                        if let Expression::Property(base, key) = lhs.as_ref() {
+                            if let Expression::Variable(v) = base.as_ref() {
+                                let fresh = self.fresh_var(&format!("{}_{}", v, key));
+                                let iri = self.iri(key);
+                                extra.push(TriplePattern {
+                                    subject: Variable::new_unchecked(v.clone()).into(),
+                                    predicate: iri.into(),
+                                    object: fresh.clone().into(),
+                                });
+                                let l = SparExpr::Variable(fresh);
+                                let r = self.translate_expr(&new_val, extra)?;
+                                return Ok(if matches!(op, CompOp::Ne) {
+                                    SparExpr::Not(Box::new(SparExpr::Equal(
+                                        Box::new(l),
+                                        Box::new(r),
+                                    )))
+                                } else {
+                                    SparExpr::Equal(Box::new(l), Box::new(r))
+                                });
+                            }
+                        }
+                    } else if let Some(new_val) = rhs_set {
+                        // Symmetric case: 'Andres' = n.name
+                        if matches!(new_val, Expression::Literal(crate::ast::cypher::Literal::Null)) {
+                            return Ok(SparExpr::Literal(SparLit::new_typed_literal(
+                                "true",
+                                NamedNode::new_unchecked(XSD_BOOLEAN),
+                            )));
+                        }
+                        if let Expression::Property(base, key) = rhs.as_ref() {
+                            if let Expression::Variable(v) = base.as_ref() {
+                                let fresh = self.fresh_var(&format!("{}_{}", v, key));
+                                let iri = self.iri(key);
+                                extra.push(TriplePattern {
+                                    subject: Variable::new_unchecked(v.clone()).into(),
+                                    predicate: iri.into(),
+                                    object: fresh.clone().into(),
+                                });
+                                let l = self.translate_expr(&new_val, extra)?;
+                                let r = SparExpr::Variable(fresh);
+                                return Ok(if matches!(op, CompOp::Ne) {
+                                    SparExpr::Not(Box::new(SparExpr::Equal(
+                                        Box::new(l),
+                                        Box::new(r),
+                                    )))
+                                } else {
+                                    SparExpr::Equal(Box::new(l), Box::new(r))
+                                });
+                            }
+                        }
+                    }
+                }
                 // Handle chained ordering comparisons: a < b < c → (a < b) AND (b < c).
                 // Only applies to strict ordering operators on both sides (not = or <>).
                 if matches!(op, CompOp::Lt | CompOp::Le | CompOp::Gt | CompOp::Ge) {
