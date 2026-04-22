@@ -9119,6 +9119,28 @@ impl TranslationState {
             | "time.transaction" | "time.statement" | "time.realtime"
             | "localdatetime.transaction" | "localdatetime.statement" | "localdatetime.realtime"
             | "datetime.transaction" | "datetime.statement" | "datetime.realtime" => {
+                // Zero-arg form: return a deterministic fixed timestamp.
+                // Two calls to the same constructor with no args in the same query
+                // will produce the same literal, so duration(v, v) = PT0S correctly.
+                if args.is_empty() {
+                    let xsd_time_nn = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#time");
+                    let xsd_dt_nn = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime");
+                    // Strip variant suffix to get the base function name.
+                    let base_for_zero = name_lower
+                        .strip_suffix(".transaction")
+                        .or_else(|| name_lower.strip_suffix(".statement"))
+                        .or_else(|| name_lower.strip_suffix(".realtime"))
+                        .unwrap_or(name_lower.as_str());
+                    let lit = match base_for_zero {
+                        "date" => SparLit::new_simple_literal("2000-01-01".to_owned()),
+                        "localtime" => SparLit::new_simple_literal("00:00".to_owned()),
+                        "time" => SparLit::new_typed_literal("00:00Z".to_owned(), xsd_time_nn),
+                        "localdatetime" => SparLit::new_simple_literal("2000-01-01T00:00".to_owned()),
+                        "datetime" => SparLit::new_typed_literal("2000-01-01T00:00Z".to_owned(), xsd_dt_nn),
+                        _ => return Ok(SparExpr::Variable(self.fresh_var("null"))),
+                    };
+                    return Ok(SparExpr::Literal(lit));
+                }
                 // Null propagation: func(null) → null.
                 if let Some(Expression::Literal(Literal::Null)) = args.first() {
                     return Ok(SparExpr::Variable(self.fresh_var("null")));
@@ -12577,6 +12599,23 @@ fn temporal_parse_date(s: &str) -> Option<String> {
     } else {
         s
     };
+    // Extended-year format: ±YYYYYYY-MM-DD (year more/less than 4 digits)
+    if s.starts_with('+') || s.starts_with('-') {
+        let (sign, rest) = if s.starts_with('-') { (-1i64, &s[1..]) } else { (1, &s[1..]) };
+        if let Some(ym_pos) = rest.find('-').filter(|&p| p >= 4) {
+            let rest2 = &rest[ym_pos + 1..];
+            if rest2.len() >= 5 && rest2.as_bytes().get(2) == Some(&b'-') {
+                if let (Ok(y), Ok(m), Ok(d)) = (
+                    rest[..ym_pos].parse::<i64>(),
+                    rest2[..2].parse::<i64>(),
+                    rest2[3..5].parse::<i64>(),
+                ) {
+                    let y = sign * y;
+                    return Some(format!("{y}-{m:02}-{d:02}"));
+                }
+            }
+        }
+    }
     // Extended calendar: YYYY-MM-DD
     if s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-') {
         let y: i64 = s[..4].parse().ok()?;
@@ -12822,13 +12861,18 @@ fn normalize_tz(tz: &str) -> String {
 
 /// Parse an ISO 8601 localdatetime string (no timezone).
 fn temporal_parse_localdatetime(s: &str) -> Option<String> {
-    let t_pos = s.find(['T', 't'])?;
-    let date_s = temporal_parse_date(&s[..t_pos])?;
-    // Strip any timezone suffix for localdatetime
-    let time_part = &s[t_pos + 1..];
-    let (time_body, _tz) = split_tz(time_part);
-    let time_s = temporal_parse_localtime(time_body)?;
-    Some(format!("{date_s}T{time_s}"))
+    if let Some(t_pos) = s.find(['T', 't']) {
+        let date_s = temporal_parse_date(&s[..t_pos])?;
+        // Strip any timezone suffix for localdatetime
+        let time_part = &s[t_pos + 1..];
+        let (time_body, _tz) = split_tz(time_part);
+        let time_s = temporal_parse_localtime(time_body)?;
+        Some(format!("{date_s}T{time_s}"))
+    } else {
+        // Date-only string: time defaults to midnight (00:00).
+        let date_s = temporal_parse_date(s)?;
+        Some(format!("{date_s}T00:00"))
+    }
 }
 
 /// Parse an ISO 8601 datetime string (with timezone).
@@ -13529,17 +13573,18 @@ fn parse_date_ymd(s: &str) -> Option<(i64, i64, i64)> {
     } else {
         (1, s)
     };
-    if rest.len() >= 10
-        && rest.as_bytes().get(4) == Some(&b'-')
-        && rest.as_bytes().get(7) == Some(&b'-')
-    {
-        let y: i64 = rest[..4].parse().ok()?;
-        let m: i64 = rest[5..7].parse().ok()?;
-        let d: i64 = rest[8..10].parse().ok()?;
-        Some((sign * y, m, d))
-    } else {
-        None
+    // Find year-month separator '-' after at least 4 year digits.
+    // This handles both standard "1984-10-11" (ym_pos=4) and
+    // extended-year "999999999-01-01" (ym_pos=9).
+    let ym_pos = rest.find('-').filter(|&p| p >= 4)?;
+    let y: i64 = rest[..ym_pos].parse().ok()?;
+    let rest2 = &rest[ym_pos + 1..];
+    if rest2.len() < 5 || rest2.as_bytes().get(2) != Some(&b'-') {
+        return None;
     }
+    let m: i64 = rest2[..2].parse().ok()?;
+    let d: i64 = rest2[3..5].parse().ok()?;
+    Some((sign * y, m, d))
 }
 
 /// Parse any Cypher temporal string into a `TempoVal`.
