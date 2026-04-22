@@ -9349,6 +9349,49 @@ impl TranslationState {
                 Ok(SparExpr::Literal(lit))
             }
 
+            // ── Duration between two temporal values ──────────────────────────
+            "duration.between" | "duration.inmonths" | "duration.indays"
+            | "duration.inseconds" => {
+                // Null propagation: if either arg is null, return null.
+                if args.len() < 2 {
+                    return Ok(SparExpr::Variable(self.fresh_var("null")));
+                }
+                if matches!(&args[0], Expression::Literal(Literal::Null))
+                    || matches!(&args[1], Expression::Literal(Literal::Null))
+                {
+                    return Ok(SparExpr::Variable(self.fresh_var("null")));
+                }
+
+                // Evaluate both arguments to SPARQL literals.
+                let lhs_expr = self.translate_expr(&args[0], extra);
+                let rhs_expr = self.translate_expr(&args[1], extra);
+                let (lhs_str, rhs_str) = match (lhs_expr, rhs_expr) {
+                    (Ok(SparExpr::Literal(l)), Ok(SparExpr::Literal(r))) => {
+                        (l.value().to_string(), r.value().to_string())
+                    }
+                    _ => {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: format!(
+                                "duration function {name}() with non-literal arguments"
+                            ),
+                        })
+                    }
+                };
+                let result_opt = match name_lower.as_str() {
+                    "duration.between" => temporal_duration_between(&lhs_str, &rhs_str),
+                    "duration.inmonths" => temporal_duration_in_months(&lhs_str, &rhs_str),
+                    "duration.indays" => temporal_duration_in_days(&lhs_str, &rhs_str),
+                    "duration.inseconds" => temporal_duration_in_seconds(&lhs_str, &rhs_str),
+                    _ => unreachable!(),
+                };
+                let xsd_dur =
+                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#duration");
+                match result_opt {
+                    Some(s) => Ok(SparExpr::Literal(SparLit::new_typed_literal(s, xsd_dur))),
+                    None => Ok(SparExpr::Variable(self.fresh_var("null"))),
+                }
+            }
+
             _ => Err(PolygraphError::UnsupportedFeature {
                 feature: format!("function call: {name}()"),
             }),
@@ -13392,4 +13435,320 @@ fn term_pattern_to_ground(tp: TermPattern) -> Result<GroundTerm, PolygraphError>
             feature: "triple pattern in UNWIND list — not a ground term".to_string(),
         }),
     }
+}
+
+// ── Temporal duration between two temporal values ─────────────────────────────
+
+/// A parsed temporal value used for duration computation.
+struct TempoVal {
+    has_date: bool,
+    has_time: bool,
+    /// Whether an explicit timezone offset was present (Z or ±HH:MM).
+    has_tz: bool,
+    year: i64,
+    month: i64,
+    day: i64,
+    /// Raw time from string (no TZ adjustment), nanoseconds from midnight.
+    local_time_ns: i128,
+    /// TZ-adjusted to UTC, nanoseconds from midnight.
+    utc_time_ns: i128,
+}
+
+/// Parse a time string "HH:MM[:SS[.nnn]][±HH:MM|Z]" into
+/// (local_time_ns, tz_offset_seconds, has_tz).
+fn parse_time_ns_ext(s: &str) -> Option<(i128, i64, bool)> {
+    let s = s.trim();
+    // Strip named timezone [...]
+    let s = if let Some(b) = s.rfind('[') { &s[..b] } else { s };
+    // Detect trailing TZ offset: Z or ±HH[:MM], starting at pos ≥ 5
+    let tz_start = s
+        .rfind(|c: char| c == 'Z' || c == '+' || c == '-')
+        .filter(|&p| p >= 5)
+        .unwrap_or(s.len());
+    let tz_raw = &s[tz_start..];
+    let body = &s[..tz_start];
+    let (tz_secs, has_tz) = if tz_raw.is_empty() {
+        (0i64, false)
+    } else if tz_raw.eq_ignore_ascii_case("z") {
+        (0, true)
+    } else {
+        let neg = tz_raw.starts_with('-');
+        let tz = &tz_raw[1..];
+        let (th, tm) = if tz.contains(':') {
+            let p = tz.find(':').unwrap();
+            let th: i64 = tz[..p].parse().ok()?;
+            let tm: i64 = tz[p + 1..].parse().ok()?;
+            (th, tm)
+        } else if tz.len() == 4 {
+            let th: i64 = tz[..2].parse().ok()?;
+            let tm: i64 = tz[2..4].parse().ok()?;
+            (th, tm)
+        } else if tz.len() >= 2 {
+            let th: i64 = tz.parse().ok()?;
+            (th, 0)
+        } else {
+            (0, 0)
+        };
+        let secs = th * 3600 + tm * 60;
+        (if neg { -secs } else { secs }, true)
+    };
+    if body.len() < 5 || body.as_bytes().get(2) != Some(&b':') {
+        return None;
+    }
+    let h: i64 = body[..2].parse().ok()?;
+    let m: i64 = body[3..5].parse().ok()?;
+    let sec_ns: i128 = if body.len() > 5 && body.as_bytes().get(5) == Some(&b':') {
+        let sec_str = &body[6..];
+        if let Some(dot) = sec_str.find('.') {
+            let whole: i64 = sec_str[..dot].parse().ok()?;
+            let frac_str = &sec_str[dot + 1..];
+            let mut ns_str = frac_str.to_string();
+            ns_str.truncate(9);
+            while ns_str.len() < 9 { ns_str.push('0'); }
+            let ns: i64 = ns_str.parse().ok()?;
+            (whole as i128) * 1_000_000_000 + ns as i128
+        } else {
+            let whole: i64 = sec_str.parse().ok()?;
+            (whole as i128) * 1_000_000_000
+        }
+    } else { 0 };
+    let local_ns = (h as i128) * 3_600_000_000_000
+        + (m as i128) * 60_000_000_000
+        + sec_ns;
+    Some((local_ns, tz_secs, has_tz))
+}
+
+/// Parse a date string "YYYY-MM-DD" (or with leading ±) into (year, month, day).
+fn parse_date_ymd(s: &str) -> Option<(i64, i64, i64)> {
+    let s = s.trim();
+    // Handle leading + or - for year sign
+    let (sign, rest) = if s.starts_with('+') {
+        (1i64, &s[1..])
+    } else if s.starts_with('-') {
+        (-1, &s[1..])
+    } else {
+        (1, s)
+    };
+    if rest.len() >= 10
+        && rest.as_bytes().get(4) == Some(&b'-')
+        && rest.as_bytes().get(7) == Some(&b'-')
+    {
+        let y: i64 = rest[..4].parse().ok()?;
+        let m: i64 = rest[5..7].parse().ok()?;
+        let d: i64 = rest[8..10].parse().ok()?;
+        Some((sign * y, m, d))
+    } else {
+        None
+    }
+}
+
+/// Parse any Cypher temporal string into a `TempoVal`.
+fn temporal_to_val(s: &str) -> Option<TempoVal> {
+    let s = s.trim();
+    // Strip named timezone suffix [...]
+    let s = if let Some(b) = s.rfind('[') { &s[..b] } else { s };
+    let s = s.trim_end_matches(']');
+
+    if let Some(t_pos) = s.find('T') {
+        // datetime or localdatetime
+        let date_part = &s[..t_pos];
+        let time_raw = &s[t_pos + 1..];
+        let (y, m, d) = parse_date_ymd(date_part)?;
+        let (local_ns, tz_secs, has_tz) = parse_time_ns_ext(time_raw)?;
+        let utc_ns = local_ns - (tz_secs as i128) * 1_000_000_000;
+        Some(TempoVal { has_date: true, has_time: true, has_tz, year: y, month: m, day: d, local_time_ns: local_ns, utc_time_ns: utc_ns })
+    } else if s.len() >= 3 && s.as_bytes().get(2) == Some(&b':') {
+        // time or localtime: HH:MM...
+        let (local_ns, tz_secs, has_tz) = parse_time_ns_ext(s)?;
+        let utc_ns = local_ns - (tz_secs as i128) * 1_000_000_000;
+        Some(TempoVal { has_date: false, has_time: true, has_tz, year: 0, month: 0, day: 0, local_time_ns: local_ns, utc_time_ns: utc_ns })
+    } else {
+        // date: YYYY-MM-DD
+        let (y, m, d) = parse_date_ymd(s)?;
+        Some(TempoVal { has_date: true, has_time: false, has_tz: false, year: y, month: m, day: d, local_time_ns: 0, utc_time_ns: 0 })
+    }
+}
+
+/// Choose the appropriate time_ns for comparison: UTC when both have_tz, local otherwise.
+fn tempo_time(v: &TempoVal, use_utc: bool) -> i128 {
+    if use_utc { v.utc_time_ns } else { v.local_time_ns }
+}
+
+const DAY_NS: i128 = 86_400_000_000_000;
+
+/// Format signed seconds-in-nanoseconds as "NNS" or "NN.fS".
+fn dur_fmt_sec_ns(ns: i128) -> String {
+    if ns == 0 { return String::new(); }
+    let neg = ns < 0;
+    let abs_ns = ns.unsigned_abs();
+    let whole = (abs_ns / 1_000_000_000) as i64;
+    let frac_ns = (abs_ns % 1_000_000_000) as i64;
+    let frac_part = if frac_ns == 0 { String::new() } else {
+        let s = format!("{frac_ns:09}");
+        format!(".{}", s.trim_end_matches('0'))
+    };
+    if neg { format!("-{whole}{frac_part}S") } else { format!("{whole}{frac_part}S") }
+}
+
+/// Format a duration as ISO 8601 string.  All non-zero components must have the same sign.
+fn dur_fmt(y: i64, mo: i64, d: i64, h: i64, min: i64, s_ns: i128) -> String {
+    if y == 0 && mo == 0 && d == 0 && h == 0 && min == 0 && s_ns == 0 {
+        return "PT0S".to_string();
+    }
+    let mut result = String::from("P");
+    if y != 0 { result.push_str(&format!("{y}Y")); }
+    if mo != 0 { result.push_str(&format!("{mo}M")); }
+    if d != 0 { result.push_str(&format!("{d}D")); }
+    if h != 0 || min != 0 || s_ns != 0 {
+        result.push('T');
+        if h != 0 { result.push_str(&format!("{h}H")); }
+        if min != 0 { result.push_str(&format!("{min}M")); }
+        if s_ns != 0 { result.push_str(&dur_fmt_sec_ns(s_ns)); }
+    }
+    result
+}
+
+/// Split total nanoseconds into (hours, minutes, seconds_ns) with uniform sign.
+fn split_ns_to_hms(total_ns: i128) -> (i64, i64, i128) {
+    if total_ns == 0 { return (0, 0, 0); }
+    let neg = total_ns < 0;
+    let abs = total_ns.unsigned_abs();
+    let h = (abs / 3_600_000_000_000) as i64;
+    let rem = abs % 3_600_000_000_000;
+    let m = (rem / 60_000_000_000) as i64;
+    let s = (rem % 60_000_000_000) as i128;
+    if neg { (-(h as i64), -(m as i64), -(s)) } else { (h as i64, m as i64, s) }
+}
+
+/// Calendar diff (positive direction only): returns (yd, md, dd) where all ≥ 0.
+fn calendar_diff_pos(y1:i64, m1:i64, d1:i64, y2:i64, m2:i64, d2:i64) -> (i64, i64, i64) {
+    let mut yd = y2 - y1;
+    let mut md = m2 - m1;
+    let mut dd = d2 - d1;
+    if dd < 0 {
+        md -= 1;
+        let pm = if m2 == 1 { 12 } else { m2 - 1 };
+        let py = if m2 == 1 { y2 - 1 } else { y2 };
+        dd += temporal_dim(py, pm);
+    }
+    if md < 0 {
+        yd -= 1;
+        md += 12;
+    }
+    (yd, md, dd)
+}
+
+/// Compute `duration.between(lhs, rhs)`.
+fn temporal_duration_between(lhs: &str, rhs: &str) -> Option<String> {
+    let l = temporal_to_val(lhs)?;
+    let r = temporal_to_val(rhs)?;
+    let use_utc = l.has_tz && r.has_tz;
+    let l_t = if l.has_time { tempo_time(&l, use_utc) } else { 0 };
+    let r_t = if r.has_time { tempo_time(&r, use_utc) } else { 0 };
+
+    if !l.has_date || !r.has_date {
+        // Pure time result.
+        let diff = r_t - l_t;
+        let (h, min, s) = split_ns_to_hms(diff);
+        return Some(dur_fmt(0, 0, 0, h, min, s));
+    }
+
+    // Both have date component.
+    let epoch_l = temporal_epoch(l.year, l.month, l.day);
+    let epoch_r = temporal_epoch(r.year, r.month, r.day);
+    let epoch_diff = epoch_r - epoch_l;
+
+    if epoch_diff >= 0 {
+        // Positive direction: use calendar form Y/M/D.
+        let (mut yd, mut md, mut dd) = calendar_diff_pos(l.year, l.month, l.day, r.year, r.month, r.day);
+        let mut t_diff = r_t - l_t;
+        if t_diff < 0 {
+            // Borrow 1 day.
+            if dd > 0 {
+                dd -= 1;
+            } else if md > 0 {
+                md -= 1;
+                let pm = if r.month == 1 { 12 } else { r.month - 1 };
+                let py = if r.month == 1 { r.year - 1 } else { r.year };
+                dd += temporal_dim(py, pm) - 1;
+            } else if yd > 0 {
+                yd -= 1;
+                md = 11;
+                let pm = if r.month == 1 { 12 } else { r.month - 1 };
+                let py = if r.month == 1 { r.year - 1 } else { r.year };
+                dd += temporal_dim(py, pm) - 1;
+            }
+            t_diff += DAY_NS;
+        }
+        let (h, min, s) = split_ns_to_hms(t_diff);
+        Some(dur_fmt(yd, md, dd, h, min, s))
+    } else {
+        // Negative direction: use epoch days (no Y/M).
+        let mut days = epoch_diff;
+        let mut t_diff = r_t - l_t;
+        if t_diff > 0 {
+            // Borrow 1 backward day.
+            days += 1;
+            t_diff -= DAY_NS;
+        }
+        let (h, min, s) = split_ns_to_hms(t_diff);
+        Some(dur_fmt(0, 0, days, h, min, s))
+    }
+}
+
+/// Compute `duration.inMonths(lhs, rhs)`.
+fn temporal_duration_in_months(lhs: &str, rhs: &str) -> Option<String> {
+    let l = temporal_to_val(lhs)?;
+    let r = temporal_to_val(rhs)?;
+    if !l.has_date || !r.has_date {
+        return Some("PT0S".to_string());
+    }
+    let use_utc = l.has_tz && r.has_tz;
+    let l_t = if l.has_time { tempo_time(&l, use_utc) } else { 0 };
+    let r_t = if r.has_time { tempo_time(&r, use_utc) } else { 0 };
+
+    let mut raw_months = (r.year - l.year) * 12 + (r.month - l.month);
+    // Day/time comparison for sub-month adjustment.
+    let r_day_ns = (r.day as i128) * DAY_NS + r_t;
+    let l_day_ns = (l.day as i128) * DAY_NS + l_t;
+    if raw_months >= 0 {
+        if r_day_ns < l_day_ns { raw_months -= 1; }
+    } else {
+        if r_day_ns > l_day_ns { raw_months += 1; }
+    }
+    if raw_months == 0 { return Some("PT0S".to_string()); }
+    let y = raw_months / 12;
+    let m = raw_months % 12;
+    Some(dur_fmt(y, m, 0, 0, 0, 0))
+}
+
+/// Compute `duration.inDays(lhs, rhs)`.
+fn temporal_duration_in_days(lhs: &str, rhs: &str) -> Option<String> {
+    let l = temporal_to_val(lhs)?;
+    let r = temporal_to_val(rhs)?;
+    if !l.has_date || !r.has_date {
+        return Some("PT0S".to_string());
+    }
+    let days = temporal_epoch(r.year, r.month, r.day) - temporal_epoch(l.year, l.month, l.day);
+    if days == 0 { return Some("PT0S".to_string()); }
+    Some(format!("P{days}D"))
+}
+
+/// Compute `duration.inSeconds(lhs, rhs)`.
+fn temporal_duration_in_seconds(lhs: &str, rhs: &str) -> Option<String> {
+    let l = temporal_to_val(lhs)?;
+    let r = temporal_to_val(rhs)?;
+    let use_utc = l.has_tz && r.has_tz;
+    let l_t = if l.has_time { tempo_time(&l, use_utc) } else { 0 };
+    let r_t = if r.has_time { tempo_time(&r, use_utc) } else { 0 };
+    let l_epoch_ns = if l.has_date && r.has_date {
+        temporal_epoch(l.year, l.month, l.day) as i128 * DAY_NS
+    } else { 0 };
+    let r_epoch_ns = if l.has_date && r.has_date {
+        temporal_epoch(r.year, r.month, r.day) as i128 * DAY_NS
+    } else { 0 };
+    let total_diff = (r_epoch_ns + r_t) - (l_epoch_ns + l_t);
+    if total_diff == 0 { return Some("PT0S".to_string()); }
+    let (h, min, s) = split_ns_to_hms(total_diff);
+    Some(dur_fmt(0, 0, 0, h, min, s))
 }
