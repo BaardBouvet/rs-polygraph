@@ -12445,27 +12445,29 @@ fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> 
 
 /// Construct a `duration` literal (ISO 8601) from a map.
 /// All fields are optional and can be integers or floats.
+/// Fractional values cascade down: frac(weeks)*7→days, frac(days)*24→hours,
+/// frac(hours)*60→minutes, frac(minutes)*60→seconds.
 fn temporal_duration_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     // Date components
     let years = temporal_get_f(pairs, "years").or_else(|| temporal_get_f(pairs, "year"));
     let months = temporal_get_f(pairs, "months").or_else(|| temporal_get_f(pairs, "month"));
-    let weeks = temporal_get_f(pairs, "weeks").or_else(|| temporal_get_f(pairs, "week"));
-    let days = temporal_get_f(pairs, "days").or_else(|| temporal_get_f(pairs, "day"));
+    let weeks_raw = temporal_get_f(pairs, "weeks").or_else(|| temporal_get_f(pairs, "week"));
+    let days_raw = temporal_get_f(pairs, "days").or_else(|| temporal_get_f(pairs, "day"));
     // Time components
-    let hours = temporal_get_f(pairs, "hours").or_else(|| temporal_get_f(pairs, "hour"));
-    let minutes = temporal_get_f(pairs, "minutes").or_else(|| temporal_get_f(pairs, "minute"));
-    let seconds = temporal_get_f(pairs, "seconds").or_else(|| temporal_get_f(pairs, "second"));
+    let hours_raw = temporal_get_f(pairs, "hours").or_else(|| temporal_get_f(pairs, "hour"));
+    let minutes_raw = temporal_get_f(pairs, "minutes").or_else(|| temporal_get_f(pairs, "minute"));
+    let seconds_raw = temporal_get_f(pairs, "seconds").or_else(|| temporal_get_f(pairs, "second"));
     let ms = temporal_get_f(pairs, "milliseconds").or_else(|| temporal_get_f(pairs, "millisecond"));
     let us = temporal_get_f(pairs, "microseconds").or_else(|| temporal_get_f(pairs, "microsecond"));
     let ns = temporal_get_f(pairs, "nanoseconds").or_else(|| temporal_get_f(pairs, "nanosecond"));
 
     if years.is_none()
         && months.is_none()
-        && weeks.is_none()
-        && days.is_none()
-        && hours.is_none()
-        && minutes.is_none()
-        && seconds.is_none()
+        && weeks_raw.is_none()
+        && days_raw.is_none()
+        && hours_raw.is_none()
+        && minutes_raw.is_none()
+        && seconds_raw.is_none()
         && ms.is_none()
         && us.is_none()
         && ns.is_none()
@@ -12473,29 +12475,56 @@ fn temporal_duration_from_map(pairs: &[(String, Expression)]) -> Option<String> 
         return None;
     }
 
-    // Build ISO 8601 duration: P[nY][nM][nW][nD][T[nH][nM][nS]]
+    // Normalize fractional components by cascading down:
+    // frac(months)*30.436875 → extra days (1 month = 365.2425/12 days)
+    // weeks always convert to days (1 week = 7 days, no 'W' in output)
+    // frac(days)*24 → extra hours, frac(hours)*60 → extra minutes,
+    // frac(minutes)*60 → extra seconds.
+
+    // Months: integer part stays as 'M'; fractional part → days
+    let months_f = months.unwrap_or(0.0);
+    let months_int = months_f.trunc();
+    let extra_days_from_months = months_f.fract() * 30.436875;
+
+    // Weeks: ALWAYS convert to days (never emit 'W')
+    let weeks_f = weeks_raw.unwrap_or(0.0);
+    let extra_days_from_weeks = weeks_f * 7.0;
+
+    // Days = explicit days + cascade from weeks + cascade from months
+    let days_total = days_raw.unwrap_or(0.0) + extra_days_from_weeks + extra_days_from_months;
+    let days_int = days_total.trunc();
+    let extra_hours_from_days = days_total.fract() * 24.0;
+
+    let hours_total = hours_raw.unwrap_or(0.0) + extra_hours_from_days;
+    let hours_int = hours_total.trunc();
+    let extra_mins_from_hours = hours_total.fract() * 60.0;
+
+    let mins_total = minutes_raw.unwrap_or(0.0) + extra_mins_from_hours;
+    let mins_int = mins_total.trunc();
+    let extra_secs_from_mins = mins_total.fract() * 60.0;
+
+    let secs_total_f = seconds_raw.unwrap_or(0.0) + extra_secs_from_mins;
+
+    // Build ISO 8601 duration: P[nY][nM][nD][T[nH][nM][nS]]
     let mut date_s = String::new();
     if let Some(y) = years {
         date_s.push_str(&format_duration_component(y, 'Y'));
     }
-    if let Some(m) = months {
-        date_s.push_str(&format_duration_component(m, 'M'));
+    if months_int != 0.0 {
+        date_s.push_str(&format_duration_component(months_int, 'M'));
     }
-    if let Some(w) = weeks {
-        date_s.push_str(&format_duration_component(w, 'W'));
-    }
-    if let Some(d) = days {
-        date_s.push_str(&format_duration_component(d, 'D'));
+    // Weeks are always converted to days — no 'W' emitted.
+    if days_int != 0.0 {
+        date_s.push_str(&format_duration_component(days_int, 'D'));
     }
 
     // Combine sub-second time parts into integer nanoseconds, then normalize
     // seconds → minutes using truncate-toward-zero carry.
-    let sec_f = seconds.unwrap_or(0.0);
     let ms_f = ms.unwrap_or(0.0);
     let us_f = us.unwrap_or(0.0);
     let ns_f = ns.unwrap_or(0.0);
     // Convert to nanoseconds (integer, rounding to nearest).
-    let total_ns: i64 = (sec_f * 1_000_000_000.0).round() as i64
+    let total_ns: i64 = (secs_total_f * 1_000_000_000.0).round() as i64
         + (ms_f * 1_000_000.0).round() as i64
         + (us_f * 1_000.0).round() as i64
         + ns_f.round() as i64;
@@ -12513,26 +12542,29 @@ fn temporal_duration_from_map(pairs: &[(String, Expression)]) -> Option<String> 
         -((-s_whole) / 60)
     };
     let s_final = s_whole - carry_min * 60;
-    // Combine carried minutes with explicit minute input.
-    let has_time = hours.is_some()
-        || minutes.is_some()
-        || seconds.is_some()
-        || ms.is_some()
-        || us.is_some()
-        || ns.is_some();
-    let min_total_f = minutes.unwrap_or(0.0) + carry_min as f64;
+    // Combine carried minutes with cascaded integer minutes.
+    let min_total = mins_int as i64 + carry_min;
 
     let mut time_s = String::new();
-    if let Some(h) = hours {
-        time_s.push_str(&format_duration_component(h, 'H'));
+    if hours_int != 0.0 {
+        time_s.push_str(&format_duration_component(hours_int, 'H'));
     }
-    if min_total_f != 0.0 {
-        time_s.push_str(&format_duration_component(min_total_f, 'M'));
+    if min_total != 0 {
+        time_s.push_str(&format!("{min_total}M"));
     }
     let sec_str = format_duration_secs(s_final, remain_ns);
     if !sec_str.is_empty() {
         time_s.push_str(&sec_str);
     }
+
+    // has_time: explicit time fields OR cascade produced a non-empty time part.
+    let has_time = hours_raw.is_some()
+        || minutes_raw.is_some()
+        || seconds_raw.is_some()
+        || ms.is_some()
+        || us.is_some()
+        || ns.is_some()
+        || !time_s.is_empty();
 
     let mut result = "P".to_string();
     result.push_str(&date_s);
@@ -12963,11 +12995,126 @@ fn parse_duration_alternative(body: &str) -> Option<String> {
 }
 
 /// Normalize fractional components in an ISO 8601 duration string.
-/// e.g. "P0.75M" → "P22DT19H51M49.5S", "PT0.75M" → "PT45S"
+/// e.g. "P5M1.5D" → "P5M1DT12H", "PT0.75M" → "PT45S"
+/// Fractional weeks cascade to days, days to hours, hours to minutes, minutes to seconds.
 fn normalize_duration_iso(s: &str) -> Option<String> {
-    // This is complex normalization. For now, return the string as-is
-    // (Oxigraph may or may not normalize it).
-    Some(s.to_owned())
+    if !s.starts_with('P') {
+        return None;
+    }
+    let body = &s[1..];
+
+    // Split into date and time parts at 'T'.
+    let t_pos = body.find('T');
+    let date_str = t_pos.map_or(body, |p| &body[..p]);
+    let time_str = t_pos.map_or("", |p| &body[p + 1..]);
+
+    // Parse a run of ASCII digits / '.' characters followed by a unit letter.
+    // Handles leading '-' for negative components (e.g., "-14D").
+    let parse_components = |part: &str, units: &[char]| -> Vec<f64> {
+        let mut vals = vec![0.0f64; units.len()];
+        let mut cur = String::new();
+        for ch in part.chars() {
+            if ch.is_ascii_digit() || ch == '.' {
+                cur.push(ch);
+            } else if ch == '-' && cur.is_empty() {
+                // Leading minus sign for a negative component value.
+                cur.push('-');
+            } else if !cur.is_empty() {
+                if let Ok(v) = cur.parse::<f64>() {
+                    let uc = ch.to_ascii_uppercase();
+                    if let Some(idx) = units.iter().position(|&u| u == uc) {
+                        vals[idx] = v;
+                    }
+                }
+                cur.clear();
+            }
+        }
+        vals
+    };
+
+    let dv = parse_components(date_str, &['Y', 'M', 'W', 'D']);
+    let tv = parse_components(time_str, &['H', 'M', 'S']);
+
+    let years_f = dv[0];
+    let months_f = dv[1];
+    let weeks_f = dv[2];
+    let days_f = dv[3];
+    let hours_f = tv[0];
+    let mins_f = tv[1];
+    let secs_f = tv[2];
+
+    // Cascade fractional parts downward.
+    // Months: integer part stays as 'M'; fractional part → days (1 month = 30.436875 days)
+    let months_int = months_f.trunc();
+    let extra_days_from_months = months_f.fract() * 30.436875;
+    // Weeks: ALWAYS convert to days (never emit 'W')
+    let extra_days_from_weeks = weeks_f * 7.0;
+
+    let days_total = days_f + extra_days_from_weeks + extra_days_from_months;
+    let days_int = days_total.trunc();
+    let extra_hours = days_total.fract() * 24.0;
+
+    let hours_total = hours_f + extra_hours;
+    let hours_int = hours_total.trunc();
+    let extra_mins = hours_total.fract() * 60.0;
+
+    let mins_total = mins_f + extra_mins;
+    let mins_int = mins_total.trunc();
+    let extra_secs = mins_total.fract() * 60.0;
+
+    let secs_total = secs_f + extra_secs;
+
+    // Convert total seconds to ns for sub-second handling.
+    let total_ns: i64 = (secs_total * 1_000_000_000.0).round() as i64;
+    let s_whole = if total_ns >= 0 {
+        total_ns / 1_000_000_000
+    } else {
+        -((-total_ns) / 1_000_000_000)
+    };
+    let remain_ns = total_ns - s_whole * 1_000_000_000;
+    let carry_min = if s_whole >= 0 {
+        s_whole / 60
+    } else {
+        -((-s_whole) / 60)
+    };
+    let s_final = s_whole - carry_min * 60;
+    let min_total = mins_int as i64 + carry_min;
+
+    // Build result string.
+    let mut result = "P".to_string();
+    if years_f != 0.0 {
+        result.push_str(&format_duration_component(years_f, 'Y'));
+    }
+    if months_int != 0.0 {
+        result.push_str(&format_duration_component(months_int, 'M'));
+    }
+    // Weeks are always converted to days — no 'W' emitted.
+    if days_int != 0.0 {
+        result.push_str(&format_duration_component(days_int, 'D'));
+    }
+
+    let mut time_s = String::new();
+    if hours_int != 0.0 {
+        time_s.push_str(&format_duration_component(hours_int, 'H'));
+    }
+    if min_total != 0 {
+        time_s.push_str(&format!("{min_total}M"));
+    }
+    let sec_str = format_duration_secs(s_final, remain_ns);
+    if !sec_str.is_empty() {
+        time_s.push_str(&sec_str);
+    }
+
+    // Emit time section if input had a T separator or if cascade produced time.
+    let has_time = t_pos.is_some() || !time_s.is_empty();
+    if has_time {
+        result.push('T');
+        result.push_str(&time_s);
+    }
+    if result == "P" || result == "PT" {
+        result = "PT0S".to_string();
+    }
+    Some(result)
 }
 
 /// Returns true if the expression is statically known to be a non-boolean value.
