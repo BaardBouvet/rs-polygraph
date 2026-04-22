@@ -1657,6 +1657,14 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                 for elem in &m.pattern.elements {
                     match elem {
                         PatternElement::Node(n) => {
+                            // Null property values in MERGE are invalid (SemanticError).
+                            if let Some(props) = &n.properties {
+                                if props.iter().any(|(_, v)| matches!(v, Expression::Literal(Literal::Null))) {
+                                    return Err(PolygraphError::Translation {
+                                        message: "SemanticError: MergeReadOwnWrites: null property values are not allowed in MERGE".to_string(),
+                                    });
+                                }
+                            }
                             if let Some(v) = &n.variable {
                                 let already_bound = bound_vars.contains(v.as_str())
                                     || kinds.contains_key(v.as_str())
@@ -1675,6 +1683,14 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                             }
                         }
                         PatternElement::Relationship(r) => {
+                            // Null property values in MERGE are invalid (SemanticError).
+                            if let Some(props) = &r.properties {
+                                if props.iter().any(|(_, v)| matches!(v, Expression::Literal(Literal::Null))) {
+                                    return Err(PolygraphError::Translation {
+                                        message: "SemanticError: MergeReadOwnWrites: null property values are not allowed in MERGE".to_string(),
+                                    });
+                                }
+                            }
                             // NoSingleRelationshipType: MERGE must have exactly 1 rel type.
                             if r.rel_types.is_empty() {
                                 return Err(PolygraphError::Translation {
@@ -8252,6 +8268,24 @@ impl TranslationState {
                 // For real node/path variables we can't enumerate labels/relationships at
                 // compile time (no graph data).
                 let arg = args.first();
+                // Resolve subscript access (e.g. labels(list[0])) to the inner variable.
+                if let Some(Expression::Subscript(coll, idx)) = arg {
+                    if let Some(items) = self.resolve_literal_list(coll) {
+                        let n_len = items.len() as i64;
+                        if let Some(iv) = get_literal_int(idx) {
+                            let i = if iv < 0 { n_len + iv } else { iv };
+                            if i >= 0 && i < n_len {
+                                let inner_arg = items[i as usize].clone();
+                                let rewritten = Expression::FunctionCall {
+                                    name: name.to_string(),
+                                    distinct: false,
+                                    args: vec![inner_arg],
+                                };
+                                return self.translate_expr(&rewritten, extra);
+                            }
+                        }
+                    }
+                }
                 match arg {
                     Some(Expression::Literal(Literal::Null)) => {
                         return Ok(SparExpr::Variable(self.fresh_var("null")));
