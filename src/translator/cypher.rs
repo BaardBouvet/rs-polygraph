@@ -12112,7 +12112,10 @@ fn temporal_localtime_from_map(pairs: &[(String, Expression)]) -> Option<String>
 /// Construct a `time` literal from a map.
 fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     // Check for a `time` key providing a base time.
-    let base_time_raw: Option<String> = pairs.iter().find_map(|(k, v)| {
+    // Returns (time_string, original_had_tz): the bool indicates if the source had a TZ.
+    // Local times (no TZ) should NOT be converted when a new timezone is specified;
+    // they just get the TZ attached.  Times with an explicit TZ ARE converted via UTC.
+    let base_time_raw: Option<(String, bool)> = pairs.iter().find_map(|(k, v)| {
         if k.eq_ignore_ascii_case("time") {
             // Get the raw time string (with potential TZ from original).
             match v {
@@ -12123,16 +12126,18 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
                         match arg {
                             Expression::Literal(Literal::String(s)) => {
                                 if base == "time" {
-                                    temporal_parse_time(s)
+                                    // time() function always has TZ.
+                                    temporal_parse_time(s).map(|t| (t, true))
                                 } else {
-                                    temporal_parse_localtime(s).map(|lt| format!("{lt}Z"))
+                                    // localtime() / localdatetime() / etc.: no TZ.
+                                    temporal_parse_localtime(s).map(|lt| (lt, false))
                                 }
                             }
                             Expression::Map(p) => {
                                 if base == "time" {
-                                    temporal_time_from_map(p)
+                                    temporal_time_from_map(p).map(|t| (t, true))
                                 } else {
-                                    temporal_localtime_from_map(p).map(|lt| format!("{lt}Z"))
+                                    temporal_localtime_from_map(p).map(|lt| (lt, false))
                                 }
                             }
                             _ => None,
@@ -12142,8 +12147,23 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
                     }
                 }
                 Expression::Literal(Literal::String(s)) => {
-                    // Could be a localtime or time string
-                    temporal_parse_time(s)
+                    // Check if the string already has a timezone suffix.
+                    let (_, raw_tz) = split_tz(s);
+                    // split_tz returns "Z" as default for strings with no timezone;
+                    // but "Z" could also be explicit. Detect explicit TZ by checking
+                    // whether the original string ends with 'Z' or has +/-.
+                    let has_tz = s.ends_with('Z')
+                        || s.contains('+')
+                        || s.rfind('-').map_or(false, |p| {
+                            // '-' after position 8 is likely TZ sign, not date separator
+                            p > 8 && s.as_bytes().get(p + 1).map_or(false, |b| b.is_ascii_digit())
+                        });
+                    if has_tz {
+                        temporal_parse_time(s).map(|t| (t, true))
+                    } else {
+                        // Local time or local datetime string: keep as localtime, no UTC.
+                        temporal_parse_localtime(s).map(|lt| (lt, false))
+                    }
                 }
                 _ => None,
             }
@@ -12152,9 +12172,16 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
         }
     });
 
-    if let Some(base_str) = base_time_raw {
-        // Extract components from base_str (which includes TZ).
-        let (time_body, tz_raw_base) = split_tz(&base_str);
+    if let Some((base_str, orig_had_tz)) = base_time_raw {
+        // Extract components from base_str.
+        // For local times (orig_had_tz=false), base_str has no TZ suffix.
+        // For timestamped times (orig_had_tz=true), base_str has TZ suffix.
+        let (time_body, tz_raw_base) = if orig_had_tz {
+            split_tz(&base_str)
+        } else {
+            // Local time: body is the full string, no TZ.
+            (base_str.as_str(), "")
+        };
         let base_parts = parse_localtime_to_parts(time_body)?;
         let (bh, bmin, bsec, bns) = base_parts;
         let base_tz_s = if tz_raw_base.is_empty() {
@@ -12185,8 +12212,9 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
             }
         });
 
-        // Compute wall-clock time: if TZ changed, convert UTC then apply new TZ
-        let (h, min, sec, ns) = if new_tz_s != base_tz_s && override_tz.is_some() {
+        // Compute wall-clock time: if TZ changed AND base has a known TZ, convert UTC then apply new TZ.
+        // If base is a local time (no TZ), just attach the new TZ without conversion.
+        let (h, min, sec, ns) = if new_tz_s != base_tz_s && override_tz.is_some() && !tz_raw_base.is_empty() {
             // Convert wall clock to UTC then to new TZ.
             let base_wall_s = bh * 3600 + bmin * 60 + bsec;
             let utc_s = base_wall_s - base_tz_s;
