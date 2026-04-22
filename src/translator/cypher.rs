@@ -11989,6 +11989,68 @@ fn extract_base_time_str(v: &Expression) -> Option<String> {
     }
 }
 
+/// Extract time string with timezone from a temporal expression, for use in datetime construction.
+/// Returns (time_string, original_had_tz):
+/// - time_string: full time string (including TZ if present, omitting date part for datetime)
+/// - original_had_tz: true if the source expression carried an explicit timezone
+fn extract_base_time_with_tz(v: &Expression) -> Option<(String, bool)> {
+    match v {
+        Expression::FunctionCall { name, args, .. } => {
+            let ls = name.to_lowercase();
+            let arg = args.first()?;
+            match (ls.as_str(), arg) {
+                ("time", Expression::Literal(Literal::String(s))) => {
+                    temporal_parse_time(s).map(|t| (t, true))
+                }
+                ("time", Expression::Map(p)) => {
+                    temporal_time_from_map(p).map(|t| (t, true))
+                }
+                ("localtime", Expression::Literal(Literal::String(s))) => {
+                    temporal_parse_localtime(s).map(|t| (t, false))
+                }
+                ("localtime", Expression::Map(p)) => {
+                    temporal_localtime_from_map(p).map(|t| (t, false))
+                }
+                ("datetime", Expression::Literal(Literal::String(s))) => {
+                    let dt = temporal_parse_datetime(s)?;
+                    let t_pos = dt.find('T')?;
+                    Some((dt[t_pos + 1..].to_owned(), true))
+                }
+                ("datetime", Expression::Map(p)) => {
+                    let dt = temporal_datetime_from_map(p)?;
+                    let t_pos = dt.find('T')?;
+                    Some((dt[t_pos + 1..].to_owned(), true))
+                }
+                ("localdatetime", Expression::Literal(Literal::String(s))) => {
+                    let dt = temporal_parse_localdatetime(s)?;
+                    let t_pos = dt.find('T')?;
+                    Some((dt[t_pos + 1..].to_owned(), false))
+                }
+                ("localdatetime", Expression::Map(p)) => {
+                    let dt = temporal_localdatetime_from_map(p)?;
+                    let t_pos = dt.find('T')?;
+                    Some((dt[t_pos + 1..].to_owned(), false))
+                }
+                _ => None,
+            }
+        }
+        Expression::Literal(Literal::String(s)) => {
+            // Detect if s has an explicit timezone suffix.
+            let has_tz = s.ends_with('Z')
+                || s.contains('+')
+                || s.rfind('-').map_or(false, |p| {
+                    p > 8 && s.as_bytes().get(p + 1).map_or(false, |b| b.is_ascii_digit())
+                });
+            if has_tz {
+                temporal_parse_time(s).map(|t| (t, true))
+            } else {
+                temporal_parse_localtime(s).map(|t| (t, false))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Parse a localtime string "HH:MM[:SS[.frac]]" into (h, min, sec, sub_sec_ns).
 /// Returns None if the string cannot be parsed.
 fn parse_localtime_to_parts(s: &str) -> Option<(i64, i64, i64, i64)> {
@@ -12380,14 +12442,19 @@ fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> 
             None
         }
     });
-    // Check for a `time` key as base for time components.
-    let base_time_parts: Option<(i64, i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
-        if k.eq_ignore_ascii_case("time") {
-            let ts = extract_base_time_str(v)?;
-            parse_localtime_to_parts(&ts)
-        } else {
-            None
+    // Check for a `time` key as base for time components, preserving its timezone.
+    let base_time_data: Option<(i64, i64, i64, i64, String, bool)> = pairs.iter().find_map(|(k, v)| {
+        if !k.eq_ignore_ascii_case("time") {
+            return None;
         }
+        let (time_str, orig_had_tz) = extract_base_time_with_tz(v)?;
+        let (body, tz_raw) = if orig_had_tz {
+            split_tz_owned(&time_str)
+        } else {
+            (time_str.clone(), String::new())
+        };
+        let parts = parse_localtime_to_parts(&body)?;
+        Some((parts.0, parts.1, parts.2, parts.3, tz_raw, orig_had_tz))
     });
     // Extract date_part and month (for DST timezone computation).
     let (month, date_part) = if let Some((by, bm, bd)) = base_ymd {
@@ -12440,27 +12507,73 @@ fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> 
             (1, format!("{year:04}-01-01"))
         }
     };
-    let tz = temporal_get_s(pairs, "timezone")
-        .map(|s| tc_tz_suffix_month(&s, month))
-        .unwrap_or_else(|| "Z".to_string());
-    if let Some((bh, bmin, bsec, bns)) = base_time_parts {
-        let h = temporal_get_i(pairs, "hour").unwrap_or(bh);
-        let min = temporal_get_i(pairs, "minute").unwrap_or(bmin);
-        let sec = temporal_get_i(pairs, "second").unwrap_or(bsec);
-        let ns = if temporal_get_i(pairs, "millisecond").is_some()
+    let override_tz_str = temporal_get_s(pairs, "timezone")
+        .map(|s| tc_tz_suffix_month(&s, month));
+    if let Some((bh, bmin, bsec, bns, ref base_tz_raw, orig_had_tz)) = base_time_data {
+        let override_h = temporal_get_i(pairs, "hour");
+        let override_min = temporal_get_i(pairs, "minute");
+        let override_sec = temporal_get_i(pairs, "second");
+        let has_override_subsec = temporal_get_i(pairs, "millisecond").is_some()
             || temporal_get_i(pairs, "microsecond").is_some()
-            || temporal_get_i(pairs, "nanosecond").is_some()
-        {
-            let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
-            let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
-            let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
-            ms * 1_000_000 + us * 1_000 + ns_v
+            || temporal_get_i(pairs, "nanosecond").is_some();
+        let base_tz_s = if base_tz_raw.is_empty() {
+            0
         } else {
-            bns
+            parse_tz_offset_s(&normalize_tz(base_tz_raw)).unwrap_or(0)
         };
+        let new_tz_s = override_tz_str
+            .as_deref()
+            .and_then(parse_tz_offset_s)
+            .unwrap_or(base_tz_s);
+        // The effective TZ string: override > base > Z
+        let tz = override_tz_str.clone().unwrap_or_else(|| {
+            if base_tz_raw.is_empty() {
+                "Z".to_owned()
+            } else {
+                normalize_tz(base_tz_raw)
+            }
+        });
+        // Apply UTC conversion if: base had TZ, override differs, override is provided.
+        let (h, min, sec, ns) =
+            if orig_had_tz && override_tz_str.is_some() && new_tz_s != base_tz_s {
+                let base_wall_s = bh * 3600 + bmin * 60 + bsec;
+                let utc_s = base_wall_s - base_tz_s;
+                let new_wall_s = utc_s + new_tz_s;
+                let new_h = ((new_wall_s / 3600) % 24 + 24) % 24;
+                let new_min = (new_wall_s % 3600) / 60;
+                let new_sec_v = new_wall_s % 60;
+                (
+                    override_h.unwrap_or(new_h),
+                    override_min.unwrap_or(new_min.abs()),
+                    override_sec.unwrap_or(new_sec_v.abs()),
+                    if has_override_subsec {
+                        let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+                        let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+                        let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+                        ms * 1_000_000 + us * 1_000 + ns_v
+                    } else {
+                        bns
+                    },
+                )
+            } else {
+                (
+                    override_h.unwrap_or(bh),
+                    override_min.unwrap_or(bmin),
+                    override_sec.unwrap_or(bsec),
+                    if has_override_subsec {
+                        let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+                        let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+                        let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+                        ms * 1_000_000 + us * 1_000 + ns_v
+                    } else {
+                        bns
+                    },
+                )
+            };
         let time_part = localtime_parts_to_str(h, min, sec, ns);
         return Some(format!("{date_part}T{time_part}{tz}"));
     }
+    let tz = override_tz_str.unwrap_or_else(|| "Z".to_string());
     let h = temporal_get_i(pairs, "hour").unwrap_or(0);
     let min = temporal_get_i(pairs, "minute").unwrap_or(0);
     let sec = temporal_get_i(pairs, "second");
@@ -12836,6 +12949,12 @@ fn temporal_parse_time(s: &str) -> Option<String> {
         normalize_tz(tz_raw)
     };
     Some(format!("{local}{tz}"))
+}
+
+/// Owned version of split_tz for use where borrowed lifetimes are inconvenient.
+fn split_tz_owned(s: &str) -> (String, String) {
+    let (b, t) = split_tz(s);
+    (b.to_owned(), t.to_owned())
 }
 
 /// Split a time or datetime string into (time_body, timezone_suffix).
