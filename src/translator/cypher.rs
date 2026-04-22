@@ -12474,7 +12474,10 @@ fn eval_comprehension_item(var: &str, val: &Expression, proj: &Expression) -> Op
                                 Literal::Null
                             }
                         }
-                        _ => Literal::Null,
+                        Literal::Null => Literal::Null,
+                        // Boolean → TypeError in Cypher; return None so the
+                        // runtime SPARQL path raises the error instead.
+                        _ => return None,
                     };
                     Some(serialize_list_element(&Expression::Literal(result)))
                 }
@@ -12489,7 +12492,10 @@ fn eval_comprehension_item(var: &str, val: &Expression, proj: &Expression) -> Op
                                 Literal::Null
                             }
                         }
-                        _ => Literal::Null,
+                        Literal::Null => Literal::Null,
+                        // Boolean → TypeError in Cypher; return None so the
+                        // runtime SPARQL path raises the error instead.
+                        _ => return None,
                     };
                     Some(serialize_list_element(&Expression::Literal(result)))
                 }
