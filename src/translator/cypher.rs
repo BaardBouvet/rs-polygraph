@@ -8263,6 +8263,17 @@ impl TranslationState {
                         }
                         // If the variable was created in skip_writes mode, return static labels.
                         if name_lower == "labels" {
+                            // Path and relationship variables are invalid for labels().
+                            if self.path_hops.contains_key(v.as_str()) {
+                                return Err(PolygraphError::Translation {
+                                    message: "SyntaxError: InvalidArgumentType: labels() does not apply to path variables".to_string(),
+                                });
+                            }
+                            if self.edge_map.contains_key(v.as_str()) {
+                                return Err(PolygraphError::Translation {
+                                    message: "SyntaxError: InvalidArgumentType: labels() does not apply to relationship variables".to_string(),
+                                });
+                            }
                             if let Some(labels) = self.node_labels_from_create.get(v.as_str()).cloned() {
                                 let list_str = if labels.is_empty() {
                                     "[]".to_string()
@@ -8272,6 +8283,90 @@ impl TranslationState {
                                 };
                                 return Ok(SparExpr::Literal(SparLit::new_simple_literal(list_str)));
                             }
+                            // Dynamic labels query: generate a GROUP BY subquery that
+                            // collects all rdf:type values for the node from the graph.
+                            // This correctly reflects label additions/removals done via
+                            // SET/REMOVE write clauses that ran before this SELECT.
+                            let var_name = v.clone();
+                            let n_var = Variable::new_unchecked(var_name.clone());
+                            let ltype_var = self.fresh_var(&format!("__ltype_{var_name}"));
+                            let gc_var = self.fresh_var(&format!("__labels_gc_{var_name}"));
+                            let base = self.base_iri.clone();
+                            let base_len = base.len();
+                            let rdf_type_nn = NamedNode::new_unchecked(RDF_TYPE);
+                            use spargebra::term::NamedNodePattern;
+                            // Inner: ?n rdf:type ?__ltype . FILTER(STRSTARTS(STR(?__ltype), BASE))
+                            let inner_bgp = GraphPattern::Bgp {
+                                patterns: vec![TriplePattern {
+                                    subject: TermPattern::Variable(n_var.clone()),
+                                    predicate: NamedNodePattern::NamedNode(rdf_type_nn),
+                                    object: TermPattern::Variable(ltype_var.clone()),
+                                }],
+                            };
+                            let filter_expr = SparExpr::FunctionCall(
+                                spargebra::algebra::Function::StrStarts,
+                                vec![
+                                    SparExpr::FunctionCall(
+                                        spargebra::algebra::Function::Str,
+                                        vec![SparExpr::Variable(ltype_var.clone())],
+                                    ),
+                                    SparExpr::Literal(SparLit::new_simple_literal(base)),
+                                ],
+                            );
+                            let inner_filtered = GraphPattern::Filter {
+                                expr: filter_expr,
+                                inner: Box::new(inner_bgp),
+                            };
+                            // Label name expression: single-quoted label string
+                            //   CONCAT("'", SUBSTR(STR(?ltype), base_len + 1), "'")
+                            let label_name = SparExpr::FunctionCall(
+                                spargebra::algebra::Function::SubStr,
+                                vec![
+                                    SparExpr::FunctionCall(
+                                        spargebra::algebra::Function::Str,
+                                        vec![SparExpr::Variable(ltype_var.clone())],
+                                    ),
+                                    SparExpr::Literal(SparLit::new_typed_literal(
+                                        (base_len + 1).to_string(),
+                                        NamedNode::new_unchecked(XSD_INTEGER),
+                                    )),
+                                ],
+                            );
+                            let quoted_label = SparExpr::FunctionCall(
+                                spargebra::algebra::Function::Concat,
+                                vec![
+                                    SparExpr::Literal(SparLit::new_simple_literal("'")),
+                                    label_name,
+                                    SparExpr::Literal(SparLit::new_simple_literal("'")),
+                                ],
+                            );
+                            let gc_agg = AggregateExpression::FunctionCall {
+                                name: AggregateFunction::GroupConcat {
+                                    separator: Some(", ".to_string()),
+                                },
+                                expr: quoted_label,
+                                distinct: true,
+                            };
+                            let group_pattern = GraphPattern::Group {
+                                inner: Box::new(inner_filtered),
+                                variables: vec![n_var],
+                                aggregates: vec![(gc_var.clone(), gc_agg)],
+                            };
+                            self.pending_subqueries.push((gc_var.clone(), group_pattern));
+                            // Result: IF(BOUND(?gc), CONCAT("[", ?gc, "]"), "[]")
+                            let result_expr = SparExpr::If(
+                                Box::new(SparExpr::Bound(gc_var.clone())),
+                                Box::new(SparExpr::FunctionCall(
+                                    spargebra::algebra::Function::Concat,
+                                    vec![
+                                        SparExpr::Literal(SparLit::new_simple_literal("[")),
+                                        SparExpr::Variable(gc_var),
+                                        SparExpr::Literal(SparLit::new_simple_literal("]")),
+                                    ],
+                                )),
+                                Box::new(SparExpr::Literal(SparLit::new_simple_literal("[]"))),
+                            );
+                            return Ok(result_expr);
                         }
                     }
                     _ => {}
