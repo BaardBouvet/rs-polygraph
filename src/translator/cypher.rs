@@ -1978,6 +1978,10 @@ struct TranslationState {
     /// WITH alias → string lexical value of the literal it was bound to.
     /// Used to fold expressions like `date(toString(alias))` at compile time.
     with_lit_vars: std::collections::HashMap<String, String>,
+    /// Filter conditions emitted by translate_node_pattern_with_term when a
+    /// property expression is too complex for an inline TermPattern object.
+    /// The caller must drain and apply these after translating the pattern.
+    pending_prop_filters: Vec<SparExpr>,
 }
 
 impl TranslationState {
@@ -2018,6 +2022,7 @@ impl TranslationState {
             set_tracked_vars: Default::default(),
             remove_tracked_labels: Default::default(),
             with_lit_vars: Default::default(),
+            pending_prop_filters: Vec::new(),
         }
     }
 
@@ -2979,19 +2984,61 @@ impl TranslationState {
                         }
 
                         // Property-access triples in WITH must be OPTIONAL.
-                        for tp in with_triples {
-                            current = GraphPattern::LeftJoin {
-                                left: Box::new(current),
-                                right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
-                                expression: None,
-                            };
+                        // When the triple's predicate is rdf:reifies, the NEXT triple
+                        // (the actual property access on the reification node) MUST live
+                        // in the SAME OPTIONAL block; otherwise the reification variable
+                        // is unbound in the second OPTIONAL and acts as a wildcard.
+                        {
+                            const RDF_REIFIES: &str =
+                                "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+                            let mut i = 0;
+                            while i < with_triples.len() {
+                                let tp = with_triples[i].clone();
+                                let is_reifies = matches!(
+                                    &tp.predicate,
+                                    spargebra::term::NamedNodePattern::NamedNode(nn)
+                                        if nn.as_str() == RDF_REIFIES
+                                );
+                                let group_end =
+                                    if is_reifies && i + 1 < with_triples.len() {
+                                        i + 2
+                                    } else {
+                                        i + 1
+                                    };
+                                let group: Vec<TriplePattern> =
+                                    with_triples[i..group_end].to_vec();
+                                i = group_end;
+                                current = GraphPattern::LeftJoin {
+                                    left: Box::new(current),
+                                    right: Box::new(GraphPattern::Bgp { patterns: group }),
+                                    expression: None,
+                                };
+                            }
                         }
                         // Flush extra triples from expression translation.
                         if !extra_triples.is_empty() {
-                            for tp in extra_triples.drain(..) {
+                            const RDF_REIFIES: &str =
+                                "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+                            let drained: Vec<TriplePattern> = extra_triples.drain(..).collect();
+                            let mut i = 0;
+                            while i < drained.len() {
+                                let tp = drained[i].clone();
+                                let is_reifies = matches!(
+                                    &tp.predicate,
+                                    spargebra::term::NamedNodePattern::NamedNode(nn)
+                                        if nn.as_str() == RDF_REIFIES
+                                );
+                                let group_end =
+                                    if is_reifies && i + 1 < drained.len() {
+                                        i + 2
+                                    } else {
+                                        i + 1
+                                    };
+                                let group: Vec<TriplePattern> = drained[i..group_end].to_vec();
+                                i = group_end;
                                 current = GraphPattern::LeftJoin {
                                     left: Box::new(current),
-                                    right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
+                                    right: Box::new(GraphPattern::Bgp { patterns: group }),
                                     expression: None,
                                 };
                             }
@@ -3079,11 +3126,31 @@ impl TranslationState {
                             let filter_expr =
                                 self.translate_expr(&wc.expression, &mut extra_triples)?;
                             // Apply any property-access triples needed by WHERE as OPTIONAL joins.
+                            // Group rdf:reifies triples with their following property-access triple
+                            // into a single OPTIONAL block.
                             if !extra_triples.is_empty() {
-                                for tp in extra_triples.drain(..) {
+                                const RDF_REIFIES: &str =
+                                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+                                let drained: Vec<TriplePattern> = extra_triples.drain(..).collect();
+                                let mut i = 0;
+                                while i < drained.len() {
+                                    let tp = drained[i].clone();
+                                    let is_reifies = matches!(
+                                        &tp.predicate,
+                                        spargebra::term::NamedNodePattern::NamedNode(nn)
+                                            if nn.as_str() == RDF_REIFIES
+                                    );
+                                    let group_end =
+                                        if is_reifies && i + 1 < drained.len() {
+                                            i + 2
+                                        } else {
+                                            i + 1
+                                        };
+                                    let group: Vec<TriplePattern> = drained[i..group_end].to_vec();
+                                    i = group_end;
                                     current = GraphPattern::LeftJoin {
                                         left: Box::new(current),
-                                        right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
+                                        right: Box::new(GraphPattern::Bgp { patterns: group }),
                                         expression: None,
                                     };
                                 }
@@ -3532,8 +3599,33 @@ impl TranslationState {
                         // If the triple's subject is a nullable variable (from OPTIONAL MATCH),
                         // wrap in a sub-SELECT with FILTER(BOUND(?subj)) to prevent the
                         // unbound variable from acting as a wildcard when unbound.
-                        for tp in return_triples {
-                            let right = if let TermPattern::Variable(subj_var) = &tp.subject.clone()
+                        //
+                        // Relationship properties in RDF-star mode produce TWO consecutive
+                        // triples with the same fresh subject (reif_var):
+                        //   1. ?reif rdf:reifies << src pred dst >>
+                        //   2. ?reif <prop> ?result
+                        // These must be wrapped in ONE OPTIONAL block together, otherwise the
+                        // second triple's ?reif is unbound and matches any subject with that property.
+                        // Detect this case by checking if the first triple's predicate is rdf:reifies.
+                        const RDF_REIFIES: &str =
+                            "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+                        let mut i = 0;
+                        while i < return_triples.len() {
+                            let tp = return_triples[i].clone();
+                            // Group rdf:reifies triple with its following property-access triple.
+                            let is_reifies = matches!(
+                                &tp.predicate,
+                                spargebra::term::NamedNodePattern::NamedNode(nn) if nn.as_str() == RDF_REIFIES
+                            );
+                            let group_end = if is_reifies && i + 1 < return_triples.len() {
+                                i + 2
+                            } else {
+                                i + 1
+                            };
+                            let group: Vec<TriplePattern> = return_triples[i..group_end].to_vec();
+                            i = group_end;
+                            // Determine the subject for nullable check (use first triple's subject).
+                            let right = if let TermPattern::Variable(subj_var) = &group[0].subject.clone()
                             {
                                 if self.nullable_vars.contains(subj_var.as_str()) {
                                     // Use type-guard approach: OPTIONAL { ?n rdf:type X . ?n <prop> ?val }
@@ -3544,12 +3636,12 @@ impl TranslationState {
                                         .get(subj_var.as_str())
                                         .cloned()
                                         .unwrap_or_default();
-                                    nullable_subject_optional(tp, subj_var.clone(), guards)
+                                    nullable_subject_optional(group[0].clone(), subj_var.clone(), guards)
                                 } else {
-                                    GraphPattern::Bgp { patterns: vec![tp] }
+                                    GraphPattern::Bgp { patterns: group }
                                 }
                             } else {
-                                GraphPattern::Bgp { patterns: vec![tp] }
+                                GraphPattern::Bgp { patterns: group }
                             };
                             current = GraphPattern::LeftJoin {
                                 left: Box::new(current),
@@ -3563,23 +3655,46 @@ impl TranslationState {
                     // inside aggregates.  They must be OPTIONAL to avoid filtering
                     // rows where the property doesn't exist (e.g. AVG(n.age) → null).
                     // If the triple's subject is nullable, add FILTER(BOUND) inside the OPTIONAL.
+                    // Group rdf:reifies triples with their following property-access triple
+                    // into a single OPTIONAL block to avoid unbinding the reification var.
                     if !extra_triples.is_empty() {
-                        for tp in extra_triples.drain(..) {
-                            let right = if let TermPattern::Variable(subj_var) = &tp.subject.clone()
-                            {
-                                if self.nullable_vars.contains(subj_var.as_str()) {
-                                    let guards = self
-                                        .nullable_type_guards
-                                        .get(subj_var.as_str())
-                                        .cloned()
-                                        .unwrap_or_default();
-                                    nullable_subject_optional(tp, subj_var.clone(), guards)
-                                } else {
-                                    GraphPattern::Bgp { patterns: vec![tp] }
-                                }
+                        const RDF_REIFIES: &str =
+                            "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+                        let drained: Vec<TriplePattern> = extra_triples.drain(..).collect();
+                        let mut i = 0;
+                        while i < drained.len() {
+                            let tp = drained[i].clone();
+                            let is_reifies = matches!(
+                                &tp.predicate,
+                                spargebra::term::NamedNodePattern::NamedNode(nn) if nn.as_str() == RDF_REIFIES
+                            );
+                            let group_end = if is_reifies && i + 1 < drained.len() {
+                                i + 2
                             } else {
-                                GraphPattern::Bgp { patterns: vec![tp] }
+                                i + 1
                             };
+                            let group: Vec<TriplePattern> = drained[i..group_end].to_vec();
+                            i = group_end;
+                            let right =
+                                if let TermPattern::Variable(subj_var) = &group[0].subject.clone()
+                                {
+                                    if self.nullable_vars.contains(subj_var.as_str()) {
+                                        let guards = self
+                                            .nullable_type_guards
+                                            .get(subj_var.as_str())
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        nullable_subject_optional(
+                                            group[0].clone(),
+                                            subj_var.clone(),
+                                            guards,
+                                        )
+                                    } else {
+                                        GraphPattern::Bgp { patterns: group }
+                                    }
+                                } else {
+                                    GraphPattern::Bgp { patterns: group }
+                                };
                             current = GraphPattern::LeftJoin {
                                 left: Box::new(current),
                                 right: Box::new(right),
@@ -4202,6 +4317,11 @@ impl TranslationState {
         let iso_filters = self.generate_iso_filters();
         combined = apply_filters(combined, iso_filters.into_iter());
 
+        // Apply any pending property-equality FILTERs generated by
+        // translate_node_pattern_with_term for complex inline property expressions.
+        let prop_filters: Vec<SparExpr> = std::mem::take(&mut self.pending_prop_filters);
+        combined = apply_filters(combined, prop_filters.into_iter());
+
         // Note: pending_match_filters (for re-used edge sameTerm constraints) are
         // NOT applied here — they are applied by the Clause::Match handler in
         // translate_query AFTER joining with the preceding match patterns, so that
@@ -4409,10 +4529,10 @@ impl TranslationState {
         // One triple per label: `?n rdf:type <base:Label>`
         // In skip_writes mode, skip labels that are being REMOVED (they won't
         // be present in the graph after the REMOVE UPDATE has run).
-        let skip_labels: std::collections::HashSet<&str> = if self.skip_write_clauses {
+        let skip_labels: std::collections::HashSet<String> = if self.skip_write_clauses {
             if let Some(ref vname) = node.variable {
                 if let Some(removed) = self.remove_tracked_labels.get(vname.as_str()) {
-                    removed.iter().map(|s| s.as_str()).collect()
+                    removed.iter().cloned().collect()
                 } else {
                     Default::default()
                 }
@@ -4442,12 +4562,42 @@ impl TranslationState {
             .unwrap_or(false);
         if let Some(props) = &node.properties {
             for (key, val_expr) in props {
-                let obj = self.expr_to_ground_term(val_expr)?;
-                triples.push(TriplePattern {
-                    subject: node_var.clone(),
-                    predicate: self.iri(key).into(),
-                    object: obj,
-                });
+                match self.expr_to_ground_term(val_expr) {
+                    Ok(obj) => {
+                        triples.push(TriplePattern {
+                            subject: node_var.clone(),
+                            predicate: self.iri(key).into(),
+                            object: obj,
+                        });
+                    }
+                    Err(_) => {
+                        // Complex expression (e.g., variable + literal, bound variable).
+                        // Add a fresh variable as the property value object, then store an
+                        // equality FILTER so the caller can apply it as a WHERE condition.
+                        let fresh = self.fresh_var(&format!("__prop_{key}"));
+                        triples.push(TriplePattern {
+                            subject: node_var.clone(),
+                            predicate: self.iri(key).into(),
+                            object: TermPattern::Variable(fresh.clone()),
+                        });
+                        let mut filter_extra: Vec<TriplePattern> = Vec::new();
+                        if let Ok(val_sparql) = self.translate_expr(val_expr, &mut filter_extra) {
+                            if !filter_extra.is_empty() {
+                                // Property access triples from the value expression — add to BGP
+                                triples.extend(filter_extra);
+                            }
+                            self.pending_prop_filters.push(SparExpr::Equal(
+                                Box::new(SparExpr::Variable(fresh)),
+                                Box::new(val_sparql),
+                            ));
+                        } else {
+                            return Err(PolygraphError::UnsupportedFeature {
+                                feature: "complex expression in inline property map (Phase 4)"
+                                    .to_string(),
+                            });
+                        }
+                    }
+                }
             }
         }
 
@@ -4796,13 +4946,19 @@ impl TranslationState {
             if reuse_eid.is_none() {
                 if let Some(ref var_name) = rel.variable {
                     let eid = Variable::new_unchecked(format!("__eid_{}", var_name));
+                    // Store the actual RDF subject/object order based on direction.
+                    // For Left, the relationship triple is (dst -> src), so swap.
+                    let (map_src, map_dst) = match rel.direction {
+                        Direction::Left => (dst.clone(), src.clone()),
+                        _ => (src.clone(), dst.clone()),
+                    };
                     self.edge_map.insert(
                         var_name.clone(),
                         EdgeInfo {
-                            src: src.clone(),
+                            src: map_src,
                             pred: NamedNode::new_unchecked("urn:polygraph:untyped"),
                             pred_var: Some(pred_var.clone()),
-                            dst: dst.clone(),
+                            dst: map_dst,
                             reif_var: None,
                             null_check_var: None,
                             eid_var: Some(eid),
@@ -5271,10 +5427,19 @@ impl TranslationState {
             self.edge_map.insert(
                 var_name.clone(),
                 EdgeInfo {
-                    src: src.clone(),
+                    // Use the actual RDF subject/object order (accounting for direction).
+                    // For Direction::Left, the arrow points left so the actual triple is
+                    // `dst -[pred]-> src` (right node is the RDF subject, left is object).
+                    src: match rel.direction {
+                        Direction::Left => dst.clone(),
+                        _ => src.clone(),
+                    },
                     pred: pred.clone(),
                     pred_var: None,
-                    dst: dst.clone(),
+                    dst: match rel.direction {
+                        Direction::Left => src.clone(),
+                        _ => dst.clone(),
+                    },
                     reif_var,
                     null_check_var: Some(marker),
                     eid_var: eid,
@@ -5294,10 +5459,15 @@ impl TranslationState {
 
                 if self.rdf_star {
                     let reif_var = self.fresh_var("__rdf12_reif");
+                    // Inline property patterns use the actual RDF subject/object order.
+                    let (prop_src, prop_dst) = match rel.direction {
+                        Direction::Left => (dst.clone(), src.clone()),
+                        _ => (src.clone(), dst.clone()),
+                    };
                     let extra = rdf_mapping::rdf_star::all_property_triples(
-                        src.clone(),
+                        prop_src,
                         spargebra::term::NamedNodePattern::NamedNode(pred.clone()),
-                        dst.clone(),
+                        prop_dst,
                         &prop_pairs,
                         reif_var,
                     );
@@ -5309,11 +5479,15 @@ impl TranslationState {
                         .and_then(|v| self.edge_map.get(v))
                         .and_then(|ei| ei.reif_var.clone())
                         .unwrap_or_else(|| self.fresh_var("reif"));
+                    let (prop_src, prop_dst) = match rel.direction {
+                        Direction::Left => (dst.clone(), src.clone()),
+                        _ => (src.clone(), dst.clone()),
+                    };
                     let extra = rdf_mapping::reification::all_triples(
                         &reif_var,
-                        src.clone(),
+                        prop_src,
                         pred.clone(),
-                        dst.clone(),
+                        prop_dst,
                         &prop_pairs,
                     );
                     triples.extend(extra);
