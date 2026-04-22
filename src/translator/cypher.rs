@@ -8097,6 +8097,149 @@ impl TranslationState {
                             }
                         }
                     }
+                    // size(keys(n)) / size(keys(r)) → COUNT of property keys via GROUP subquery
+                    if let Expression::FunctionCall { name: kname, args: kargs, .. } = arg {
+                        if kname.eq_ignore_ascii_case("keys") {
+                            if let Some(Expression::Variable(kv)) = kargs.first() {
+                                use spargebra::term::NamedNodePattern as NNP;
+                                let pred_v = self.fresh_var("__keys_pred");
+                                let val_v = self.fresh_var("__keys_val");
+                                let cnt_v = self.fresh_var("__keys_cnt");
+                                let base = self.base_iri.clone();
+                                let base_lit = SparExpr::Literal(SparLit::new_simple_literal(base.clone()));
+                                let str_pred = SparExpr::FunctionCall(
+                                    Function::Str,
+                                    vec![SparExpr::Variable(pred_v.clone())],
+                                );
+                                let strstarts_filt = SparExpr::FunctionCall(
+                                    Function::StrStarts,
+                                    vec![str_pred.clone(), base_lit],
+                                );
+                                let (inner_pat, group_var) = if let Some(edge) = self.edge_map.get(kv.as_str()).cloned() {
+                                    // Relationship: find property triples via reification lookup
+                                    let new_reif = self.fresh_var("__ks_reif");
+                                    let raw_bgp = if self.rdf_star {
+                                        let rdf_reifies = NamedNode::new_unchecked(
+                                            "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
+                                        );
+                                        let pred_pat = match edge.pred_var.clone() {
+                                            Some(pv) => NNP::Variable(pv),
+                                            None => NNP::NamedNode(edge.pred.clone()),
+                                        };
+                                        let edge_term = TermPattern::Triple(Box::new(
+                                            spargebra::term::TriplePattern {
+                                                subject: edge.src.clone(),
+                                                predicate: pred_pat,
+                                                object: edge.dst.clone(),
+                                            },
+                                        ));
+                                        GraphPattern::Bgp {
+                                            patterns: vec![
+                                                TriplePattern {
+                                                    subject: TermPattern::Variable(new_reif.clone()),
+                                                    predicate: NNP::NamedNode(rdf_reifies),
+                                                    object: edge_term,
+                                                },
+                                                TriplePattern {
+                                                    subject: TermPattern::Variable(new_reif.clone()),
+                                                    predicate: NNP::Variable(pred_v.clone()),
+                                                    object: TermPattern::Variable(val_v),
+                                                },
+                                            ],
+                                        }
+                                    } else {
+                                        let rdf_subject = NamedNode::new_unchecked(
+                                            "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject",
+                                        );
+                                        let rdf_predicate = NamedNode::new_unchecked(
+                                            "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate",
+                                        );
+                                        let rdf_object = NamedNode::new_unchecked(
+                                            "http://www.w3.org/1999/02/22-rdf-syntax-ns#object",
+                                        );
+                                        let pred_obj = match edge.pred_var.clone() {
+                                            Some(pv) => TermPattern::Variable(pv),
+                                            None => TermPattern::NamedNode(edge.pred.clone()),
+                                        };
+                                        GraphPattern::Bgp {
+                                            patterns: vec![
+                                                TriplePattern {
+                                                    subject: TermPattern::Variable(new_reif.clone()),
+                                                    predicate: NNP::NamedNode(rdf_subject),
+                                                    object: edge.src.clone(),
+                                                },
+                                                TriplePattern {
+                                                    subject: TermPattern::Variable(new_reif.clone()),
+                                                    predicate: NNP::NamedNode(rdf_predicate),
+                                                    object: pred_obj,
+                                                },
+                                                TriplePattern {
+                                                    subject: TermPattern::Variable(new_reif.clone()),
+                                                    predicate: NNP::NamedNode(rdf_object),
+                                                    object: edge.dst.clone(),
+                                                },
+                                                TriplePattern {
+                                                    subject: TermPattern::Variable(new_reif.clone()),
+                                                    predicate: NNP::Variable(pred_v.clone()),
+                                                    object: TermPattern::Variable(val_v),
+                                                },
+                                            ],
+                                        }
+                                    };
+                                    let filtered = GraphPattern::Filter {
+                                        expr: strstarts_filt,
+                                        inner: Box::new(raw_bgp),
+                                    };
+                                    let grp = edge.eid_var.clone()
+                                        .or_else(|| edge.null_check_var.clone())
+                                        .unwrap_or_else(|| Variable::new_unchecked(kv.clone()));
+                                    (filtered, grp)
+                                } else {
+                                    // Node: ?n ?pred ?val with rdf:type / __node excluded
+                                    let node_var = Variable::new_unchecked(kv.clone());
+                                    let sentinel_iri = format!("{base}__node");
+                                    let sentinel_lit = SparExpr::Literal(SparLit::new_simple_literal(sentinel_iri));
+                                    let rdf_type_lit = SparExpr::Literal(SparLit::new_simple_literal(RDF_TYPE.to_string()));
+                                    let not_sentinel = SparExpr::Not(Box::new(SparExpr::Equal(
+                                        Box::new(str_pred.clone()),
+                                        Box::new(sentinel_lit),
+                                    )));
+                                    let not_type = SparExpr::Not(Box::new(SparExpr::Equal(
+                                        Box::new(str_pred.clone()),
+                                        Box::new(rdf_type_lit),
+                                    )));
+                                    let bgp = GraphPattern::Bgp {
+                                        patterns: vec![TriplePattern {
+                                            subject: TermPattern::Variable(node_var.clone()),
+                                            predicate: NNP::Variable(pred_v.clone()),
+                                            object: TermPattern::Variable(val_v),
+                                        }],
+                                    };
+                                    let full_filter = SparExpr::And(
+                                        Box::new(strstarts_filt),
+                                        Box::new(SparExpr::And(Box::new(not_sentinel), Box::new(not_type))),
+                                    );
+                                    let filtered = GraphPattern::Filter {
+                                        expr: full_filter,
+                                        inner: Box::new(bgp),
+                                    };
+                                    (filtered, node_var)
+                                };
+                                let count_agg = AggregateExpression::CountSolutions { distinct: false };
+                                let subquery = GraphPattern::Group {
+                                    inner: Box::new(inner_pat),
+                                    variables: vec![group_var],
+                                    aggregates: vec![(cnt_v.clone(), count_agg)],
+                                };
+                                self.pending_subqueries.push((cnt_v.clone(), subquery));
+                                let zero = SparExpr::Literal(SparLit::new_typed_literal(
+                                    "0",
+                                    NamedNode::new_unchecked(XSD_INTEGER),
+                                ));
+                                return Ok(SparExpr::Coalesce(vec![SparExpr::Variable(cnt_v), zero]));
+                            }
+                        }
+                    }
                     let translated = self.translate_expr(arg, extra)?;
                     Ok(SparExpr::FunctionCall(Function::StrLen, vec![translated]))
                 } else {
@@ -9271,6 +9414,194 @@ impl TranslationState {
                                 current,
                                 extra,
                             );
+                        }
+                    }
+                    // UNWIND keys(n) AS x → expand one row per property key.
+                    // Handles both node variables and relationship variables.
+                    if name.eq_ignore_ascii_case("keys") && args.len() == 1 {
+                        if let Some(Expression::Variable(var_name)) = args.first() {
+                            let keys_var = Variable::new_unchecked(u.variable.clone());
+                            let pred_v = self.fresh_var("__keys_pred");
+                            let val_v = self.fresh_var("__keys_val");
+                            let base = self.base_iri.clone();
+                            let base_len = base.len();
+                            use spargebra::algebra::Function;
+                            use spargebra::term::NamedNodePattern;
+                            let is_nullable = self.nullable_vars.contains(var_name.as_str())
+                                || self.null_vars.contains(var_name.as_str());
+                            if let Some(edge) = self.edge_map.get(var_name.as_str()).cloned() {
+                                // Relationship variable: expand one row per edge property key.
+                                let new_reif = self.fresh_var("__keys_reif");
+                                let bgp = if self.rdf_star {
+                                    // RDF-star: ?new_reif rdf:reifies << src pred dst >> . ?new_reif ?pred ?val
+                                    let rdf_reifies = NamedNode::new_unchecked(
+                                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
+                                    );
+                                    let pred_pat = match edge.pred_var.clone() {
+                                        Some(pv) => NamedNodePattern::Variable(pv),
+                                        None => NamedNodePattern::NamedNode(edge.pred.clone()),
+                                    };
+                                    let edge_term = TermPattern::Triple(Box::new(
+                                        spargebra::term::TriplePattern {
+                                            subject: edge.src.clone(),
+                                            predicate: pred_pat,
+                                            object: edge.dst.clone(),
+                                        },
+                                    ));
+                                    GraphPattern::Bgp {
+                                        patterns: vec![
+                                            TriplePattern {
+                                                subject: TermPattern::Variable(new_reif.clone()),
+                                                predicate: NamedNodePattern::NamedNode(rdf_reifies),
+                                                object: edge_term,
+                                            },
+                                            TriplePattern {
+                                                subject: TermPattern::Variable(new_reif.clone()),
+                                                predicate: NamedNodePattern::Variable(pred_v.clone()),
+                                                object: TermPattern::Variable(val_v),
+                                            },
+                                        ],
+                                    }
+                                } else {
+                                    // RDF reification: ?new_reif rdf:subject src; rdf:predicate pred; rdf:object dst; ?pred ?val
+                                    let rdf_subject = NamedNode::new_unchecked(
+                                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject",
+                                    );
+                                    let rdf_predicate = NamedNode::new_unchecked(
+                                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate",
+                                    );
+                                    let rdf_object = NamedNode::new_unchecked(
+                                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#object",
+                                    );
+                                    let pred_obj = match edge.pred_var.clone() {
+                                        Some(pv) => TermPattern::Variable(pv),
+                                        None => TermPattern::NamedNode(edge.pred.clone()),
+                                    };
+                                    GraphPattern::Bgp {
+                                        patterns: vec![
+                                            TriplePattern {
+                                                subject: TermPattern::Variable(new_reif.clone()),
+                                                predicate: NamedNodePattern::NamedNode(rdf_subject),
+                                                object: edge.src.clone(),
+                                            },
+                                            TriplePattern {
+                                                subject: TermPattern::Variable(new_reif.clone()),
+                                                predicate: NamedNodePattern::NamedNode(rdf_predicate),
+                                                object: pred_obj,
+                                            },
+                                            TriplePattern {
+                                                subject: TermPattern::Variable(new_reif.clone()),
+                                                predicate: NamedNodePattern::NamedNode(rdf_object),
+                                                object: edge.dst.clone(),
+                                            },
+                                            TriplePattern {
+                                                subject: TermPattern::Variable(new_reif.clone()),
+                                                predicate: NamedNodePattern::Variable(pred_v.clone()),
+                                                object: TermPattern::Variable(val_v),
+                                            },
+                                        ],
+                                    }
+                                };
+                                let base_lit = SparExpr::Literal(SparLit::new_simple_literal(base.clone()));
+                                let str_pred = SparExpr::FunctionCall(
+                                    Function::Str,
+                                    vec![SparExpr::Variable(pred_v.clone())],
+                                );
+                                let strstarts = SparExpr::FunctionCall(
+                                    Function::StrStarts,
+                                    vec![str_pred.clone(), base_lit],
+                                );
+                                let filter_expr = if is_nullable {
+                                    let marker = edge
+                                        .null_check_var
+                                        .clone()
+                                        .or_else(|| edge.pred_var.clone())
+                                        .map(SparExpr::Variable);
+                                    if let Some(m) = marker {
+                                        SparExpr::And(Box::new(SparExpr::Bound(
+                                            // extract Variable from SparExpr::Variable
+                                            if let SparExpr::Variable(ref v) = m { v.clone() } else { pred_v.clone() }
+                                        )), Box::new(strstarts))
+                                    } else {
+                                        strstarts
+                                    }
+                                } else {
+                                    strstarts
+                                };
+                                let inner = GraphPattern::Filter { expr: filter_expr, inner: Box::new(bgp) };
+                                let key_expr = SparExpr::FunctionCall(
+                                    Function::SubStr,
+                                    vec![
+                                        str_pred,
+                                        SparExpr::Literal(SparLit::new_typed_literal(
+                                            (base_len + 1).to_string(),
+                                            NamedNode::new_unchecked(XSD_INTEGER),
+                                        )),
+                                    ],
+                                );
+                                let extended = GraphPattern::Extend {
+                                    inner: Box::new(inner),
+                                    variable: keys_var,
+                                    expression: key_expr,
+                                };
+                                return Ok(join_patterns(current, extended));
+                            }
+                            // Node variable: ?n ?__keys_pred ?__keys_val
+                            // FILTER( STRSTARTS(STR(?pred), BASE) && != __node && != rdf:type )
+                            // BIND( SUBSTR(STR(?pred), base_len+1) AS ?x )
+                            let node_v = Variable::new_unchecked(var_name.clone());
+                            let sentinel_iri = format!("{base}__node");
+                            // BGP: ?n ?__keys_pred ?__keys_val
+                            let triple = TriplePattern {
+                                subject: TermPattern::Variable(node_v.clone()),
+                                predicate: NamedNodePattern::Variable(pred_v.clone()),
+                                object: TermPattern::Variable(val_v),
+                            };
+                            let bgp = GraphPattern::Bgp { patterns: vec![triple] };
+                            // FILTER: within base namespace, not sentinel, not rdf:type
+                            let base_lit = SparExpr::Literal(SparLit::new_simple_literal(base.clone()));
+                            let rdf_type_lit = SparExpr::Literal(SparLit::new_simple_literal(RDF_TYPE.to_string()));
+                            let sentinel_lit = SparExpr::Literal(SparLit::new_simple_literal(sentinel_iri));
+                            let str_pred = SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(pred_v.clone())]);
+                            let strstarts = SparExpr::FunctionCall(Function::StrStarts, vec![str_pred.clone(), base_lit]);
+                            let not_sentinel = SparExpr::Not(Box::new(SparExpr::Equal(Box::new(str_pred.clone()), Box::new(sentinel_lit))));
+                            let not_type = SparExpr::Not(Box::new(SparExpr::Equal(Box::new(str_pred.clone()), Box::new(rdf_type_lit))));
+                            let filter_expr = SparExpr::And(
+                                Box::new(strstarts),
+                                Box::new(SparExpr::And(Box::new(not_sentinel), Box::new(not_type))),
+                            );
+                            // Guard nullable n
+                            let inner = if is_nullable {
+                                GraphPattern::Filter {
+                                    expr: SparExpr::And(
+                                        Box::new(SparExpr::Bound(node_v.clone())),
+                                        Box::new(filter_expr),
+                                    ),
+                                    inner: Box::new(bgp),
+                                }
+                            } else {
+                                GraphPattern::Filter {
+                                    expr: filter_expr,
+                                    inner: Box::new(bgp),
+                                }
+                            };
+                            // BIND: SUBSTR(STR(?pred), base_len+1) AS ?x
+                            let key_expr = SparExpr::FunctionCall(
+                                Function::SubStr,
+                                vec![
+                                    SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(pred_v)]),
+                                    SparExpr::Literal(SparLit::new_typed_literal(
+                                        (base_len + 1).to_string(),
+                                        NamedNode::new_unchecked(XSD_INTEGER),
+                                    )),
+                                ],
+                            );
+                            let extended = GraphPattern::Extend {
+                                inner: Box::new(inner),
+                                variable: keys_var,
+                                expression: key_expr,
+                            };
+                            return Ok(join_patterns(current, extended));
                         }
                     }
                 }
