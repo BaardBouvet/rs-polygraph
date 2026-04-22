@@ -9150,7 +9150,16 @@ impl TranslationState {
                 // e.g. `WITH date({year:1984,...}) AS d … date(d)` → the same literal.
                 if let Some(Expression::Variable(v)) = args.first() {
                     if let Some(s) = self.with_lit_vars.get(v.as_str()).cloned() {
-                        let folded = vec![Expression::Literal(Literal::String(s))];
+                        // For time(): strip the named timezone bracket since time()
+                        // values only carry numeric offsets (no [Region/City]).
+                        let effective_s = if name_lower == "time" {
+                            temporal_parse_time(&s)
+                                .map(|t| strip_named_tz(&t))
+                                .unwrap_or(s.clone())
+                        } else {
+                            s.clone()
+                        };
+                        let folded = vec![Expression::Literal(Literal::String(effective_s))];
                         return self.translate_function_call(name, &folded, extra);
                     }
                 }
@@ -12268,11 +12277,12 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
             .as_deref()
             .and_then(|tz| parse_tz_offset_s(tz))
             .unwrap_or(base_tz_s);
+        // For time() values, named timezone brackets are stripped; only numeric offsets remain.
         let tz_str = new_tz_str.unwrap_or_else(|| {
             if tz_raw_base.is_empty() {
                 "Z".to_owned()
             } else {
-                normalize_tz(tz_raw_base)
+                strip_named_tz(&normalize_tz(tz_raw_base))
             }
         });
 
@@ -12955,6 +12965,23 @@ fn temporal_parse_time(s: &str) -> Option<String> {
 fn split_tz_owned(s: &str) -> (String, String) {
     let (b, t) = split_tz(s);
     (b.to_owned(), t.to_owned())
+}
+
+/// Strip a bracket-named timezone from a TZ string, keeping only the numeric offset.
+/// "+01:00[Europe/Stockholm]" → "+01:00"
+/// "[Europe/London]" → "Z"
+/// "+05:00" → "+05:00"  (unchanged)
+fn strip_named_tz(tz: &str) -> String {
+    if let Some(brk) = tz.find('[') {
+        let offset = &tz[..brk];
+        if offset.is_empty() || offset == "Z" {
+            "Z".to_owned()
+        } else {
+            offset.to_owned()
+        }
+    } else {
+        tz.to_owned()
+    }
 }
 
 /// Split a time or datetime string into (time_body, timezone_suffix).
