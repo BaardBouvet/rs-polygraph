@@ -9384,10 +9384,10 @@ impl TranslationState {
                     "duration.inseconds" => temporal_duration_in_seconds(&lhs_str, &rhs_str),
                     _ => unreachable!(),
                 };
-                let xsd_dur =
-                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#duration");
+                // Return as a plain string literal so Oxigraph doesn't
+                // normalize the duration representation (e.g. PT269112H → P11213D).
                 match result_opt {
-                    Some(s) => Ok(SparExpr::Literal(SparLit::new_typed_literal(s, xsd_dur))),
+                    Some(s) => Ok(SparExpr::Literal(SparLit::new_simple_literal(s))),
                     None => Ok(SparExpr::Variable(self.fresh_var("null"))),
                 }
             }
@@ -13723,13 +13723,21 @@ fn temporal_duration_in_months(lhs: &str, rhs: &str) -> Option<String> {
 }
 
 /// Compute `duration.inDays(lhs, rhs)`.
+/// Returns the truncated whole-day difference, accounting for time-of-day.
 fn temporal_duration_in_days(lhs: &str, rhs: &str) -> Option<String> {
     let l = temporal_to_val(lhs)?;
     let r = temporal_to_val(rhs)?;
     if !l.has_date || !r.has_date {
         return Some("PT0S".to_string());
     }
-    let days = temporal_epoch(r.year, r.month, r.day) - temporal_epoch(l.year, l.month, l.day);
+    let use_utc = l.has_tz && r.has_tz;
+    let l_t = if l.has_time { tempo_time(&l, use_utc) } else { 0 };
+    let r_t = if r.has_time { tempo_time(&r, use_utc) } else { 0 };
+    let l_epoch_ns = temporal_epoch(l.year, l.month, l.day) as i128 * DAY_NS;
+    let r_epoch_ns = temporal_epoch(r.year, r.month, r.day) as i128 * DAY_NS;
+    // Truncate total ns toward zero to get whole days.
+    let total_diff_ns = (r_epoch_ns + r_t) - (l_epoch_ns + l_t);
+    let days = (total_diff_ns / DAY_NS) as i64;  // truncates toward zero
     if days == 0 { return Some("PT0S".to_string()); }
     Some(format!("P{days}D"))
 }
