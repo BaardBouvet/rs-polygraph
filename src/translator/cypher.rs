@@ -11355,6 +11355,8 @@ fn tc_tz_suffix_month(tz: &str, month: i64) -> String {
         "America/Los_Angeles" | "America/San_Francisco" => ("-08:00", "-07:00"),
         "Asia/Tokyo" => ("+09:00", "+09:00"), // Japan no DST
         "Asia/Shanghai" | "Asia/Beijing" | "Asia/Hong_Kong" => ("+08:00", "+08:00"),
+        "Pacific/Honolulu" | "Pacific/Johnston" => ("-10:00", "-10:00"), // Hawaii, no DST
+        "Australia/Eucla" => ("+08:45", "+08:45"), // Western Central Standard Time, no DST
         _ => ("Z", "Z"),
     };
     let offset = if is_summer { summer } else { winter };
