@@ -3576,6 +3576,55 @@ impl TranslationState {
                                             },
                                             _ => None,
                                         };
+                                        // Also evaluate duration.between/inMonths/inDays/inSeconds
+                                        // when both arguments are WITH-bound literals.
+                                        let lit_opt = lit_opt.or_else(|| {
+                                            if base == "duration.between"
+                                                || base == "duration.inmonths"
+                                                || base == "duration.indays"
+                                                || base == "duration.inseconds"
+                                            {
+                                                if fargs.len() >= 2 {
+                                                    // Helper to get a literal string from a temporal expression.
+                                                    let eval_temporal = |e: &Expression| -> Option<String> {
+                                                        match e {
+                                                            Expression::Literal(crate::ast::cypher::Literal::String(s)) => Some(s.clone()),
+                                                            Expression::Variable(v) => {
+                                                                prev_lit_vars.get(v.as_str())
+                                                                    .or_else(|| self.with_lit_vars.get(v.as_str()))
+                                                                    .cloned()
+                                                            }
+                                                            Expression::FunctionCall { name: fn_name, args: fn_args, .. } => {
+                                                                let fn_lower = fn_name.to_lowercase();
+                                                                match (fn_lower.as_str(), fn_args.first()) {
+                                                                    ("localdatetime", Some(Expression::Literal(crate::ast::cypher::Literal::String(s)))) => temporal_parse_localdatetime(s),
+                                                                    ("localdatetime", Some(Expression::Map(pairs))) => temporal_localdatetime_from_map(pairs),
+                                                                    ("datetime", Some(Expression::Literal(crate::ast::cypher::Literal::String(s)))) => temporal_parse_datetime(s),
+                                                                    ("datetime", Some(Expression::Map(pairs))) => temporal_datetime_from_map(pairs),
+                                                                    ("date", Some(Expression::Literal(crate::ast::cypher::Literal::String(s)))) => temporal_parse_date(s),
+                                                                    ("date", Some(Expression::Map(pairs))) => temporal_date_from_map(pairs),
+                                                                    ("time", Some(Expression::Literal(crate::ast::cypher::Literal::String(s)))) => temporal_parse_time(s),
+                                                                    ("time", Some(Expression::Map(pairs))) => temporal_time_from_map(pairs),
+                                                                    ("localtime", Some(Expression::Literal(crate::ast::cypher::Literal::String(s)))) => temporal_parse_localtime(s),
+                                                                    ("localtime", Some(Expression::Map(pairs))) => temporal_localtime_from_map(pairs),
+                                                                    _ => None,
+                                                                }
+                                                            }
+                                                            _ => None,
+                                                        }
+                                                    };
+                                                    let lhs = eval_temporal(&fargs[0])?;
+                                                    let rhs = eval_temporal(&fargs[1])?;
+                                                    match base {
+                                                        "duration.between" => temporal_duration_between(&lhs, &rhs),
+                                                        "duration.inmonths" => temporal_duration_in_months(&lhs, &rhs),
+                                                        "duration.indays" => temporal_duration_in_days(&lhs, &rhs),
+                                                        "duration.inseconds" => temporal_duration_in_seconds(&lhs, &rhs),
+                                                        _ => None,
+                                                    }
+                                                } else { None }
+                                            } else { None }
+                                        });
                                         if let Some(s) = lit_opt {
                                             self.with_lit_vars.insert(alias, s);
                                         }
@@ -6120,6 +6169,18 @@ impl TranslationState {
                     let sparql_expr = self.translate_expr(&prop_val, extra)?;
                     return Ok((result_var, None, Some(sparql_expr)));
                 }
+                // Check if base var is a compile-time duration literal → extract component.
+                if let Some(dur_str) = self.with_lit_vars.get(var_name.as_str()).cloned() {
+                    if dur_str.starts_with('P') || dur_str.starts_with("-P") {
+                        if let Some(val_str) = duration_get_component(&dur_str, key.as_str()) {
+                            let int_lit = SparLit::new_typed_literal(
+                                val_str,
+                                NamedNode::new_unchecked(XSD_INTEGER),
+                            );
+                            return Ok((result_var, None, Some(SparExpr::Literal(int_lit))));
+                        }
+                    }
+                }
                 // Check whether base_var is a relationship variable.
                 if let Some(edge) = self.edge_map.get(&var_name).cloned() {
                     let prop_iri = self.iri(key);
@@ -6498,6 +6559,17 @@ impl TranslationState {
                 if let Some(key_map) = self.map_vars.get(&var_name) {
                     if let Some(v) = key_map.get(key.as_str()).cloned() {
                         return Ok(SparExpr::Variable(v));
+                    }
+                }
+                // Check if base is a compile-time duration literal → extract component.
+                if let Some(dur_str) = self.with_lit_vars.get(var_name.as_str()).cloned() {
+                    if dur_str.starts_with('P') || dur_str.starts_with("-P") {
+                        if let Some(val_str) = duration_get_component(&dur_str, key.as_str()) {
+                            return Ok(SparExpr::Literal(SparLit::new_typed_literal(
+                                val_str,
+                                NamedNode::new_unchecked(XSD_INTEGER),
+                            )));
+                        }
                     }
                 }
                 // Check if this property was already projected by the surrounding WITH clause.
@@ -12594,6 +12666,97 @@ fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> 
         Some(s) => format!("{h:02}:{min:02}:{s:02}{frac}"),
     };
     Some(format!("{date_part}T{time_part}{tz}"))
+}
+
+/// Parsed components of an ISO 8601 duration like `P12Y5M14DT16H13M10.5S`.
+struct ParsedDuration {
+    years: i64, months: i64, days: i64,
+    hours: i64, minutes: i64, seconds: i64, subsec_ns: i64,
+}
+
+/// Parse an ISO 8601 duration string into its numeric components.
+/// Returns None if the string is not a valid duration.
+fn parse_duration_components(s: &str) -> Option<ParsedDuration> {
+    if !s.starts_with('P') { return None; }
+    let body = &s[1..];
+    let t_pos = body.find('T');
+    let date_str = t_pos.map_or(body, |p| &body[..p]);
+    let time_str = t_pos.map_or("", |p| &body[p + 1..]);
+
+    let parse_part = |part: &str, units: &[char]| -> Vec<f64> {
+        let mut vals = vec![0.0f64; units.len()];
+        let mut cur = String::new();
+        for ch in part.chars() {
+            if ch.is_ascii_digit() || ch == '.' {
+                cur.push(ch);
+            } else if ch == '-' && cur.is_empty() {
+                cur.push('-');
+            } else if !cur.is_empty() {
+                if let Ok(v) = cur.parse::<f64>() {
+                    let uc = ch.to_ascii_uppercase();
+                    if let Some(idx) = units.iter().position(|&u| u == uc) {
+                        vals[idx] = v;
+                    }
+                }
+                cur.clear();
+            }
+        }
+        vals
+    };
+
+    let dv = parse_part(date_str, &['Y', 'M', 'W', 'D']);
+    let tv = parse_part(time_str, &['H', 'M', 'S']);
+
+    let years = dv[0].trunc() as i64;
+    let months = dv[1].trunc() as i64;
+    let days = dv[3].trunc() as i64;  // Weeks already cascaded to days in our construction
+    let hours = tv[0].trunc() as i64;
+    let minutes = tv[1].trunc() as i64;
+    let secs_total_f = tv[2];
+    let sec_whole = secs_total_f.trunc();
+    let seconds = sec_whole as i64;
+    let subsec_ns = ((secs_total_f - sec_whole).abs() * 1_000_000_000.0).round() as i64;
+
+    Some(ParsedDuration { years, months, days, hours, minutes, seconds, subsec_ns })
+}
+
+/// Extract a named component from a duration string. Returns a numeric string or None.
+fn duration_get_component(dur_str: &str, component: &str) -> Option<String> {
+    let d = parse_duration_components(dur_str)?;
+    let neg = dur_str.starts_with('-');
+    let sign = if neg { -1 } else { 1 };
+    let val: i64 = match component {
+        "years" => sign * d.years,
+        "quartersOfYear" | "quarters" => sign * (d.years * 4 + d.months / 3),
+        "months" => sign * (d.years * 12 + d.months),
+        "monthsOfQuarter" => sign * (d.months % 3),
+        "monthsOfYear" => sign * (d.months % 12),
+        "weeks" => sign * (d.days / 7),
+        "daysOfWeek" => sign * (d.days % 7),
+        "days" => sign * d.days,
+        "hours" => sign * (d.days * 24 + d.hours),
+        "minutesOfHour" => sign * d.minutes,
+        "minutes" => sign * (d.days * 24 * 60 + d.hours * 60 + d.minutes),
+        "secondsOfMinute" => sign * d.seconds,
+        "seconds" => sign * (d.days * 24 * 3600 + d.hours * 3600 + d.minutes * 60 + d.seconds),
+        "millisecondsOfSecond" => sign * (d.subsec_ns / 1_000_000),
+        "milliseconds" => {
+            let total_s = sign * (d.days * 24 * 3600 + d.hours * 3600 + d.minutes * 60 + d.seconds);
+            total_s * 1_000 + sign * (d.subsec_ns / 1_000_000)
+        }
+        "microsecondsOfSecond" => sign * (d.subsec_ns / 1_000),
+        "microseconds" => {
+            let total_s = sign * (d.days * 24 * 3600 + d.hours * 3600 + d.minutes * 60 + d.seconds);
+            total_s * 1_000_000 + sign * (d.subsec_ns / 1_000)
+        }
+        "nanosecondsOfSecond" => sign * d.subsec_ns,
+        "nanoseconds" => {
+            let total_s = sign * (d.days * 24 * 3600 + d.hours * 3600 + d.minutes * 60 + d.seconds);
+            total_s * 1_000_000_000 + sign * d.subsec_ns
+        }
+        _ => return None,
+    };
+    Some(val.to_string())
 }
 
 /// Construct a `duration` literal (ISO 8601) from a map.
