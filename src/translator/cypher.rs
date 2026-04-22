@@ -9237,7 +9237,7 @@ impl TranslationState {
                         "datetime" => temporal_datetime_from_map(pairs)
                             .map(|s| SparLit::new_typed_literal(s, xsd_dt)),
                         "duration" => temporal_duration_from_map(pairs)
-                            .map(|s| SparLit::new_typed_literal(s, xsd_dur)),
+                            .map(SparLit::new_simple_literal),
                         _ => None,
                     };
                     if let Some(lit) = lit_opt {
@@ -9257,7 +9257,7 @@ impl TranslationState {
                         "datetime" => temporal_parse_datetime(s)
                             .map(|v| SparLit::new_typed_literal(v, xsd_dt)),
                         "duration" => temporal_parse_duration(s)
-                            .map(|v| SparLit::new_typed_literal(v, xsd_dur)),
+                            .map(SparLit::new_simple_literal),
                         _ => None,
                     };
                     if let Some(lit) = lit_opt {
