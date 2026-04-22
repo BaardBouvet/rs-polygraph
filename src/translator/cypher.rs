@@ -3925,13 +3925,14 @@ impl TranslationState {
                         if let PatternElement::Node(node) = &m.pattern.elements[0] {
                             if let Some(v) = &node.variable {
                                 let mut all_labels = node.labels.clone();
-                                // Also include any ON CREATE SET labels (for empty-graph scenarios).
+                                // Also include ON CREATE SET and ON MATCH SET labels.
+                                // After write_clauses_to_updates runs, the graph has the
+                                // full set of labels (from both MATCH and CREATE paths)
+                                // so we include all of them in the static label list.
                                 for action in &m.actions {
-                                    if action.on_create {
-                                        for item in &action.items {
-                                            if let crate::ast::cypher::SetItem::SetLabel { labels, .. } = item {
-                                                for l in labels { if !all_labels.contains(l) { all_labels.push(l.clone()); } }
-                                            }
+                                    for item in &action.items {
+                                        if let crate::ast::cypher::SetItem::SetLabel { labels, .. } = item {
+                                            for l in labels { if !all_labels.contains(l) { all_labels.push(l.clone()); } }
                                         }
                                     }
                                 }
@@ -8274,11 +8275,19 @@ impl TranslationState {
                                     message: "SyntaxError: InvalidArgumentType: labels() does not apply to relationship variables".to_string(),
                                 });
                             }
+                            // Static path: for CREATE/MERGE-bound variables where the
+                            // labels are fully known at compile time (including any label
+                            // additions from ON MATCH SET, which are pre-scanned below),
+                            // return the label list without a graph query. This avoids
+                            // spurious extra rows when CREATE is in skip_writes mode and
+                            // the variable has no constraining pattern in the SELECT.
                             if let Some(labels) = self.node_labels_from_create.get(v.as_str()).cloned() {
                                 let list_str = if labels.is_empty() {
                                     "[]".to_string()
                                 } else {
-                                    let items: Vec<String> = labels.iter().map(|l| format!("'{l}'")).collect();
+                                    let mut sorted = labels.clone();
+                                    sorted.sort();
+                                    let items: Vec<String> = sorted.iter().map(|l| format!("'{l}'")).collect();
                                     format!("[{}]", items.join(", "))
                                 };
                                 return Ok(SparExpr::Literal(SparLit::new_simple_literal(list_str)));
