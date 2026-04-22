@@ -11333,6 +11333,11 @@ fn tc_tz_suffix(tz: &str) -> String {
 /// DST-aware timezone suffix: `month` (1-12) used to determine winter/summer offset.
 fn tc_tz_suffix_month(tz: &str, month: i64) -> String {
     if tz == "Z" || tz.starts_with('+') || tz.starts_with('-') {
+        // Strip trailing ":00" seconds from timezone offset when seconds are zero:
+        // "+02:05:00" → "+02:05", "+02:05:59" → "+02:05:59"
+        if tz != "Z" && tz.len() == 9 && tz.as_bytes().get(6) == Some(&b':') && tz.ends_with(":00") {
+            return tz[..6].to_string();
+        }
         return tz.to_string();
     }
     // Named timezone lookup — approximate DST by month:
