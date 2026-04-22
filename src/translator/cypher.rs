@@ -12828,9 +12828,11 @@ fn parse_duration_components(s: &str) -> Option<ParsedDuration> {
     let hours = tv[0].trunc() as i64;
     let minutes = tv[1].trunc() as i64;
     let secs_total_f = tv[2];
-    let sec_whole = secs_total_f.trunc();
+    // Use floor (not trunc) so that negative fractions work correctly:
+    // floor(-59.9) = -60, giving subsec = 0.1s = 100_000_000 ns (non-negative).
+    let sec_whole = secs_total_f.floor();
     let seconds = sec_whole as i64;
-    let subsec_ns = ((secs_total_f - sec_whole).abs() * 1_000_000_000.0).round() as i64;
+    let subsec_ns = ((secs_total_f - sec_whole) * 1_000_000_000.0).round() as i64;
 
     Some(ParsedDuration { years, months, days, hours, minutes, seconds, subsec_ns })
 }
