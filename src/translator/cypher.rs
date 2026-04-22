@@ -1446,6 +1446,21 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         | crate::ast::cypher::SetItem::SetLabel { .. } => (None, None),
                     };
                     let _ = var_opt; // unused for now
+                    // TypeError: a PROPERTY value cannot be a map or a list-of-maps.
+                    // e.g. SET n.x = {k: v}  or  SET n.x = [{k: v}]
+                    // (Note: SET n = {map} is NodeReplace and IS VALID; only Property is invalid)
+                    if let crate::ast::cypher::SetItem::Property { value, .. } = item {
+                        let invalid = match value {
+                            Expression::Map(_) => true,
+                            Expression::List(items) => items.iter().any(|e| matches!(e, Expression::Map(_))),
+                            _ => false,
+                        };
+                        if invalid {
+                            return Err(PolygraphError::Translation {
+                                message: "TypeError: InvalidPropertyType: property values cannot be maps or lists of maps".to_string(),
+                            });
+                        }
+                    }
                     if let Some(rhs) = rhs_opt {
                         fn collect_set_rhs_vars(expr: &Expression, vars: &mut Vec<String>) {
                             match expr {
@@ -1794,6 +1809,9 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         }
                     }
                 }
+            }
+            Clause::Set(_) => {
+                // Already handled by the Clause::Set arm above.
             }
             _ => {}
         }
