@@ -1446,13 +1446,15 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         | crate::ast::cypher::SetItem::SetLabel { .. } => (None, None),
                     };
                     let _ = var_opt; // unused for now
-                    // TypeError: a PROPERTY value cannot be a map or a list-of-maps.
-                    // e.g. SET n.x = {k: v}  or  SET n.x = [{k: v}]
-                    // (Note: SET n = {map} is NodeReplace and IS VALID; only Property is invalid)
+                                     // TypeError: a PROPERTY value cannot be a map or a list-of-maps.
+                                     // e.g. SET n.x = {k: v}  or  SET n.x = [{k: v}]
+                                     // (Note: SET n = {map} is NodeReplace and IS VALID; only Property is invalid)
                     if let crate::ast::cypher::SetItem::Property { value, .. } = item {
                         let invalid = match value {
                             Expression::Map(_) => true,
-                            Expression::List(items) => items.iter().any(|e| matches!(e, Expression::Map(_))),
+                            Expression::List(items) => {
+                                items.iter().any(|e| matches!(e, Expression::Map(_)))
+                            }
                             _ => false,
                         };
                         if invalid {
@@ -1465,9 +1467,7 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         fn collect_set_rhs_vars(expr: &Expression, vars: &mut Vec<String>) {
                             match expr {
                                 Expression::Variable(v) => vars.push(v.clone()),
-                                Expression::Property(base, _) => {
-                                    collect_set_rhs_vars(base, vars)
-                                }
+                                Expression::Property(base, _) => collect_set_rhs_vars(base, vars),
                                 Expression::FunctionCall { args, .. } => {
                                     for a in args {
                                         collect_set_rhs_vars(a, vars);
@@ -1596,22 +1596,22 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                                 // NoSingleRelationshipType: CREATE must have exactly 1 rel type.
                                 if r.rel_types.is_empty() {
                                     return Err(PolygraphError::Translation {
-                                        message: "NoSingleRelationshipType: \
+                                        message:
+                                            "NoSingleRelationshipType: \
                                                   relationship in CREATE must have exactly one type"
-                                            .to_string(),
+                                                .to_string(),
                                     });
                                 }
                                 if r.rel_types.len() > 1 {
                                     return Err(PolygraphError::Translation {
-                                        message: "NoSingleRelationshipType: \
+                                        message:
+                                            "NoSingleRelationshipType: \
                                                   relationship in CREATE cannot have multiple types"
-                                            .to_string(),
+                                                .to_string(),
                                     });
                                 }
                                 // RequiresDirectedRelationship: undirected in CREATE
-                                if r.direction
-                                    == crate::ast::cypher::Direction::Both
-                                {
+                                if r.direction == crate::ast::cypher::Direction::Both {
                                     return Err(PolygraphError::Translation {
                                         message: "RequiresDirectedRelationship: \
                                                   relationship in CREATE must have a direction"
@@ -1659,7 +1659,10 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         PatternElement::Node(n) => {
                             // Null property values in MERGE are invalid (SemanticError).
                             if let Some(props) = &n.properties {
-                                if props.iter().any(|(_, v)| matches!(v, Expression::Literal(Literal::Null))) {
+                                if props
+                                    .iter()
+                                    .any(|(_, v)| matches!(v, Expression::Literal(Literal::Null)))
+                                {
                                     return Err(PolygraphError::Translation {
                                         message: "SemanticError: MergeReadOwnWrites: null property values are not allowed in MERGE".to_string(),
                                     });
@@ -1685,7 +1688,10 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         PatternElement::Relationship(r) => {
                             // Null property values in MERGE are invalid (SemanticError).
                             if let Some(props) = &r.properties {
-                                if props.iter().any(|(_, v)| matches!(v, Expression::Literal(Literal::Null))) {
+                                if props
+                                    .iter()
+                                    .any(|(_, v)| matches!(v, Expression::Literal(Literal::Null)))
+                                {
                                     return Err(PolygraphError::Translation {
                                         message: "SemanticError: MergeReadOwnWrites: null property values are not allowed in MERGE".to_string(),
                                     });
@@ -1739,7 +1745,9 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         .elements
                         .iter()
                         .find_map(|e| match e {
-                            PatternElement::Node(n) if n.variable.as_deref() == Some(v.as_str()) => {
+                            PatternElement::Node(n)
+                                if n.variable.as_deref() == Some(v.as_str()) =>
+                            {
                                 Some(Kind::Node)
                             }
                             PatternElement::Relationship(r)
@@ -1968,7 +1976,8 @@ struct TranslationState {
     node_labels_from_create: std::collections::HashMap<String, Vec<String>>,
     /// Properties known for node/relationship variables from CREATE patterns (skip_writes mode).
     /// Maps variable name → {property_key → Expression value}.
-    node_props_from_create: std::collections::HashMap<String, std::collections::HashMap<String, Expression>>,
+    node_props_from_create:
+        std::collections::HashMap<String, std::collections::HashMap<String, Expression>>,
     /// Tracks (variable, property_key) pairs that were SET by a SET clause in skip_writes mode.
     /// Used to distinguish SET-updated properties from CREATE-initialized ones.
     set_tracked_vars: std::collections::HashSet<(String, String)>,
@@ -2649,9 +2658,15 @@ impl TranslationState {
                 match clause {
                     Clause::Set(s) => {
                         for item in &s.items {
-                            if let crate::ast::cypher::SetItem::Property { variable, key, value } = item {
+                            if let crate::ast::cypher::SetItem::Property {
+                                variable,
+                                key,
+                                value,
+                            } = item
+                            {
                                 if !expr_references_prop(value, variable, key) {
-                                    self.set_tracked_vars.insert((variable.clone(), key.clone()));
+                                    self.set_tracked_vars
+                                        .insert((variable.clone(), key.clone()));
                                     self.node_props_from_create
                                         .entry(variable.clone())
                                         .or_default()
@@ -2662,7 +2677,8 @@ impl TranslationState {
                     }
                     Clause::Remove(r) => {
                         for item in &r.items {
-                            if let crate::ast::cypher::RemoveItem::Label { variable, labels } = item {
+                            if let crate::ast::cypher::RemoveItem::Label { variable, labels } = item
+                            {
                                 for label in labels {
                                     self.remove_tracked_labels
                                         .entry(variable.clone())
@@ -2999,14 +3015,12 @@ impl TranslationState {
                                     spargebra::term::NamedNodePattern::NamedNode(nn)
                                         if nn.as_str() == RDF_REIFIES
                                 );
-                                let group_end =
-                                    if is_reifies && i + 1 < with_triples.len() {
-                                        i + 2
-                                    } else {
-                                        i + 1
-                                    };
-                                let group: Vec<TriplePattern> =
-                                    with_triples[i..group_end].to_vec();
+                                let group_end = if is_reifies && i + 1 < with_triples.len() {
+                                    i + 2
+                                } else {
+                                    i + 1
+                                };
+                                let group: Vec<TriplePattern> = with_triples[i..group_end].to_vec();
                                 i = group_end;
                                 current = GraphPattern::LeftJoin {
                                     left: Box::new(current),
@@ -3028,12 +3042,11 @@ impl TranslationState {
                                     spargebra::term::NamedNodePattern::NamedNode(nn)
                                         if nn.as_str() == RDF_REIFIES
                                 );
-                                let group_end =
-                                    if is_reifies && i + 1 < drained.len() {
-                                        i + 2
-                                    } else {
-                                        i + 1
-                                    };
+                                let group_end = if is_reifies && i + 1 < drained.len() {
+                                    i + 2
+                                } else {
+                                    i + 1
+                                };
                                 let group: Vec<TriplePattern> = drained[i..group_end].to_vec();
                                 i = group_end;
                                 current = GraphPattern::LeftJoin {
@@ -3140,12 +3153,11 @@ impl TranslationState {
                                         spargebra::term::NamedNodePattern::NamedNode(nn)
                                             if nn.as_str() == RDF_REIFIES
                                     );
-                                    let group_end =
-                                        if is_reifies && i + 1 < drained.len() {
-                                            i + 2
-                                        } else {
-                                            i + 1
-                                        };
+                                    let group_end = if is_reifies && i + 1 < drained.len() {
+                                        i + 2
+                                    } else {
+                                        i + 1
+                                    };
                                     let group: Vec<TriplePattern> = drained[i..group_end].to_vec();
                                     i = group_end;
                                     current = GraphPattern::LeftJoin {
@@ -3205,9 +3217,8 @@ impl TranslationState {
                                                 ) {
                                                     match e {
                                                         Expression::Variable(v) => {
-                                                            let sv = Variable::new_unchecked(
-                                                                v.clone(),
-                                                            );
+                                                            let sv =
+                                                                Variable::new_unchecked(v.clone());
                                                             if !out.contains(&sv) {
                                                                 out.push(sv);
                                                             }
@@ -3220,7 +3231,9 @@ impl TranslationState {
                                                             collect_expr_vars(l, out);
                                                             collect_expr_vars(r, out);
                                                         }
-                                                        Expression::FunctionCall { args, .. } => {
+                                                        Expression::FunctionCall {
+                                                            args, ..
+                                                        } => {
                                                             for a in args {
                                                                 collect_expr_vars(a, out);
                                                             }
@@ -3525,7 +3538,11 @@ impl TranslationState {
                                             }
                                         }
                                     }
-                                    Expression::FunctionCall { name: fname, args: fargs, .. } => {
+                                    Expression::FunctionCall {
+                                        name: fname,
+                                        args: fargs,
+                                        ..
+                                    } => {
                                         // Evaluate temporal constructors to compile-time string
                                         // values so that `date(toString(alias))` can be folded.
                                         let lower = fname.to_lowercase();
@@ -3551,12 +3568,8 @@ impl TranslationState {
                                             )) => match base {
                                                 "date" => temporal_parse_date(s),
                                                 "localtime" => temporal_parse_localtime(s),
-                                                "time" => {
-                                                    temporal_parse_time(s)
-                                                }
-                                                "localdatetime" => {
-                                                    temporal_parse_localdatetime(s)
-                                                }
+                                                "time" => temporal_parse_time(s),
+                                                "localdatetime" => temporal_parse_localdatetime(s),
                                                 "datetime" => temporal_parse_datetime(s),
                                                 "duration" => temporal_parse_duration(s),
                                                 _ => None,
@@ -3625,7 +3638,8 @@ impl TranslationState {
                             let group: Vec<TriplePattern> = return_triples[i..group_end].to_vec();
                             i = group_end;
                             // Determine the subject for nullable check (use first triple's subject).
-                            let right = if let TermPattern::Variable(subj_var) = &group[0].subject.clone()
+                            let right = if let TermPattern::Variable(subj_var) =
+                                &group[0].subject.clone()
                             {
                                 if self.nullable_vars.contains(subj_var.as_str()) {
                                     // Use type-guard approach: OPTIONAL { ?n rdf:type X . ?n <prop> ?val }
@@ -3636,7 +3650,11 @@ impl TranslationState {
                                         .get(subj_var.as_str())
                                         .cloned()
                                         .unwrap_or_default();
-                                    nullable_subject_optional(group[0].clone(), subj_var.clone(), guards)
+                                    nullable_subject_optional(
+                                        group[0].clone(),
+                                        subj_var.clone(),
+                                        guards,
+                                    )
                                 } else {
                                     GraphPattern::Bgp { patterns: group }
                                 }
@@ -3675,26 +3693,26 @@ impl TranslationState {
                             };
                             let group: Vec<TriplePattern> = drained[i..group_end].to_vec();
                             i = group_end;
-                            let right =
-                                if let TermPattern::Variable(subj_var) = &group[0].subject.clone()
-                                {
-                                    if self.nullable_vars.contains(subj_var.as_str()) {
-                                        let guards = self
-                                            .nullable_type_guards
-                                            .get(subj_var.as_str())
-                                            .cloned()
-                                            .unwrap_or_default();
-                                        nullable_subject_optional(
-                                            group[0].clone(),
-                                            subj_var.clone(),
-                                            guards,
-                                        )
-                                    } else {
-                                        GraphPattern::Bgp { patterns: group }
-                                    }
+                            let right = if let TermPattern::Variable(subj_var) =
+                                &group[0].subject.clone()
+                            {
+                                if self.nullable_vars.contains(subj_var.as_str()) {
+                                    let guards = self
+                                        .nullable_type_guards
+                                        .get(subj_var.as_str())
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    nullable_subject_optional(
+                                        group[0].clone(),
+                                        subj_var.clone(),
+                                        guards,
+                                    )
                                 } else {
                                     GraphPattern::Bgp { patterns: group }
-                                };
+                                }
+                            } else {
+                                GraphPattern::Bgp { patterns: group }
+                            };
                             current = GraphPattern::LeftJoin {
                                 left: Box::new(current),
                                 right: Box::new(right),
@@ -3969,12 +3987,18 @@ impl TranslationState {
                                     if let Some(v) = &n.variable {
                                         self.node_vars.insert(v.clone());
                                         // Record labels.
-                                        let labels: Vec<String> = n.labels.iter().map(|l| l.clone()).collect();
+                                        let labels: Vec<String> =
+                                            n.labels.iter().map(|l| l.clone()).collect();
                                         self.node_labels_from_create.insert(v.clone(), labels);
                                         // Record properties.
                                         if let Some(props) = &n.properties {
-                                            let prop_map: std::collections::HashMap<String, Expression> =
-                                                props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                                            let prop_map: std::collections::HashMap<
+                                                String,
+                                                Expression,
+                                            > = props
+                                                .iter()
+                                                .map(|(k, v)| (k.clone(), v.clone()))
+                                                .collect();
                                             self.node_props_from_create.insert(v.clone(), prop_map);
                                         }
                                     }
@@ -3983,8 +4007,13 @@ impl TranslationState {
                                     if let Some(v) = &r.variable {
                                         // Record relationship properties.
                                         if let Some(props) = &r.properties {
-                                            let prop_map: std::collections::HashMap<String, Expression> =
-                                                props.iter().map(|(k, vv)| (k.clone(), vv.clone())).collect();
+                                            let prop_map: std::collections::HashMap<
+                                                String,
+                                                Expression,
+                                            > = props
+                                                .iter()
+                                                .map(|(k, vv)| (k.clone(), vv.clone()))
+                                                .collect();
                                             self.node_props_from_create.insert(v.clone(), prop_map);
                                         }
                                     }
@@ -3999,13 +4028,14 @@ impl TranslationState {
                     // write_clauses_to_updates has already inserted the node if needed).
                     // In non-skip-writes mode, always return a write-clause error so the
                     // caller knows to invoke write_clauses_to_updates + skip_writes.
-                    let is_simple_node_merge = self.skip_write_clauses && m.pattern.elements.len() == 1 && {
-                        if let PatternElement::Node(node) = &m.pattern.elements[0] {
-                            node.labels.is_empty() && node.properties.is_none()
-                        } else {
-                            false
-                        }
-                    };
+                    let is_simple_node_merge =
+                        self.skip_write_clauses && m.pattern.elements.len() == 1 && {
+                            if let PatternElement::Node(node) = &m.pattern.elements[0] {
+                                node.labels.is_empty() && node.properties.is_none()
+                            } else {
+                                false
+                            }
+                        };
                     if is_simple_node_merge {
                         let match_clause = MatchClause {
                             optional: false,
@@ -4062,8 +4092,16 @@ impl TranslationState {
                                 // so we include all of them in the static label list.
                                 for action in &m.actions {
                                     for item in &action.items {
-                                        if let crate::ast::cypher::SetItem::SetLabel { labels, .. } = item {
-                                            for l in labels { if !all_labels.contains(l) { all_labels.push(l.clone()); } }
+                                        if let crate::ast::cypher::SetItem::SetLabel {
+                                            labels,
+                                            ..
+                                        } = item
+                                        {
+                                            for l in labels {
+                                                if !all_labels.contains(l) {
+                                                    all_labels.push(l.clone());
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -4104,18 +4142,23 @@ impl TranslationState {
                             if has_rel_var {
                                 let match_clause = MatchClause {
                                     optional: false,
-                                    pattern: crate::ast::cypher::PatternList(vec![m.pattern.clone()]),
+                                    pattern: crate::ast::cypher::PatternList(vec![m
+                                        .pattern
+                                        .clone()]),
                                     where_: None,
                                 };
                                 // Try to translate as MATCH; fall back to silently skip on error
                                 // (e.g. complex list properties in the MERGE pattern).
-                                match self.translate_match_clause(&match_clause, &mut extra_triples) {
+                                match self.translate_match_clause(&match_clause, &mut extra_triples)
+                                {
                                     Ok((match_pattern, opt_filter, where_extra)) => {
                                         current = join_patterns(current, match_pattern);
                                         for tp in where_extra {
                                             current = GraphPattern::LeftJoin {
                                                 left: Box::new(current),
-                                                right: Box::new(GraphPattern::Bgp { patterns: vec![tp] }),
+                                                right: Box::new(GraphPattern::Bgp {
+                                                    patterns: vec![tp],
+                                                }),
                                                 expression: None,
                                             };
                                         }
@@ -4161,7 +4204,11 @@ impl TranslationState {
                     // Skip: record SET n.prop = val for subsequent RETURN use.
                     for item in &s.items {
                         match item {
-                            crate::ast::cypher::SetItem::Property { variable, key, value } => {
+                            crate::ast::cypher::SetItem::Property {
+                                variable,
+                                key,
+                                value,
+                            } => {
                                 // Only track if value doesn't reference the same (variable.key)
                                 // to avoid infinite recursion in translate_expr.
                                 if !expr_references_prop(value, variable, key) {
@@ -4606,7 +4653,9 @@ impl TranslationState {
         // returning 1 empty row from an empty BGP.
         // Convention: every graph node has exactly one `<base:__node> <base:__node>` triple.
         // Also add sentinel when ALL labels have been skipped due to REMOVE tracking.
-        let effective_label_count = node.labels.iter()
+        let effective_label_count = node
+            .labels
+            .iter()
             .filter(|l| !skip_labels.contains(l.as_str()))
             .count();
         if effective_label_count == 0 && !has_props {
@@ -6062,7 +6111,9 @@ impl TranslationState {
                 // Check if this property is known from CREATE/SET tracking (skip_writes mode).
                 // Return a BIND expression instead of a BGP triple so that the value
                 // comes from the known expression rather than a missing RDF triple.
-                if let Some(prop_val) = self.node_props_from_create.get(&var_name)
+                if let Some(prop_val) = self
+                    .node_props_from_create
+                    .get(&var_name)
                     .and_then(|m| m.get(key.as_str()))
                     .cloned()
                 {
@@ -6653,12 +6704,17 @@ impl TranslationState {
                             None
                         };
 
-                    let lhs_set = get_set_new_val(lhs, &self.set_tracked_vars, &self.node_props_from_create);
-                    let rhs_set = get_set_new_val(rhs, &self.set_tracked_vars, &self.node_props_from_create);
+                    let lhs_set =
+                        get_set_new_val(lhs, &self.set_tracked_vars, &self.node_props_from_create);
+                    let rhs_set =
+                        get_set_new_val(rhs, &self.set_tracked_vars, &self.node_props_from_create);
 
                     if let Some(new_val) = lhs_set {
                         // If new value is null (property deleted), skip filter → always TRUE.
-                        if matches!(new_val, Expression::Literal(crate::ast::cypher::Literal::Null)) {
+                        if matches!(
+                            new_val,
+                            Expression::Literal(crate::ast::cypher::Literal::Null)
+                        ) {
                             return Ok(SparExpr::Literal(SparLit::new_typed_literal(
                                 "true",
                                 NamedNode::new_unchecked(XSD_BOOLEAN),
@@ -6688,7 +6744,10 @@ impl TranslationState {
                         }
                     } else if let Some(new_val) = rhs_set {
                         // Symmetric case: 'Andres' = n.name
-                        if matches!(new_val, Expression::Literal(crate::ast::cypher::Literal::Null)) {
+                        if matches!(
+                            new_val,
+                            Expression::Literal(crate::ast::cypher::Literal::Null)
+                        ) {
                             return Ok(SparExpr::Literal(SparLit::new_typed_literal(
                                 "true",
                                 NamedNode::new_unchecked(XSD_BOOLEAN),
@@ -9631,7 +9690,9 @@ impl TranslationState {
                                             },
                                             TriplePattern {
                                                 subject: TermPattern::Variable(new_reif.clone()),
-                                                predicate: NamedNodePattern::Variable(pred_v.clone()),
+                                                predicate: NamedNodePattern::Variable(
+                                                    pred_v.clone(),
+                                                ),
                                                 object: TermPattern::Variable(val_v),
                                             },
                                         ],
@@ -9660,7 +9721,9 @@ impl TranslationState {
                                             },
                                             TriplePattern {
                                                 subject: TermPattern::Variable(new_reif.clone()),
-                                                predicate: NamedNodePattern::NamedNode(rdf_predicate),
+                                                predicate: NamedNodePattern::NamedNode(
+                                                    rdf_predicate,
+                                                ),
                                                 object: pred_obj,
                                             },
                                             TriplePattern {
@@ -9670,13 +9733,16 @@ impl TranslationState {
                                             },
                                             TriplePattern {
                                                 subject: TermPattern::Variable(new_reif.clone()),
-                                                predicate: NamedNodePattern::Variable(pred_v.clone()),
+                                                predicate: NamedNodePattern::Variable(
+                                                    pred_v.clone(),
+                                                ),
                                                 object: TermPattern::Variable(val_v),
                                             },
                                         ],
                                     }
                                 };
-                                let base_lit = SparExpr::Literal(SparLit::new_simple_literal(base.clone()));
+                                let base_lit =
+                                    SparExpr::Literal(SparLit::new_simple_literal(base.clone()));
                                 let str_pred = SparExpr::FunctionCall(
                                     Function::Str,
                                     vec![SparExpr::Variable(pred_v.clone())],
@@ -9692,17 +9758,27 @@ impl TranslationState {
                                         .or_else(|| edge.pred_var.clone())
                                         .map(SparExpr::Variable);
                                     if let Some(m) = marker {
-                                        SparExpr::And(Box::new(SparExpr::Bound(
-                                            // extract Variable from SparExpr::Variable
-                                            if let SparExpr::Variable(ref v) = m { v.clone() } else { pred_v.clone() }
-                                        )), Box::new(strstarts))
+                                        SparExpr::And(
+                                            Box::new(SparExpr::Bound(
+                                                // extract Variable from SparExpr::Variable
+                                                if let SparExpr::Variable(ref v) = m {
+                                                    v.clone()
+                                                } else {
+                                                    pred_v.clone()
+                                                },
+                                            )),
+                                            Box::new(strstarts),
+                                        )
                                     } else {
                                         strstarts
                                     }
                                 } else {
                                     strstarts
                                 };
-                                let inner = GraphPattern::Filter { expr: filter_expr, inner: Box::new(bgp) };
+                                let inner = GraphPattern::Filter {
+                                    expr: filter_expr,
+                                    inner: Box::new(bgp),
+                                };
                                 let key_expr = SparExpr::FunctionCall(
                                     Function::SubStr,
                                     vec![
@@ -9731,15 +9807,33 @@ impl TranslationState {
                                 predicate: NamedNodePattern::Variable(pred_v.clone()),
                                 object: TermPattern::Variable(val_v),
                             };
-                            let bgp = GraphPattern::Bgp { patterns: vec![triple] };
+                            let bgp = GraphPattern::Bgp {
+                                patterns: vec![triple],
+                            };
                             // FILTER: within base namespace, not sentinel, not rdf:type
-                            let base_lit = SparExpr::Literal(SparLit::new_simple_literal(base.clone()));
-                            let rdf_type_lit = SparExpr::Literal(SparLit::new_simple_literal(RDF_TYPE.to_string()));
-                            let sentinel_lit = SparExpr::Literal(SparLit::new_simple_literal(sentinel_iri));
-                            let str_pred = SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(pred_v.clone())]);
-                            let strstarts = SparExpr::FunctionCall(Function::StrStarts, vec![str_pred.clone(), base_lit]);
-                            let not_sentinel = SparExpr::Not(Box::new(SparExpr::Equal(Box::new(str_pred.clone()), Box::new(sentinel_lit))));
-                            let not_type = SparExpr::Not(Box::new(SparExpr::Equal(Box::new(str_pred.clone()), Box::new(rdf_type_lit))));
+                            let base_lit =
+                                SparExpr::Literal(SparLit::new_simple_literal(base.clone()));
+                            let rdf_type_lit = SparExpr::Literal(SparLit::new_simple_literal(
+                                RDF_TYPE.to_string(),
+                            ));
+                            let sentinel_lit =
+                                SparExpr::Literal(SparLit::new_simple_literal(sentinel_iri));
+                            let str_pred = SparExpr::FunctionCall(
+                                Function::Str,
+                                vec![SparExpr::Variable(pred_v.clone())],
+                            );
+                            let strstarts = SparExpr::FunctionCall(
+                                Function::StrStarts,
+                                vec![str_pred.clone(), base_lit],
+                            );
+                            let not_sentinel = SparExpr::Not(Box::new(SparExpr::Equal(
+                                Box::new(str_pred.clone()),
+                                Box::new(sentinel_lit),
+                            )));
+                            let not_type = SparExpr::Not(Box::new(SparExpr::Equal(
+                                Box::new(str_pred.clone()),
+                                Box::new(rdf_type_lit),
+                            )));
                             let filter_expr = SparExpr::And(
                                 Box::new(strstarts),
                                 Box::new(SparExpr::And(Box::new(not_sentinel), Box::new(not_type))),
@@ -9763,7 +9857,10 @@ impl TranslationState {
                             let key_expr = SparExpr::FunctionCall(
                                 Function::SubStr,
                                 vec![
-                                    SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(pred_v)]),
+                                    SparExpr::FunctionCall(
+                                        Function::Str,
+                                        vec![SparExpr::Variable(pred_v)],
+                                    ),
                                     SparExpr::Literal(SparLit::new_typed_literal(
                                         (base_len + 1).to_string(),
                                         NamedNode::new_unchecked(XSD_INTEGER),
@@ -10337,9 +10434,7 @@ fn expr_references_prop(expr: &Expression, variable: &str, key: &str) -> bool {
         | Expression::Comparison(a, _, b) => {
             expr_references_prop(a, variable, key) || expr_references_prop(b, variable, key)
         }
-        Expression::List(items) => {
-            items.iter().any(|e| expr_references_prop(e, variable, key))
-        }
+        Expression::List(items) => items.iter().any(|e| expr_references_prop(e, variable, key)),
         Expression::Map(pairs) => pairs
             .iter()
             .any(|(_, v)| expr_references_prop(v, variable, key)),
@@ -11179,19 +11274,11 @@ fn tc_tz_suffix_month(tz: &str, month: i64) -> String {
     // Central European Time: +01:00 (Oct-Mar), +02:00 (Apr-Sep)
     let is_summer = matches!(month, 4 | 5 | 6 | 7 | 8 | 9);
     let (winter, summer) = match tz {
-        "Europe/Stockholm"
-        | "Europe/Paris"
-        | "Europe/Berlin"
-        | "Europe/Rome"
-        | "Europe/Madrid"
-        | "Europe/Amsterdam"
-        | "Europe/Brussels"
-        | "Europe/Copenhagen"
-        | "Europe/Warsaw"
-        | "Europe/Vienna"
-        | "Europe/Zurich"
-        | "Europe/Prague"
-        | "Europe/Budapest" => ("+01:00", "+02:00"),
+        "Europe/Stockholm" | "Europe/Paris" | "Europe/Berlin" | "Europe/Rome" | "Europe/Madrid"
+        | "Europe/Amsterdam" | "Europe/Brussels" | "Europe/Copenhagen" | "Europe/Warsaw"
+        | "Europe/Vienna" | "Europe/Zurich" | "Europe/Prague" | "Europe/Budapest" => {
+            ("+01:00", "+02:00")
+        }
         "Europe/London" | "Europe/Dublin" | "Europe/Lisbon" => ("Z", "+01:00"),
         "UTC" | "Etc/UTC" => ("Z", "Z"),
         "America/New_York" | "America/Toronto" | "America/Detroit" => ("-05:00", "-04:00"),
@@ -11212,7 +11299,7 @@ fn tc_tz_suffix_month(tz: &str, month: i64) -> String {
 fn tc_iso_week_year(y: i64, m: i64, d: i64) -> i64 {
     let epoch = temporal_epoch(y, m, d);
     let dow = ((epoch - 1) % 7 + 7) % 7 + 1; // 1=Mon, 7=Sun
-    // ISO week year = year of the Thursday in the same ISO week
+                                             // ISO week year = year of the Thursday in the same ISO week
     let thu_epoch = epoch + (4 - dow);
     temporal_from_epoch(thu_epoch).0
 }
@@ -11377,12 +11464,9 @@ fn tc_apply_overrides(overrides: &[(String, Expression)], comps: &mut TcComponen
             }
             "dayofweek" => {
                 // dayOfWeek override: advance from current Monday by (dow-1) days
-                if let (Some(y), Some(m), Some(d), Some(dow)) = (
-                    comps.year,
-                    comps.month,
-                    comps.day,
-                    tc_get_override_i(v),
-                ) {
+                if let (Some(y), Some(m), Some(d), Some(dow)) =
+                    (comps.year, comps.month, comps.day, tc_get_override_i(v))
+                {
                     let monday_epoch = temporal_epoch(y, m, d);
                     let target_epoch = monday_epoch + dow - 1;
                     let (ny, nm, nd) = temporal_from_epoch(target_epoch);
@@ -11678,7 +11762,7 @@ fn temporal_sub_second(pairs: &[(String, Expression)]) -> String {
 fn date_to_iso_week(y: i64, m: i64, d: i64) -> (i64, i64, i64) {
     let epoch = temporal_epoch(y, m, d);
     let dow = ((epoch - 1) % 7 + 7) % 7 + 1; // 1=Mon, 7=Sun
-    // Thursday of the current ISO week
+                                             // Thursday of the current ISO week
     let thu_epoch = epoch - dow + 4;
     let (thu_y, _, _) = temporal_from_epoch(thu_epoch);
     let iso_year = thu_y;
@@ -11751,7 +11835,9 @@ fn temporal_date_from_map(pairs: &[(String, Expression)]) -> Option<String> {
         let base_doq: i64 = {
             let qs = (base_q - 1) * 3 + 1;
             let mut doq = bd;
-            for mo in qs..bm { doq += temporal_dim(by, mo); }
+            for mo in qs..bm {
+                doq += temporal_dim(by, mo);
+            }
             doq
         };
 
@@ -11895,7 +11981,11 @@ fn parse_tz_offset_s(tz: &str) -> Option<i64> {
         let sign: i64 = if tz.starts_with('-') { -1 } else { 1 };
         let rest = &tz[1..];
         // Strip bracket suffix if present
-        let rest = if let Some(b) = rest.find('[') { &rest[..b] } else { rest };
+        let rest = if let Some(b) = rest.find('[') {
+            &rest[..b]
+        } else {
+            rest
+        };
         let parts: Vec<&str> = rest.splitn(2, ':').collect();
         if parts.len() == 2 {
             let h: i64 = parts[0].parse().ok()?;
@@ -11965,16 +12055,14 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
                                 if base == "time" {
                                     temporal_parse_time(s)
                                 } else {
-                                    temporal_parse_localtime(s)
-                                        .map(|lt| format!("{lt}Z"))
+                                    temporal_parse_localtime(s).map(|lt| format!("{lt}Z"))
                                 }
                             }
                             Expression::Map(p) => {
                                 if base == "time" {
                                     temporal_time_from_map(p)
                                 } else {
-                                    temporal_localtime_from_map(p)
-                                        .map(|lt| format!("{lt}Z"))
+                                    temporal_localtime_from_map(p).map(|lt| format!("{lt}Z"))
                                 }
                             }
                             _ => None,
@@ -11999,7 +12087,9 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
         let (time_body, tz_raw_base) = split_tz(&base_str);
         let base_parts = parse_localtime_to_parts(time_body)?;
         let (bh, bmin, bsec, bns) = base_parts;
-        let base_tz_s = if tz_raw_base.is_empty() { 0 } else {
+        let base_tz_s = if tz_raw_base.is_empty() {
+            0
+        } else {
             parse_tz_offset_s(&normalize_tz(tz_raw_base)).unwrap_or(0)
         };
 
@@ -12013,11 +12103,16 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
             || temporal_get_i(pairs, "nanosecond").is_some();
 
         let new_tz_str = override_tz.as_deref().map(tc_tz_suffix);
-        let new_tz_s = new_tz_str.as_deref()
+        let new_tz_s = new_tz_str
+            .as_deref()
             .and_then(|tz| parse_tz_offset_s(tz))
             .unwrap_or(base_tz_s);
         let tz_str = new_tz_str.unwrap_or_else(|| {
-            if tz_raw_base.is_empty() { "Z".to_owned() } else { normalize_tz(tz_raw_base) }
+            if tz_raw_base.is_empty() {
+                "Z".to_owned()
+            } else {
+                normalize_tz(tz_raw_base)
+            }
         });
 
         // Compute wall-clock time: if TZ changed, convert UTC then apply new TZ
@@ -12040,7 +12135,7 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
                     ms * 1_000_000 + us * 1_000 + ns_v
                 } else {
                     bns
-                }
+                },
             )
         } else {
             (
@@ -12054,7 +12149,7 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
                     ms * 1_000_000 + us * 1_000 + ns_v
                 } else {
                     bns
-                }
+                },
             )
         };
 
@@ -12080,7 +12175,11 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
 fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     // Check for a `date` key as base for week-based construction.
     let base_ymd: Option<(i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
-        if k.eq_ignore_ascii_case("date") { extract_base_date_ymd(v) } else { None }
+        if k.eq_ignore_ascii_case("date") {
+            extract_base_date_ymd(v)
+        } else {
+            None
+        }
     });
     // Check for a `time` key as base for time components.
     let base_time_parts: Option<(i64, i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
@@ -12175,7 +12274,11 @@ fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<Str
 fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     // Check for a `date` key as base for week-based construction.
     let base_ymd: Option<(i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
-        if k.eq_ignore_ascii_case("date") { extract_base_date_ymd(v) } else { None }
+        if k.eq_ignore_ascii_case("date") {
+            extract_base_date_ymd(v)
+        } else {
+            None
+        }
     });
     // Check for a `time` key as base for time components.
     let base_time_parts: Option<(i64, i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
@@ -12282,12 +12385,9 @@ fn temporal_duration_from_map(pairs: &[(String, Expression)]) -> Option<String> 
     let hours = temporal_get_f(pairs, "hours").or_else(|| temporal_get_f(pairs, "hour"));
     let minutes = temporal_get_f(pairs, "minutes").or_else(|| temporal_get_f(pairs, "minute"));
     let seconds = temporal_get_f(pairs, "seconds").or_else(|| temporal_get_f(pairs, "second"));
-    let ms = temporal_get_f(pairs, "milliseconds")
-        .or_else(|| temporal_get_f(pairs, "millisecond"));
-    let us = temporal_get_f(pairs, "microseconds")
-        .or_else(|| temporal_get_f(pairs, "microsecond"));
-    let ns = temporal_get_f(pairs, "nanoseconds")
-        .or_else(|| temporal_get_f(pairs, "nanosecond"));
+    let ms = temporal_get_f(pairs, "milliseconds").or_else(|| temporal_get_f(pairs, "millisecond"));
+    let us = temporal_get_f(pairs, "microseconds").or_else(|| temporal_get_f(pairs, "microsecond"));
+    let ns = temporal_get_f(pairs, "nanoseconds").or_else(|| temporal_get_f(pairs, "nanosecond"));
 
     if years.is_none()
         && months.is_none()
@@ -12337,7 +12437,11 @@ fn temporal_duration_from_map(pairs: &[(String, Expression)]) -> Option<String> 
     };
     let remain_ns = total_ns - s_whole * 1_000_000_000;
     // Carry whole seconds → minutes.
-    let carry_min = if s_whole >= 0 { s_whole / 60 } else { -((-s_whole) / 60) };
+    let carry_min = if s_whole >= 0 {
+        s_whole / 60
+    } else {
+        -((-s_whole) / 60)
+    };
     let s_final = s_whole - carry_min * 60;
     // Combine carried minutes with explicit minute input.
     let has_time = hours.is_some()
@@ -12425,7 +12529,11 @@ fn format_duration_seconds(s: f64) -> String {
 fn temporal_parse_date(s: &str) -> Option<String> {
     let s = s.trim();
     // If string contains 'T', strip the time part (accepts datetime strings).
-    let s = if let Some(t_pos) = s.find('T') { &s[..t_pos] } else { s };
+    let s = if let Some(t_pos) = s.find('T') {
+        &s[..t_pos]
+    } else {
+        s
+    };
     // Extended calendar: YYYY-MM-DD
     if s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-') {
         let y: i64 = s[..4].parse().ok()?;
@@ -12500,12 +12608,24 @@ fn temporal_parse_date(s: &str) -> Option<String> {
 fn temporal_parse_localtime(s: &str) -> Option<String> {
     let s = s.trim();
     // If string contains 'T', extract the time part only (from datetime/localdatetime strings).
-    let s = if let Some(t_pos) = s.find('T') { &s[t_pos + 1..] } else { s };
+    let s = if let Some(t_pos) = s.find('T') {
+        &s[t_pos + 1..]
+    } else {
+        s
+    };
     // Try stripping 'Z' or '+HH:MM' suffix for localtime (ignore timezone)
-    let s = if s.ends_with('Z') { &s[..s.len() - 1] } else { s };
+    let s = if s.ends_with('Z') {
+        &s[..s.len() - 1]
+    } else {
+        s
+    };
     // Remove timezone offset if present
     let s = if let Some(pos) = s.rfind(['+', '-']) {
-        if pos >= 5 { &s[..pos] } else { s }
+        if pos >= 5 {
+            &s[..pos]
+        } else {
+            s
+        }
     } else {
         s
     };
@@ -12553,7 +12673,11 @@ fn temporal_parse_localtime(s: &str) -> Option<String> {
 fn temporal_parse_time(s: &str) -> Option<String> {
     let s = s.trim();
     // If string contains 'T', extract the time part only.
-    let s = if let Some(t_pos) = s.find('T') { &s[t_pos + 1..] } else { s };
+    let s = if let Some(t_pos) = s.find('T') {
+        &s[t_pos + 1..]
+    } else {
+        s
+    };
     let (time_body, tz_raw) = split_tz(s);
     let local = temporal_parse_localtime(time_body)?;
     // time() requires a timezone; default to Z (UTC) when none present.
@@ -12684,7 +12808,9 @@ fn temporal_parse_duration(s: &str) -> Option<String> {
     }
     let body = &s[1..];
     // Alternative format: PYYYY-MM-DDTHH:MM:SS.sss
-    if body.contains('-') || (body.contains('T') && body.find('T').map(|p| &body[..p]).unwrap_or("").is_empty()) {
+    if body.contains('-')
+        || (body.contains('T') && body.find('T').map(|p| &body[..p]).unwrap_or("").is_empty())
+    {
         // Possibly "P2012-02-02T14:37:21.545" alternative format
         if let Some(result) = parse_duration_alternative(body) {
             return Some(result);
@@ -12716,14 +12842,24 @@ fn parse_duration_alternative(body: &str) -> Option<String> {
     let sec_str = time_parts.get(2).copied().unwrap_or("0");
     let sec_s = format_duration_seconds(sec_str.parse::<f64>().ok()?);
     let mut result = String::from("P");
-    if y != 0 { result.push_str(&format!("{y}Y")); }
-    if mo != 0 { result.push_str(&format!("{mo}M")); }
-    if d != 0 { result.push_str(&format!("{d}D")); }
+    if y != 0 {
+        result.push_str(&format!("{y}Y"));
+    }
+    if mo != 0 {
+        result.push_str(&format!("{mo}M"));
+    }
+    if d != 0 {
+        result.push_str(&format!("{d}D"));
+    }
     let has_time = h != 0 || min != 0 || sec_str != "0";
     if has_time {
         result.push('T');
-        if h != 0 { result.push_str(&format!("{h}H")); }
-        if min != 0 { result.push_str(&format!("{min}M")); }
+        if h != 0 {
+            result.push_str(&format!("{h}H"));
+        }
+        if min != 0 {
+            result.push_str(&format!("{min}M"));
+        }
         if sec_str != "0" && sec_str != "0.0" {
             result.push_str(&sec_s);
         }

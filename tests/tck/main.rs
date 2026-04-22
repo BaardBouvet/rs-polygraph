@@ -20,7 +20,7 @@
 //   causing incorrect results — those scenarios are accepted as failing.
 // * Relationship property access (reification path) → results may diverge.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cucumber::{gherkin::Step, given, then, when, World};
 use oxigraph::{
@@ -139,7 +139,10 @@ fn strip_zero_seconds_from_time(v: &str) -> Option<String> {
     // Handle "Z" UTC suffix: "HH:MM:00Z" → "HH:MM:Z" → "HH:MMZ"
     if v.ends_with('Z') {
         let body = &v[..v.len() - 1]; // strip trailing 'Z'
-        if body.len() == 8 && body.as_bytes().get(2) == Some(&b':') && body.as_bytes().get(5) == Some(&b':') {
+        if body.len() == 8
+            && body.as_bytes().get(2) == Some(&b':')
+            && body.as_bytes().get(5) == Some(&b':')
+        {
             if body.ends_with(":00") && !body[6..].contains('.') {
                 let hhmm = &body[..5];
                 return Some(format!("{hhmm}Z"));
@@ -353,7 +356,8 @@ fn expr_to_sparql_update_expr(expr: &Expression, var: &str) -> Option<String> {
     match expr {
         Expression::Literal(Literal::Integer(n)) => Some(format!("{n}")),
         Expression::Literal(Literal::Float(f)) => Some(format!(
-            "\"{}\"^^<http://www.w3.org/2001/XMLSchema#double>", f
+            "\"{}\"^^<http://www.w3.org/2001/XMLSchema#double>",
+            f
         )),
         Expression::Literal(Literal::String(s)) => {
             let escaped = s.replace('"', "\\\"");
@@ -538,7 +542,9 @@ fn emit_create_pattern_with_bindings(
 /// The SELECT query (for the RETURN part) should be generated separately using
 /// `Transpiler::cypher_to_sparql_skip_writes`.
 fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
-    use polygraph::ast::cypher::{Clause, Direction, Expression, Literal, PatternElement, RemoveItem, SetItem};
+    use polygraph::ast::cypher::{
+        Clause, Direction, Expression, Literal, PatternElement, RemoveItem, SetItem,
+    };
 
     let query = match parse_cypher(cypher) {
         Ok(q) => q,
@@ -551,8 +557,10 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
     // Track UNWIND variable and values for loop expansion in MERGE/CREATE.
     let mut loop_values: Vec<Expression> = vec![Expression::Literal(Literal::Null)];
     let mut unwind_var_name: Option<String> = None;
-    // Track MATCH node constraints for use in relationship MERGE.
+    // Track MATCH node constraints for use in relationship MERGE and CREATE with bound vars.
     let mut match_node_triples: HashMap<String, Vec<String>> = HashMap::new();
+    // Also track WITH alias renames: new_name → original MATCH variable.
+    let mut with_aliases: HashMap<String, String> = HashMap::new();
     // Track pairs of node vars that must be connected by some edge (from MATCH edge patterns).
     // This prevents undirected relationship MERGE from creating edges between all cross-pairs.
     let mut match_connected_node_pairs: Vec<(String, String)> = Vec::new();
@@ -569,6 +577,42 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                     _ => {}
                 }
             }
+            Clause::With(w) => {
+                // Track WITH aliases so that CREATE clauses can detect re-used MATCH variables.
+                // e.g., `WITH n AS a` makes `a` an alias for node variable `n`.
+                use polygraph::ast::cypher::ReturnItems;
+                if let ReturnItems::Explicit(items) = &w.items {
+                    for item in items {
+                        if let Some(ref alias) = item.alias {
+                            // If the expression is a variable rename, propagate MATCH constraints.
+                            if let Expression::Variable(src_var) = &item.expression {
+                                // Look up the source variable in match_node_triples (direct or alias)
+                                let orig = with_aliases.get(src_var.as_str())
+                                    .cloned()
+                                    .unwrap_or_else(|| src_var.clone());
+                                let constraints = match_node_triples.get(orig.as_str()).cloned()
+                                    .or_else(|| {
+                                        // Try the src_var directly
+                                        match_node_triples.get(src_var.as_str()).cloned()
+                                    })
+                                    .unwrap_or_else(|| {
+                                        // Default: just `?alias <__node> <__node>`
+                                        vec![format!("?{alias} <{BASE}__node> <{BASE}__node>")]
+                                    });
+                                // Re-express constraints in terms of the new alias name
+                                let aliased: Vec<String> = constraints.iter().map(|t| {
+                                    t.replace(&format!("?{src_var} "), &format!("?{alias} "))
+                                      .replace(&format!("?{src_var}>"), &format!("?{alias}>"))
+                                      .replace(&format!("?{orig} "), &format!("?{alias} "))
+                                      .replace(&format!("?{orig}>"), &format!("?{alias}>"))
+                                }).collect();
+                                match_node_triples.insert(alias.clone(), aliased);
+                                with_aliases.insert(alias.clone(), orig);
+                            }
+                        }
+                    }
+                }
+            }
             Clause::Match(mc) => {
                 // Track node variable constraints for use in relationship MERGE.
                 for pattern in &mc.pattern.0 {
@@ -577,11 +621,13 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                         match elem {
                             PatternElement::Node(node) => {
                                 if let Some(var) = &node.variable {
-                                    let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+                                    let rdf_type =
+                                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
                                     let mut triples = Vec::new();
                                     triples.push(format!("?{var} <{BASE}__node> <{BASE}__node>"));
                                     for label in &node.labels {
-                                        triples.push(format!("?{var} <{rdf_type}> <{BASE}{label}>"));
+                                        triples
+                                            .push(format!("?{var} <{rdf_type}> <{BASE}{label}>"));
                                     }
                                     if let Some(props) = &node.properties {
                                         for (key, val) in props {
@@ -595,7 +641,8 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                 // Track edge connection from previous node.
                                 if let Some(ref prev) = prev_node_var {
                                     if let Some(ref curr) = node.variable {
-                                        match_connected_node_pairs.push((prev.clone(), curr.clone()));
+                                        match_connected_node_pairs
+                                            .push((prev.clone(), curr.clone()));
                                     }
                                 }
                                 prev_node_var = node.variable.clone();
@@ -606,13 +653,133 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                 }
             }
             Clause::Create(c) => {
-                // CREATE in query context (with RETURN): insert immediately
-                let mut triples: Vec<String> = Vec::new();
-                for pattern in &c.pattern.0 {
-                    emit_create_pattern(pattern, &mut triples, &mut node_map, &mut counter);
-                }
-                if !triples.is_empty() {
-                    updates.push(format!("INSERT DATA {{\n  {}\n}}", triples.join("\n  ")));
+                // Check if any CREATE pattern node references a pre-bound variable
+                // (from MATCH or WITH alias tracking).
+                let has_bound_vars = c.pattern.0.iter().any(|pat| {
+                    pat.elements.iter().any(|elem| {
+                        if let PatternElement::Node(n) = elem {
+                            n.variable.as_ref()
+                                .map(|v| match_node_triples.contains_key(v.as_str()))
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        }
+                    })
+                });
+
+                if has_bound_vars {
+                    // Generate INSERT { ... } WHERE { ... } — bound vars become ?var,
+                    // newly-created nodes become blank nodes.
+                    let mut insert_triples: Vec<String> = Vec::new();
+                    let mut where_triples: Vec<String> = Vec::new();
+                    let mut seen_bound: HashSet<String> = HashSet::new();
+
+                    for pattern in &c.pattern.0 {
+                        let elements = &pattern.elements;
+                        // First pass: resolve each Node element to its SPARQL ref (var or bnode).
+                        let mut node_refs: Vec<Option<String>> = Vec::with_capacity(elements.len());
+                        for elem in elements {
+                            match elem {
+                                PatternElement::Node(n) => {
+                                    let node_ref = if let Some(var) = &n.variable {
+                                        if let Some(constraints) = match_node_triples.get(var.as_str()) {
+                                            // Pre-bound node: use ?varname in INSERT template.
+                                            if seen_bound.insert(var.clone()) {
+                                                for t in constraints {
+                                                    if !where_triples.contains(t) {
+                                                        where_triples.push(t.clone());
+                                                    }
+                                                }
+                                            }
+                                            format!("?{var}")
+                                        } else {
+                                            // New named node: allocate bnode.
+                                            let bnode = node_map
+                                                .entry(var.clone())
+                                                .or_insert_with(|| {
+                                                    let s = format!("_:__n{counter}");
+                                                    counter += 1;
+                                                    s
+                                                })
+                                                .clone();
+                                            insert_triples.push(format!("{bnode} <{BASE}__node> <{BASE}__node> ."));
+                                            for label in &n.labels {
+                                                insert_triples.push(format!("{bnode} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}> ."));
+                                            }
+                                            if let Some(props) = &n.properties {
+                                                for (key, val_expr) in props {
+                                                    if let Some(lit) = expr_to_sparql_lit(val_expr) {
+                                                        insert_triples.push(format!("{bnode} <{BASE}{key}> {lit} ."));
+                                                    }
+                                                }
+                                            }
+                                            bnode
+                                        }
+                                    } else {
+                                        // Anonymous new node in a bound-var CREATE.
+                                        // Use __anon_node sentinel (not __node) so that
+                                        // the newly-created node is NOT matched by a
+                                        // subsequent MATCH (n) in the same query, which
+                                        // preserves Cypher read-before-write semantics.
+                                        let bnode = format!("_:__n{counter}");
+                                        counter += 1;
+                                        insert_triples.push(format!("{bnode} <{BASE}__anon_node> <{BASE}__anon_node> ."));
+                                        bnode
+                                    };
+                                    node_refs.push(Some(node_ref));
+                                }
+                                PatternElement::Relationship(_) => {
+                                    node_refs.push(None);
+                                }
+                            }
+                        }
+                        // Second pass: emit edge triples.
+                        for (i, elem) in elements.iter().enumerate() {
+                            if let PatternElement::Relationship(rel) = elem {
+                                let src_ref = node_refs[..i].iter().filter_map(|x| x.as_deref()).last();
+                                let dst_ref = node_refs[i + 1..].iter().filter_map(|x| x.as_deref()).next();
+                                if let (Some(src_b), Some(dst_b)) = (src_ref, dst_ref) {
+                                    let (s, o) = match rel.direction {
+                                        Direction::Left => (dst_b, src_b),
+                                        _ => (src_b, dst_b),
+                                    };
+                                    if rel.rel_types.is_empty() {
+                                        insert_triples.push(format!("{s} <{BASE}__rel> {o} ."));
+                                    } else {
+                                        for rt in &rel.rel_types {
+                                            insert_triples.push(format!("{s} <{BASE}{rt}> {o} ."));
+                                            if let Some(props) = &rel.properties {
+                                                for (key, val_expr) in props {
+                                                    if let Some(lit) = expr_to_sparql_lit(val_expr) {
+                                                        insert_triples.push(format!("<< {s} <{BASE}{rt}> {o} >> <{BASE}{key}> {lit} ."));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !insert_triples.is_empty() {
+                        let insert_body = insert_triples.join("\n  ");
+                        let where_body = if where_triples.is_empty() {
+                            "{ }".to_string()
+                        } else {
+                            format!("{{ {} }}", where_triples.iter().map(|t| format!("{t} .")).collect::<Vec<_>>().join(" "))
+                        };
+                        updates.push(format!("INSERT {{\n  {insert_body}\n}} WHERE {where_body}"));
+                    }
+                } else {
+                    // All new nodes: use INSERT DATA as before.
+                    let mut triples: Vec<String> = Vec::new();
+                    for pattern in &c.pattern.0 {
+                        emit_create_pattern(pattern, &mut triples, &mut node_map, &mut counter);
+                    }
+                    if !triples.is_empty() {
+                        updates.push(format!("INSERT DATA {{\n  {}\n}}", triples.join("\n  ")));
+                    }
                 }
             }
             Clause::Remove(r) => {
@@ -634,7 +801,8 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             let dst_var = format!("?{variable}_dst");
                             let edge_del = format!("?{variable}_{key}_edel");
                             let reif_var = format!("?{variable}_{key}_reif");
-                            let rdf_reifies_iri = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+                            let rdf_reifies_iri =
+                                "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
                             let rel_update = format!(
                                 "DELETE {{ {reif_var} <{prop_iri}> {edge_del} }} WHERE {{ {src_var} {pred_var} {dst_var} . {reif_var} <{rdf_reifies_iri}> <<( {src_var} {pred_var} {dst_var} )>> . OPTIONAL {{ {reif_var} <{prop_iri}> {edge_del} }} }}"
                             );
@@ -673,7 +841,9 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                     "DELETE {{ {n_var} <{prop_iri}> {old_var} }} INSERT {{ {n_var} <{prop_iri}> {lit_str} }} WHERE {{ {n_var} <{BASE}__node> <{BASE}__node> . OPTIONAL {{ {n_var} <{prop_iri}> {old_var} }} }}"
                                 );
                                 updates.push(update);
-                            } else if let Some(expr_str) = expr_to_sparql_update_expr(value, variable) {
+                            } else if let Some(expr_str) =
+                                expr_to_sparql_update_expr(value, variable)
+                            {
                                 // Expression value: use BIND to compute new value
                                 // (e.g., SET n.num = n.num + 1 → BIND(?n_num_old + 1 AS ?n_num_new))
                                 // FILTER(BOUND(?new)) is required: if BIND fails (e.g., type error for
@@ -688,7 +858,8 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                 let pred_var = format!("?{variable}_pred");
                                 let dst_var = format!("?{variable}_dst");
                                 let reif_var = format!("?{variable}_{key}_reif");
-                                let rdf_reifies_iri = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+                                let rdf_reifies_iri =
+                                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
                                 let rel_update = format!(
                                     "DELETE {{ {reif_var} <{prop_iri}> {old_var} }} INSERT {{ {reif_var} <{prop_iri}> {new_var} }} WHERE {{ {src_var} {pred_var} {dst_var} . {reif_var} <{rdf_reifies_iri}> <<( {src_var} {pred_var} {dst_var} )>> . {reif_var} <{prop_iri}> {old_var} . BIND({expr_str} AS {new_var}) . FILTER(BOUND({new_var})) }}"
                                 );
@@ -718,10 +889,7 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                 // Only handle simple node patterns (single node, no relationship).
                 if m.pattern.elements.len() == 1 {
                     if let PatternElement::Node(node) = &m.pattern.elements[0] {
-                        let var_name = node
-                            .variable
-                            .as_deref()
-                            .unwrap_or("__merge_n");
+                        let var_name = node.variable.as_deref().unwrap_or("__merge_n");
                         let n_var = format!("?{var_name}");
 
                         // Expand the MERGE for each UNWIND iteration.
@@ -736,7 +904,9 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             }
 
                             // Helper: resolve a property expression with current bindings.
-                            let resolve_val = |val: &Expression, bindings: &HashMap<String, &Expression>| -> Option<String> {
+                            let resolve_val = |val: &Expression,
+                                               bindings: &HashMap<String, &Expression>|
+                             -> Option<String> {
                                 match val {
                                     Expression::Variable(v) => {
                                         if let Some(bound) = bindings.get(v.as_str()) {
@@ -773,8 +943,12 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                     for item in &action.items {
                                         match item {
                                             SetItem::Property { key, value, .. } => {
-                                                if let Some(lit_str) = resolve_val(value, &bindings_map) {
-                                                    insert_triples.push(format!("{bnode} <{BASE}{key}> {lit_str}"));
+                                                if let Some(lit_str) =
+                                                    resolve_val(value, &bindings_map)
+                                                {
+                                                    insert_triples.push(format!(
+                                                        "{bnode} <{BASE}{key}> {lit_str}"
+                                                    ));
                                                 }
                                             }
                                             SetItem::SetLabel { labels, .. } => {
@@ -833,7 +1007,9 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                     for item in &action.items {
                                         match item {
                                             SetItem::Property { key, value, .. } => {
-                                                if let Some(lit_str) = resolve_val(value, &bindings_map) {
+                                                if let Some(lit_str) =
+                                                    resolve_val(value, &bindings_map)
+                                                {
                                                     let prop_iri = format!("{BASE}{key}");
                                                     let old_var = format!("?{var_name}_{key}_old");
                                                     updates.push(format!(
@@ -870,8 +1046,10 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                         let src_name = src_node.variable.as_deref().unwrap_or("__src");
                         let dst_name = dst_node.variable.as_deref().unwrap_or("__dst");
                         // Collect WHERE conditions: start with known match constraints, fall back to __node sentinel.
-                        let default_src = vec![format!("?{src_name} <{BASE}__node> <{BASE}__node>")];
-                        let default_dst = vec![format!("?{dst_name} <{BASE}__node> <{BASE}__node>")];
+                        let default_src =
+                            vec![format!("?{src_name} <{BASE}__node> <{BASE}__node>")];
+                        let default_dst =
+                            vec![format!("?{dst_name} <{BASE}__node> <{BASE}__node>")];
                         let src_triples = match_node_triples.get(src_name).unwrap_or(&default_src);
                         let dst_triples = match_node_triples.get(dst_name).unwrap_or(&default_dst);
                         // Add src node constraints from the MERGE pattern itself.
@@ -941,11 +1119,20 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             }
                             let not_exists_str = if matches!(rel.direction, Direction::Both) {
                                 // Undirected: check either direction.
-                                let rev_parts: Vec<String> = not_exists_parts.iter()
-                                    .map(|p| p.replace(&format!("?{actual_src} <{type_iri}> ?{actual_dst}"),
-                                                       &format!("?{actual_dst} <{type_iri}> ?{actual_src}")))
+                                let rev_parts: Vec<String> = not_exists_parts
+                                    .iter()
+                                    .map(|p| {
+                                        p.replace(
+                                            &format!("?{actual_src} <{type_iri}> ?{actual_dst}"),
+                                            &format!("?{actual_dst} <{type_iri}> ?{actual_src}"),
+                                        )
+                                    })
                                     .collect();
-                                format!("{{ {} }} UNION {{ {} }}", not_exists_parts.join(" . "), rev_parts.join(" . "))
+                                format!(
+                                    "{{ {} }} UNION {{ {} }}",
+                                    not_exists_parts.join(" . "),
+                                    rev_parts.join(" . ")
+                                )
                             } else {
                                 not_exists_parts.join(" . ")
                             };
@@ -953,10 +1140,11 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             // For undirected MERGE following an undirected MATCH-edge pattern:
                             // restrict the INSERT to node pairs that must be edge-connected
                             // (prevents creating edges between all cross-pairs of matching nodes).
-                            let is_connected_pair = match_connected_node_pairs.iter().any(|(a, b)| {
-                                (a.as_str() == src_name && b.as_str() == dst_name) ||
-                                (a.as_str() == dst_name && b.as_str() == src_name)
-                            });
+                            let is_connected_pair =
+                                match_connected_node_pairs.iter().any(|(a, b)| {
+                                    (a.as_str() == src_name && b.as_str() == dst_name)
+                                        || (a.as_str() == dst_name && b.as_str() == src_name)
+                                });
                             if matches!(rel.direction, Direction::Both) && is_connected_pair {
                                 // Add constraint: src and dst must be connected by SOME edge.
                                 let anyrel = format!("?__anyrel_{}_{}", src_name, dst_name);
@@ -1157,10 +1345,17 @@ async fn executing_query(world: &mut TckWorld, step: &Step) {
     let cypher = step.docstring.as_deref().unwrap_or("").trim();
 
     let sparql = match Transpiler::cypher_to_sparql(cypher, &ENGINE) {
-        Err(e) if {
-            let s = e.to_string();
-            s.contains("clause (SPARQL Update") || s.contains("SET clause") || s.contains("REMOVE clause") || s.contains("MERGE clause") || s.contains("CREATE clause") || s.contains("set_item replace")
-        } => {
+        Err(e)
+            if {
+                let s = e.to_string();
+                s.contains("clause (SPARQL Update")
+                    || s.contains("SET clause")
+                    || s.contains("REMOVE clause")
+                    || s.contains("MERGE clause")
+                    || s.contains("CREATE clause")
+                    || s.contains("set_item replace")
+            } =>
+        {
             // Write clause: execute updates first, then translate as read-only SELECT.
             let updates = write_clauses_to_updates(cypher);
             let store = world
