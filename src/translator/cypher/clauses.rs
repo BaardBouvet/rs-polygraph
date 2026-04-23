@@ -445,12 +445,64 @@ impl TranslationState {
                             }
                         }
 
-                        for (var, expr) in &extends {
-                            current = GraphPattern::Extend {
-                                inner: Box::new(current),
-                                variable: var.clone(),
-                                expression: expr.clone(),
-                            };
+                        // ── BIND-conflict resolution ─────────────────────────────────────
+                        // SPARQL 1.1 §18.2.4 forbids BIND(expr AS ?v) when ?v is already
+                        // in scope.  This arises when WITH renames a variable to a name
+                        // that is already bound by the preceding MATCH pattern, e.g.:
+                        //   MATCH (a)-[r]->(b) WITH a AS b, b AS tmp
+                        // Fix: for each conflicting extend target, insert an inner Extend
+                        // that renames the original binding to a fresh "shadow" variable,
+                        // then wrap in a sub-Project that hides the original name.  The
+                        // outer BIND can then legally use that name.
+                        {
+                            let current_scope = bound_vars_of_pattern(&current);
+                            let mut shadows: std::collections::HashMap<String, Variable> =
+                                Default::default();
+                            for (target, _) in &extends {
+                                let name = target.as_str();
+                                if current_scope.contains(name) {
+                                    let shadow = self.fresh_var(&format!("shadow_{name}"));
+                                    shadows.insert(name.to_string(), shadow);
+                                }
+                            }
+                            if !shadows.is_empty() {
+                                // Add inner Extend nodes to bind shadow vars.
+                                for (orig_name, shadow) in &shadows {
+                                    let orig_var = Variable::new_unchecked(orig_name.clone());
+                                    current = GraphPattern::Extend {
+                                        inner: Box::new(current),
+                                        variable: shadow.clone(),
+                                        expression: SparExpr::Variable(orig_var),
+                                    };
+                                }
+                                // Wrap in a sub-Project: expose shadow vars, hide originals.
+                                let mut shadow_proj_vars: Vec<Variable> = current_scope
+                                    .iter()
+                                    .filter(|n| !shadows.contains_key(*n))
+                                    .map(|n| Variable::new_unchecked(n.clone()))
+                                    .collect();
+                                for shadow in shadows.values() {
+                                    shadow_proj_vars.push(shadow.clone());
+                                }
+                                current = GraphPattern::Project {
+                                    inner: Box::new(current),
+                                    variables: shadow_proj_vars,
+                                };
+                            }
+                            for (var, expr) in &extends {
+                                // Rewrite any source variable that was shadowed.
+                                let resolved_expr = match expr {
+                                    SparExpr::Variable(v) if shadows.contains_key(v.as_str()) => {
+                                        SparExpr::Variable(shadows[v.as_str()].clone())
+                                    }
+                                    _ => expr.clone(),
+                                };
+                                current = GraphPattern::Extend {
+                                    inner: Box::new(current),
+                                    variable: var.clone(),
+                                    expression: resolved_expr,
+                                };
+                            }
                         }
 
                         // Join in any correlated subqueries from pattern comprehensions (WITH clause).
@@ -607,15 +659,28 @@ impl TranslationState {
                                             }
                                         }
                                         if let Some(edge) = self.edge_map.get(alias).cloned() {
+                                            // Skip projecting a src/dst variable if it is
+                                            // already the SOURCE of one of the extends —
+                                            // i.e., it is being renamed to a different
+                                            // name.  The rename captures its value in the
+                                            // new variable, so projecting the old name here
+                                            // would leak the raw SPARQL var into the next
+                                            // scope and incorrectly constrain subsequent
+                                            // MATCH patterns.
+                                            let renamed_away = |v: &Variable| {
+                                                extends.iter().any(|(_, expr)| {
+                                                    matches!(expr, SparExpr::Variable(src) if src == v)
+                                                })
+                                            };
                                             // Project src variable
                                             if let TermPattern::Variable(sv) = &edge.src {
-                                                if !inner_vars.contains(sv) {
+                                                if !inner_vars.contains(sv) && !renamed_away(sv) {
                                                     inner_vars.push(sv.clone());
                                                 }
                                             }
                                             // Project dst variable
                                             if let TermPattern::Variable(dv) = &edge.dst {
-                                                if !inner_vars.contains(dv) {
+                                                if !inner_vars.contains(dv) && !renamed_away(dv) {
                                                     inner_vars.push(dv.clone());
                                                 }
                                             }
@@ -1749,5 +1814,80 @@ impl TranslationState {
 
         Ok(current)
     }
+}
 
+// ── Helper for BIND-conflict detection ───────────────────────────────────────
+
+/// Collects the variable names that are in scope at the outermost level of
+/// `pattern`.  A `Project` node acts as a scope boundary — only its listed
+/// variables are visible to the containing pattern.
+fn bound_vars_of_pattern(pattern: &GraphPattern) -> std::collections::HashSet<String> {
+    match pattern {
+        GraphPattern::Bgp { patterns } => {
+            let mut vars = std::collections::HashSet::new();
+            for tp in patterns {
+                extract_tp_vars_for_scope(&tp.subject, &mut vars);
+                extract_tp_vars_for_scope(&tp.object, &mut vars);
+            }
+            vars
+        }
+        GraphPattern::Join { left, right } => {
+            let mut vars = bound_vars_of_pattern(left);
+            vars.extend(bound_vars_of_pattern(right));
+            vars
+        }
+        GraphPattern::LeftJoin { left, .. } | GraphPattern::Minus { left, .. } => {
+            bound_vars_of_pattern(left)
+        }
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner } => bound_vars_of_pattern(inner),
+        GraphPattern::Slice { inner, .. } | GraphPattern::OrderBy { inner, .. } => {
+            bound_vars_of_pattern(inner)
+        }
+        GraphPattern::Extend {
+            inner, variable, ..
+        } => {
+            let mut vars = bound_vars_of_pattern(inner);
+            vars.insert(variable.as_str().to_string());
+            vars
+        }
+        GraphPattern::Project { variables, .. } => {
+            variables.iter().map(|v| v.as_str().to_string()).collect()
+        }
+        GraphPattern::Values { variables, .. } => {
+            variables.iter().map(|v| v.as_str().to_string()).collect()
+        }
+        GraphPattern::Group {
+            variables,
+            aggregates,
+            ..
+        } => {
+            let mut vars: std::collections::HashSet<String> =
+                variables.iter().map(|v| v.as_str().to_string()).collect();
+            for (v, _) in aggregates {
+                vars.insert(v.as_str().to_string());
+            }
+            vars
+        }
+        GraphPattern::Union { left, right } => {
+            let lv = bound_vars_of_pattern(left);
+            let rv = bound_vars_of_pattern(right);
+            lv.intersection(&rv).cloned().collect()
+        }
+        _ => Default::default(),
+    }
+}
+
+fn extract_tp_vars_for_scope(tp: &TermPattern, vars: &mut std::collections::HashSet<String>) {
+    match tp {
+        TermPattern::Variable(v) => {
+            vars.insert(v.as_str().to_string());
+        }
+        TermPattern::Triple(inner) => {
+            extract_tp_vars_for_scope(&inner.subject, vars);
+            extract_tp_vars_for_scope(&inner.object, vars);
+        }
+        _ => {}
+    }
 }
