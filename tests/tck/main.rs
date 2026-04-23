@@ -1636,6 +1636,12 @@ async fn parameters_are_given(world: &mut TckWorld) {
     world.skip = true;
 }
 
+/// `And there exists a procedure …` — CALL procedure stubs not supported; skip scenario.
+#[given(regex = r"^there exists a procedure")]
+async fn procedure_stub_given(world: &mut TckWorld) {
+    world.skip = true;
+}
+
 /// `When executing query:` — translate the Cypher and run it against the store.
 #[when(regex = r"^executing query:$")]
 async fn executing_query(world: &mut TckWorld, step: &Step) {
@@ -1923,16 +1929,16 @@ async fn runtime_error(world: &mut TckWorld) {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() {
-    // cargo-nextest passes `--list --format terse` to discover tests in custom harnesses.
-    // It calls twice: without `--ignored` for regular tests and with `--ignored` for
-    // ignored tests.  Respond with a single test entry for the regular call; nothing for
-    // the ignored call (we have no #[ignore] tests).
+fn main() {
+    // Run the async test harness in a thread with a large stack to avoid overflows
+    // when processing features with many scenario outlines (hundreds of scenarios)
+    // in unoptimised debug builds, where SPARQL property-accessor expressions are
+    // very deeply nested and each stack frame is much larger.
     let args: Vec<String> = std::env::args().collect();
+
+    // cargo-nextest --list handling must happen synchronously before runtime launch.
     if args.iter().any(|a| a == "--list") {
         if !args.iter().any(|a| a == "--ignored") {
-            // Derive the test name from the binary name (strip cargo's hash suffix).
             let binary = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -1942,6 +1948,24 @@ async fn main() {
         }
         return;
     }
+
+    // 64 MiB stack — date/temporal property accessors expand to very large SPARQL
+    // expressions; in debug mode each recursive translator frame is large.
+    let stack_size: usize = 64 * 1024 * 1024;
+    let builder = std::thread::Builder::new().stack_size(stack_size);
+    let handler = builder
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(run_tests())
+        })
+        .expect("spawn large-stack thread");
+    handler.join().expect("test thread panicked");
+}
+
+async fn run_tests() {
 
     let features_dirs: Vec<String> = {
         // Allow nextest to inject shard paths via one or more --dir <path> in run-extra-args.

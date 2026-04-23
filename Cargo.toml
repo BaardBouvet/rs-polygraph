@@ -17,9 +17,14 @@ path = "tests/tck/main.rs"
 harness = false
 
 # Parallel shards — run with: cargo nextest run -E 'binary(/^tck_/) and not binary(tck_slow)'
-# Six balanced groups sized by workload; @slow scenarios are excluded from all of these.
+# Balanced groups sized by workload; @slow scenarios are excluded from all of these.
 [[test]]
 name = "tck_clauses"
+path = "tests/tck/main.rs"
+harness = false
+
+[[test]]
+name = "tck_write_clauses"
 path = "tests/tck/main.rs"
 harness = false
 
@@ -35,6 +40,11 @@ harness = false
 
 [[test]]
 name = "tck_expressions_misc"
+path = "tests/tck/main.rs"
+harness = false
+
+[[test]]
+name = "tck_expressions_temporal"
 path = "tests/tck/main.rs"
 harness = false
 

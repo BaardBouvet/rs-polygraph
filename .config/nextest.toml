@@ -1,9 +1,10 @@
 [profile.default]
 
-# tck_clauses: all 10 clauses sub-directories
+# tck_clauses: read-only clause sub-directories + call (proc stubs → skipped)
 [[profile.default.overrides]]
 filter = "binary(tck_clauses)"
 run-extra-args = [
+  "--dir", "tests/tck/features/clauses/call",
   "--dir", "tests/tck/features/clauses/match-where",
   "--dir", "tests/tck/features/clauses/return",
   "--dir", "tests/tck/features/clauses/return-orderby",
@@ -14,6 +15,18 @@ run-extra-args = [
   "--dir", "tests/tck/features/clauses/with-orderBy",
   "--dir", "tests/tck/features/clauses/with-skip-limit",
   "--dir", "tests/tck/features/clauses/with-where"
+]
+
+# tck_write_clauses: write-heavy clause sub-directories
+[[profile.default.overrides]]
+filter = "binary(tck_write_clauses)"
+run-extra-args = [
+  "--dir", "tests/tck/features/clauses/create",
+  "--dir", "tests/tck/features/clauses/delete",
+  "--dir", "tests/tck/features/clauses/match",
+  "--dir", "tests/tck/features/clauses/merge",
+  "--dir", "tests/tck/features/clauses/remove",
+  "--dir", "tests/tck/features/clauses/set"
 ]
 
 # tck_expressions_agg: aggregation (all 8 files; @slow skipped by default)
@@ -42,6 +55,16 @@ run-extra-args = [
   "--dir", "tests/tck/features/expressions/null",
   "--dir", "tests/tck/features/expressions/string",
   "--dir", "tests/tck/features/expressions/typeConversion"
+]
+
+# tck_expressions_temporal: temporal + quantifier + graph/path groups
+[[profile.default.overrides]]
+filter = "binary(tck_expressions_temporal)"
+run-extra-args = [
+  "--dir", "tests/tck/features/expressions/graph",
+  "--dir", "tests/tck/features/expressions/path",
+  "--dir", "tests/tck/features/expressions/quantifier",
+  "--dir", "tests/tck/features/expressions/temporal"
 ]
 
 # tck_usecases
