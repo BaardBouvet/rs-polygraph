@@ -580,12 +580,15 @@ fn tck_eval_duration(pairs: &[(String, Expression)]) -> Option<String> {
         return None;
     }
     // Cascade fractions downward.
+    // Fix 1: cascade fractional years into months (e.g. years:12.5 → +6 months).
+    let years_frac = years.map(|y| y.fract()).unwrap_or(0.0);
+    let months_f = months_f + years_frac * 12.0;
     let months_int = months_f.trunc();
     let extra_days = months_f.fract() * 30.436875 + weeks_f * 7.0;
     let days_total = days_raw + extra_days;
     let days_int = days_total.trunc();
     let hours_total = hours_raw + days_total.fract() * 24.0;
-    let hours_int = hours_total.trunc();
+    let hours_int_raw = hours_total.trunc();
     let mins_total = mins_raw + hours_total.fract() * 60.0;
     let mins_int = mins_total.trunc();
     let secs_total_f = secs_raw + mins_total.fract() * 60.0;
@@ -607,6 +610,17 @@ fn tck_eval_duration(pairs: &[(String, Expression)]) -> Option<String> {
     };
     let s_final = s_whole - carry_min * 60;
     let min_total = mins_int as i64 + carry_min;
+
+    // Fix 2: normalize hours≥24 (or hours<-24) into extra days so the resulting
+    // duration string has a valid per-component representation for XSD arithmetic.
+    // Example: P12Y11M29DT33H58M13.5S → P12Y11M30DT9H58M13.5S.
+    let extra_days_from_hours = if hours_int_raw >= 0.0 {
+        (hours_int_raw as i64 / 24) as f64
+    } else {
+        -((-hours_int_raw as i64) / 24) as f64
+    };
+    let hours_int = hours_int_raw - extra_days_from_hours * 24.0;
+    let days_int = days_int + extra_days_from_hours;
 
     let mut date_s = String::new();
     if let Some(y) = years {
