@@ -791,6 +791,27 @@ impl TranslationState {
                             }
                             let with_needs_outer_project =
                                 inner_vars.len() > original_inner_vars.len();
+                            // For any sort-by-list-variable in ORDER BY, add the sort key
+                            // variable to the inner projection so ORDER BY (which runs outside
+                            // the sub-SELECT) can reference it. The outer Project below will
+                            // hide these extra variables from subsequent clauses.
+                            if let Some(ob) = w.order_by.as_ref() {
+                                for sort_item in &ob.items {
+                                    if let Expression::Variable(v) = &sort_item.expression {
+                                        if let Some(sk_name) =
+                                            self.list_sort_key_vars.get(v.as_str()).cloned()
+                                        {
+                                            let sk_var = Variable::new_unchecked(sk_name);
+                                            if !inner_vars.contains(&sk_var) {
+                                                inner_vars.push(sk_var);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            let with_needs_outer_project =
+                                with_needs_outer_project
+                                    || inner_vars.len() > original_inner_vars.len();
                             current = GraphPattern::Project {
                                 inner: Box::new(current),
                                 variables: inner_vars,

@@ -1550,5 +1550,12 @@ struct TranslationState {
     /// property expression is too complex for an inline TermPattern object.
     /// The caller must drain and apply these after translating the pattern.
     pending_prop_filters: Vec<SparExpr>,
+    /// Maps list UNWIND variable name → sort-key SPARQL variable name (`__sk_<var>`).
+    ///
+    /// When `UNWIND [...] AS x` expands a list of nested lists or mixed types, a
+    /// parallel VALUES column `?__sk_x` is emitted, containing lexicographically
+    /// sortable keys that encode Cypher's type ordering.  `apply_order_skip_limit`
+    /// substitutes the sort-key variable in ORDER BY expressions that reference `x`.
+    list_sort_key_vars: std::collections::HashMap<String, String>,
 }
 

@@ -445,6 +445,7 @@ impl TranslationState {
             remove_tracked_labels: Default::default(),
             with_lit_vars: Default::default(),
             pending_prop_filters: Vec::new(),
+            list_sort_key_vars: Default::default(),
         }
     }
 
@@ -2646,6 +2647,67 @@ impl TranslationState {
 
 include!("functions.rs");
 
+/// Compute a lexicographically-sortable sort key for a Cypher literal expression
+/// for use in a parallel VALUES column.
+///
+/// The encoding follows Cypher's ascending type ordering:
+///   map (0) < node (1) < rel (2) < list (3) < path (4) <
+///   string (5) < bool-false (6) < bool-true (7) < number (8) < NaN (9) < null (Z)
+///
+/// Within each type:
+/// - Strings: `"5" + chars + '\u{0001}'` (U+0001 terminator, less than all type codes)
+/// - Integers: `"8" + 20-digit zero-padded (n + 2^63)` (offset maps full i64 range into u64)
+/// - Floats:   `"8" + 20-digit IEEE sort key` (NaN → `"9"`)
+/// - Lists:    `"3" + concat(sort_key(element)...)` (elements concatenated directly)
+/// - null:     `"Z"` (highest, sorts last ascending)
+fn sort_key_for_expr(e: &crate::ast::cypher::Expression) -> String {
+    use crate::ast::cypher::{Expression, Literal};
+    match e {
+        Expression::Literal(Literal::Null) => "Z".to_string(),
+        Expression::Literal(Literal::Boolean(true)) => "7".to_string(),
+        Expression::Literal(Literal::Boolean(false)) => "6".to_string(),
+        Expression::Literal(Literal::Integer(n)) => {
+            // Offset the i64 so it fits in u64, then zero-pad to 20 digits.
+            let shifted = (*n as i128 + 9_223_372_036_854_775_808_i128) as u64;
+            format!("8{:020}", shifted)
+        }
+        Expression::Literal(Literal::Float(f)) => {
+            if f.is_nan() {
+                "9".to_string() // NaN sorts after all real numbers
+            } else {
+                // IEEE 754 lexicographic trick: negate sign bit on positives, flip
+                // all bits on negatives — makes f64 bit patterns sort numerically.
+                let bits = f.to_bits();
+                let sorted = if *f < 0.0 {
+                    !bits
+                } else {
+                    bits ^ 0x8000_0000_0000_0000
+                };
+                format!("8{:020}", sorted)
+            }
+        }
+        Expression::Literal(Literal::String(s)) => {
+            // Strings: type code "5" + value + U+0001 terminator.
+            // U+0001 (SOH) < "5" (U+0035) < any letter/digit in type codes,
+            // so it cleanly ends a string element without interfering with the
+            // next element's type code.
+            let mut key = String::from("5");
+            key.push_str(s);
+            key.push('\u{0001}');
+            key
+        }
+        Expression::List(items) => {
+            let mut key = String::from("3");
+            for item in items {
+                key.push_str(&sort_key_for_expr(item));
+            }
+            key
+        }
+        Expression::Map(_) => "0".to_string(), // maps sort lowest
+        _ => "3".to_string(), // unknown/compound → list-range slot
+    }
+}
+
 impl TranslationState {
 
     fn translate_aggregate_expr(
@@ -2705,6 +2767,8 @@ impl TranslationState {
             }),
         }
     }
+
+    // ── UNWIND clause ─────────────────────────────────────────────────────────
 
     // ── UNWIND clause ─────────────────────────────────────────────────────────
 
@@ -2804,6 +2868,40 @@ impl TranslationState {
                     if has_non_null {
                         self.unwind_mixed_null_vars.insert(u.variable.clone());
                     }
+                }
+                // When any item is a nested list or map, add a parallel sort-key
+                // column so ORDER BY over this variable uses Cypher's type ordering
+                // instead of SPARQL's lexicographic string comparison.
+                let needs_sort_key = items.iter().any(|e| {
+                    matches!(
+                        e,
+                        Expression::List(_)
+                            | Expression::Map(_)
+                            | Expression::Literal(Literal::Null)
+                    )
+                });
+                if needs_sort_key {
+                    let sk_var_name = format!("__sk_{}", u.variable);
+                    let sk_var = Variable::new_unchecked(sk_var_name.clone());
+                    // Compute sort keys for each item, pairing with the primary binding.
+                    let mut bindings_primary = bindings_result?;
+                    let mut combined_bindings: Vec<Vec<Option<GroundTerm>>> = Vec::new();
+                    for (i, e) in items.iter().enumerate() {
+                        let sk = sort_key_for_expr(e);
+                        let sk_gt = Some(GroundTerm::Literal(SparLit::new_simple_literal(sk)));
+                        let mut row = bindings_primary.remove(0);
+                        // bindings_primary[i] is a 1-element vec; we append the sort key.
+                        let _ = i;
+                        row.push(sk_gt);
+                        combined_bindings.push(row);
+                    }
+                    self.list_sort_key_vars
+                        .insert(u.variable.clone(), sk_var_name);
+                    let values = GraphPattern::Values {
+                        variables: vec![var, sk_var],
+                        bindings: combined_bindings,
+                    };
+                    return Ok(join_patterns(current, values));
                 }
                 let values = GraphPattern::Values {
                     variables: vec![var],
@@ -3188,11 +3286,23 @@ impl TranslationState {
             let extra_before = extra.len();
             let mut sort_exprs = Vec::new();
             for sort_item in &ob.items {
-                let e = self.translate_expr(&sort_item.expression, extra)?;
+                // If the sort expression is a direct variable reference and that
+                // variable has a parallel sort-key column (e.g. from a list-of-lists
+                // UNWIND), sort by the sort-key column instead of the raw encoded string.
+                let sparql_expr =
+                    if let crate::ast::cypher::Expression::Variable(v) = &sort_item.expression {
+                        if let Some(sk_name) = self.list_sort_key_vars.get(v.as_str()).cloned() {
+                            SparExpr::Variable(Variable::new_unchecked(sk_name))
+                        } else {
+                            self.translate_expr(&sort_item.expression, extra)?
+                        }
+                    } else {
+                        self.translate_expr(&sort_item.expression, extra)?
+                    };
                 sort_exprs.push(if sort_item.descending {
-                    OrderExpression::Desc(e)
+                    OrderExpression::Desc(sparql_expr)
                 } else {
-                    OrderExpression::Asc(e)
+                    OrderExpression::Asc(sparql_expr)
                 });
             }
             // Flush ORDER BY property-access triples into the inner pattern as
