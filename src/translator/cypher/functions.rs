@@ -1228,7 +1228,7 @@ impl TranslationState {
                     let lit = match base_for_zero {
                         "date" => SparLit::new_simple_literal("2000-01-01".to_owned()),
                         "localtime" => SparLit::new_simple_literal("00:00".to_owned()),
-                        "time" => SparLit::new_typed_literal("00:00Z".to_owned(), xsd_time_nn),
+                        "time" => SparLit::new_typed_literal("00:00:00Z".to_owned(), xsd_time_nn),
                         "localdatetime" => SparLit::new_simple_literal("2000-01-01T00:00".to_owned()),
                         "datetime" => SparLit::new_typed_literal("2000-01-01T00:00Z".to_owned(), xsd_dt_nn),
                         _ => return Ok(SparExpr::Variable(self.fresh_var("null"))),

@@ -1182,7 +1182,10 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     let sec = temporal_get_i(pairs, "second");
     let frac = temporal_sub_second(pairs);
     match sec {
-        None if frac.is_empty() => Some(format!("{h:02}:{min:02}{tz}")),
+        // Always include :00 seconds for TZ-aware times so that xsd:time literals
+        // are valid XSD time format (Oxigraph requires seconds for comparison).
+        // The TCK runner's strip_zero_seconds_from_time() restores the display form.
+        None if frac.is_empty() => Some(format!("{h:02}:{min:02}:00{tz}")),
         None => Some(format!("{h:02}:{min:02}:00{frac}{tz}")),
         Some(s) => Some(format!("{h:02}:{min:02}:{s:02}{frac}{tz}")),
     }
@@ -2051,6 +2054,13 @@ fn temporal_parse_time(s: &str) -> Option<String> {
         "Z".to_owned()
     } else {
         normalize_tz(tz_raw)
+    };
+    // Always include seconds so that xsd:time literals are valid for SPARQL comparison.
+    // "HH:MM" → "HH:MM:00"; "HH:MM:SS..." → unchanged.
+    let local = if local.len() == 5 {
+        format!("{local}:00")
+    } else {
+        local
     };
     Some(format!("{local}{tz}"))
 }
