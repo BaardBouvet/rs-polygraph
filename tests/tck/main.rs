@@ -680,6 +680,7 @@ fn list_elem_to_str(expr: &Expression) -> Option<String> {
         Expression::Literal(Literal::Boolean(b)) => {
             Some(if *b { "true" } else { "false" }.to_owned())
         }
+        Expression::Literal(Literal::Null) => Some("null".to_owned()),
         Expression::List(inner) => {
             let parts: Vec<String> = inner.iter().filter_map(list_elem_to_str).collect();
             Some(format!("[{}]", parts.join(", ")))
