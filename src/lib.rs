@@ -31,7 +31,7 @@ pub mod translator;
 
 pub use error::PolygraphError;
 pub use result_mapping::{
-    CypherRow, CypherValue, ProjectionSchema, RdfTerm, SparqlSolution, TranspileOutput,
+    BindingRow, CypherRow, CypherValue, ProjectionSchema, RdfTerm, SparqlSolution, TranspileOutput,
 };
 
 /// The main entry point for transpilation operations.
@@ -77,10 +77,7 @@ impl Transpiler {
         let result =
             translator::cypher::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
         let sparql = engine.finalize(result.sparql)?;
-        Ok(TranspileOutput {
-            sparql,
-            schema: result.schema,
-        })
+        Ok(TranspileOutput::complete(sparql, result.schema))
     }
 
     /// Like `cypher_to_sparql` but silently skips write clauses (SET/REMOVE/MERGE/CREATE/DELETE).
@@ -96,10 +93,7 @@ impl Transpiler {
             engine.supports_rdf_star(),
         )?;
         let sparql = engine.finalize(result.sparql)?;
-        Ok(TranspileOutput {
-            sparql,
-            schema: result.schema,
-        })
+        Ok(TranspileOutput::complete(sparql, result.schema))
     }
 
     /// Transpile an ISO GQL query to SPARQL.
@@ -131,9 +125,6 @@ impl Transpiler {
         let result =
             translator::gql::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
         let sparql = engine.finalize(result.sparql)?;
-        Ok(TranspileOutput {
-            sparql,
-            schema: result.schema,
-        })
+        Ok(TranspileOutput::complete(sparql, result.schema))
     }
 }

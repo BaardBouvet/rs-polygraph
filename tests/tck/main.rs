@@ -1719,7 +1719,13 @@ async fn executing_query(world: &mut TckWorld, step: &Step) {
             }
             // Re-translate with write clauses skipped
             match Transpiler::cypher_to_sparql_skip_writes(cypher, &ENGINE) {
-                Ok(output) => output.sparql,
+                Ok(output) => match output {
+                    polygraph::TranspileOutput::Complete { sparql, .. } => sparql,
+                    polygraph::TranspileOutput::Continuation { .. } => {
+                        world.query_error = Some("L2 continuation not yet supported in TCK runner".into());
+                        return;
+                    }
+                },
                 Err(e) => {
                     world.query_error = Some(e.to_string());
                     return;
@@ -1730,7 +1736,13 @@ async fn executing_query(world: &mut TckWorld, step: &Step) {
             world.query_error = Some(e.to_string());
             return;
         }
-        Ok(output) => output.sparql,
+        Ok(output) => match output {
+            polygraph::TranspileOutput::Complete { sparql, .. } => sparql,
+            polygraph::TranspileOutput::Continuation { .. } => {
+                world.query_error = Some("L2 continuation not yet supported in TCK runner".into());
+                return;
+            }
+        },
     };
 
     world.last_sparql = Some(sparql.clone());

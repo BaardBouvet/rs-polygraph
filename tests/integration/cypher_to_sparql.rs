@@ -12,7 +12,7 @@ const ENGINE: GenericSparql11 = GenericSparql11;
 fn transpile(cypher: &str) -> String {
     Transpiler::cypher_to_sparql(cypher, &ENGINE)
         .unwrap_or_else(|e| panic!("translation failed for {cypher:?}: {e}"))
-        .sparql
+        .into_sparql()
 }
 
 fn transpile_lower(cypher: &str) -> String {
@@ -23,7 +23,7 @@ fn transpile_rdf_star(cypher: &str) -> String {
     let engine = RdfStar::default();
     Transpiler::cypher_to_sparql(cypher, &engine)
         .unwrap_or_else(|e| panic!("rdf-star translation failed for {cypher:?}: {e}"))
-        .sparql
+        .into_sparql()
 }
 
 fn transpile_reification(cypher: &str) -> String {
@@ -844,7 +844,7 @@ MATCH ()-[b]->()
 WHERE a = b
 RETURN count(b)"#;
     let s = Transpiler::cypher_to_sparql(q, &ENGINE)
-        .map(|r| r.sparql)
+        .map(|r| r.into_sparql())
         .unwrap_or_else(|e| format!("ERROR: {e}"));
     println!("SPARQL:\n{}", s);
     let store = Store::new().unwrap();
@@ -875,7 +875,7 @@ WITH op1 CONTAINS op2 AS v
 RETURN v, count(*)";
     let result = Transpiler::cypher_to_sparql(q, &ENGINE);
     match result {
-        Ok(r) => println!("SPARQL:\n{}", r.sparql),
+        Ok(r) => println!("SPARQL:\n{}", r.into_sparql()),
         Err(e) => println!("Error: {}", e),
     }
 }
@@ -885,7 +885,7 @@ fn debug_pattern_comprehension() {
     let q = "MATCH (n:X) RETURN n, size([(n)--() | 1]) > 0 AS b";
     let result = Transpiler::cypher_to_sparql(q, &ENGINE);
     match result {
-        Ok(r) => println!("SPARQL:\n{}", r.sparql),
+        Ok(r) => println!("SPARQL:\n{}", r.into_sparql()),
         Err(e) => println!("Error: {}", e),
     }
 }
@@ -898,14 +898,15 @@ RETURN collect(DISTINCT n.num) AS a, collect(DISTINCT f.num) AS b";
     let result = Transpiler::cypher_to_sparql(q, &ENGINE);
     match result {
         Ok(r) => {
-            println!("SPARQL:\n{}", r.sparql);
+            let sparql = r.into_sparql();
+            println!("SPARQL:\n{}", sparql);
             // Should use sub-SELECT with FILTER(BOUND(?n)) so unbound n doesn't wildcard-match
             assert!(
-                r.sparql.contains("SELECT ?n"),
+                sparql.contains("SELECT ?n"),
                 "Expected SELECT ?n sub-select in SPARQL"
             );
             assert!(
-                r.sparql.contains("FILTER(BOUND(?n))"),
+                sparql.contains("FILTER(BOUND(?n))"),
                 "Expected FILTER(BOUND(?n)) in SPARQL"
             );
         }
