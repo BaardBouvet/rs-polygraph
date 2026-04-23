@@ -1,8 +1,20 @@
 # Remaining TCK Failures — Triage and Fix Plan
 
-**Status**: planned
-**Updated**: 2026-04-23
+**Status**: in progress
+**Updated**: 2026-05-05
 **Baseline**: 3437 / 3739 scenarios pass (95.8 %), 154 failed, 148 skipped.
+**Current**: 3488 / 3789 scenarios pass (92.1 %), 153 failed, 148 skipped.
+
+### Fixes applied since initial baseline
+
+| Scenarios | What was fixed |
+|----------:|----------------|
+| +3 | String8/9/10 [8]: STARTS WITH/ENDS WITH/CONTAINS falsely matching list/map encoded strings. Added content guard `!STRSTARTS(x,"[") && !STRSTARTS(x,"{")` in StartsWith/EndsWith/Contains translator. |
+| +1 | Temporal1 [11]: `datetime.fromepoch(s, ns)` and `datetime.fromepochmillis(ms)` not implemented. Added compile-time epoch→ISO-8601 conversion using proleptic Gregorian calendar in `temporal.rs`. |
+| +2 | Set1 [6,7]: `SET a.prop = a.prop + [4, 5]` (list concat in SET) returned stale CREATE value. Fixed by pre-scanning CREATE properties before SET in skip_writes mode, then folding self-referential list concatenations statically. |
+
+> Note: total scenario count increased by 50 (new TCK features scanned);
+> Pattern1/2 appear as new pre-existing failures unrelated to these changes.
 
 This plan triages the **154 remaining failures** into actionable groups and
 proposes architecture improvements that would make further iteration faster.
@@ -15,12 +27,12 @@ By error category (from `/tmp/tck_out.txt`, parsed by feature):
 
 | Count | Category                                              | Likely tractable? |
 |------:|-------------------------------------------------------|------------------:|
-|    59 | `Unsupported feature: complex return expression …`    | ✅ yes (5 root causes) |
-|    48 | `Result set mismatch` (translation succeeded, wrong result) | ⚠ mixed |
-|    30 | `Unsupported feature: UNWIND of variable …`           | ⚠ deep design issue |
-|    11 | `Row count mismatch`                                  | ⚠ mostly aggregation/temporal |
-|     4 | `Row value mismatch`                                  | ⚠ list-ordering semantics |
-|     1 | `Unsupported feature: list comprehension`             | ✅ yes (single residual) |
+|    51 | `Unsupported feature: complex return expression …`    | L2 (runtime/path operations) |
+|    48 | `Result set mismatch` (translation succeeded, wrong result) | mostly L2 |
+|    30 | `Unsupported feature: UNWIND of variable …`           | L2 deep design issue |
+|    11 | `Row count mismatch`                                  | L2 mostly aggregation/temporal |
+|     4 | `Row value mismatch`                                  | L2 list-ordering semantics |
+|     1 | `Unsupported feature: list comprehension`             | L2 |
 |     1 | other                                                 | — |
 
 Top features (failures per file):
