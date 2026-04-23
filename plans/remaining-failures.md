@@ -1,9 +1,98 @@
 # Remaining TCK Failures — Triage and Fix Plan
 
 **Status**: in progress
-**Updated**: 2026-05-10
+**Updated**: 2026-05-12
 **Baseline**: 3437 / 3739 scenarios pass (95.8 %), 154 failed, 148 skipped.
-**Current**: 3548 / 3789 scenarios pass (93.6 %), 93 failed, 148 skipped.
+**Current**: 3558 / 3789 scenarios pass (93.9 %), 83 failed, 148 skipped.
+
+### Fixes applied since initial baseline
+
+| Scenarios | What was fixed |
+|----------:|----------------|
+| +3 | String8/9/10 [8]: STARTS WITH/ENDS WITH/CONTAINS falsely matching list/map encoded strings. Added content guard `!STRSTARTS(x,"[") && !STRSTARTS(x,"{")` in StartsWith/EndsWith/Contains translator. |
+| +1 | Temporal1 [11]: `datetime.fromepoch(s, ns)` and `datetime.fromepochmillis(ms)` not implemented. Added compile-time epoch→ISO-8601 conversion using proleptic Gregorian calendar in `temporal.rs`. |
+| +2 | Set1 [6,7]: `SET a.prop = a.prop + [4, 5]` (list concat in SET) returned stale CREATE value. Fixed by pre-scanning CREATE properties before SET in skip_writes mode, then folding self-referential list concatenations statically. |
+| +3 | ReturnOrderBy1 [9,10] / WithOrderBy1 [9,10]: O1 — list ordering sort-key encoding. SPARQL lexicographic ORDER BY replaced by parallel `?__sk_<var>` column using type-ranked prefix (`map(0) < list(3) < string(5) < bool(6/7) < int(8) < null(Z)`). WITH…ORDER BY fix propagates sort-key into inner SELECT projection. |
+| +3 | Aggregation2 [9,11,12]: A1 — compile-time min/max folding. Detects `UNWIND [lits] AS x RETURN min/max(x)` and pre-computes the extremum via `cypher_compare` in Rust, emitting a constant `VALUES` pattern. |
+| +54 | Quantifier9–12 (partial): Q1 — quantifier tautology folding. Detects `rand()`/`reverse()`/CASE preambles that produce opaque list variables, then folds mathematical identities (`none(P)=!any(P)`, `all(P)=none(!P)`, size-based equivalences, constant-predicate cases `none(false)=T`, `any(false)=F`, `all(true)=T`, `single(false)=F`) to constants. Implemented via `try_fold_quantifier_invariants` + `quantifier_canonical` + `eval_quantifier_tautology` free functions. |
+| +7 | Temporal8 scenarios 1-5 example 1 (T1a): xsd:duration typed literals + split-subtract. Fixed `tck_eval_duration` to store tagged `^^xsd:duration` literals. Added `temporal_subtract_sparql()` which splits a duration into yearMonthDuration + dayTimeDuration parts using REPLACE regex and subtracts each via COALESCE. Uses `STRBEFORE(dt,"T")` for `xs:date` to strip time components (Oxigraph off-by-one issue). |
+| +3 | Temporal8 scenarios 1,4,5 example 3 (T1b): Fixed `tck_eval_duration` fractional-year cascade (0.5Y → +6M) and hours≥24 normalization (33H → 1D+9H). Scenarios 2+3 example 3 were already passing (localtime/time ignore YM). |
+
+> Note: total scenario count increased by 50 (new TCK features scanned);
+> Pattern1/2 appear as new pre-existing failures unrelated to these changes.
+
+This plan triages the **83 remaining failures** into actionable groups.
+
+---
+
+## 1. Failure Distribution (current)
+
+| Count | Category                                              | Likely tractable? |
+|------:|-------------------------------------------------------|------------------:|
+|    17 | Temporal8 failures                                    | 5 mixed-sign dur (data format), 12 dur+dur/dur×num (L2) |
+|     6 | Temporal10 DST-timezone failures                      | Not fixable (no IANA tz database) |
+|     6 | Quantifier11 complex list ops                         | L2 (runtime UNWIND) |
+|     6 | List12 list comprehension `collect()`                 | L2 (Phase 4+) |
+|     5 | Merge5 (2 result mis + 3 Phase4+)                     | partial — MERGE logic |
+|     3 | Pattern2 (1 Phase4+ + 2 row mismatch)                 | L2 |
+|     3 | WithOrderBy1 (2 var-UNWIND + 1 result mismatch)       | partly L2 |
+|     4 | Temporal2/3 DST timezone                              | Not fixable |
+|     8 | Quantifier1-4 (2ea: path/relationships())              | L2 (variable-length paths) |
+|     2 | Precedence1 (LIST comparison encoding)                | L2 (complex) |
+|     2 | Pattern1 (1 row mismatch + 1 SyntaxError)             | mixed |
+|     2 | Path2 (relationships(p) on var-len path)              | L2 |
+|     2 | Graph9 (properties(n/r) Phase4+)                      | L2 |
+|     2 | ReturnOrderBy1 (variable UNWIND)                      | L2 |
+|     2 | Merge1 (MERGE after DELETE, multi-MERGE)              | L2 MERGE execution |
+|     2 | Match4 (var-len path row counts)                      | L2 |
+
+Top actionable remaining items:
+
+| Failures | Feature       | Fix bucket |
+|---------:|---------------|------------|
+|    17 | Temporal8     | 5 fixable (mixed-sign dur), 12 structural |
+|     6 | Temporal10    | 6 DST (not fixable without tz db) |
+|     6 | Quantifier11  | 6 complex (L2) |
+|     6 | List12        | 6 Phase4+ |
+|     5 | Merge5        | 2 result mis + 3 Phase4+ |
+
+---
+
+## 2. Fix Buckets
+
+### Q1 — Quantifier predicates on literal lists  *(DONE: +54; 6+8 remain)*
+
+**Status**: ✅ SIGNIFICANTLY FIXED. +54 passes from Quantifier9–12.
+Remaining 14: Quantifier11 (6, complex L2 list ops) + Quantifier1-4 (8, Phase4+ path features).
+
+### T1 — Duration arithmetic on temporal values *(DONE: +10; 17 remain)*
+
+**Status**: ✅ PARTIALLY FIXED. +10 passes (T1a +7, T1b +3).
+
+**What was implemented**:
+- `tck_eval_duration`: store as `^^xsd:duration`; cascade fractional years→months; normalize hours≥24→extra days
+- `temporal_subtract_sparql()`: split-subtract using `REPLACE` regex + STRDT for yearMonthDuration and dayTimeDuration parts; `STRBEFORE(dt,"T")` for date-only subtraction
+- `is_temporal_lit_str()` / `is_date_only_lit_str()` detection helpers
+
+**Remaining** Temporal8 failures (17):
+- 5 × example 2 (mixed-sign duration `P1M-14DT16H-11M10S`): XSD duration requires non-negative components; Cypher allows negative component values which can't be represented as a single valid xsd:duration. Fundamental format incompatibility.
+- 9 × Scenario 6 (duration + duration): Oxigraph normalizes differently from Cypher (e.g., `P24H` vs `P1D`). SPARQL `xsd:duration + xsd:duration` gives different normalization.
+- 3 × Scenario 7 (duration × number): SPARQL has no `duration * number` operator.
+
+**Remaining** Temporal10 failures (6): All in Scenario 8 (DST-aware datetime), requiring IANA timezone database for Europe/Stockholm DST transitions. Not fixable without timezone library.
+
+### LC1 — List comprehension projection  *(6 remain)*
+
+List12 [1-6]: `collect(a)` followed by `[x IN nodes | x.name]` — requires runtime node property access on aggregate results. Phase 4+ limitation.
+
+### M1 — MERGE execution  *(5 remain in Merge5, 2 in Merge1)*
+
+Merge5 results mismatches: MERGE after DELETE, multiple MERGE clauses. Would require rearchitecting the MERGE → SELECT/UPDATE flow.
+
+### DST Timezone  *(4 remain)*
+
+Temporal2 [4,5], Temporal3 [5,6], Temporal10 [8] (all 6): require IANA tz database for DST-aware timezone conversions. Not currently supported.
+
 
 ### Fixes applied since initial baseline
 

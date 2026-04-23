@@ -148,6 +148,8 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 | dev     | 3491 | 150  | 3789  | 92.1% | feat(O1): list sort-key encoding for ORDER BY on list-of-lists UNWIND — parallel `?__sk_<var>` column; Cypher type-rank encoding `map(0)…list(3)…string(5)…bool(6/7)…int(8)…null(Z)`; fixed for both RETURN ORDER BY and WITH…ORDER BY |
 | dev     | 3494 | 147  | 3789  | 92.2% | feat(A1): compile-time min/max fold for `UNWIND [lits] AS x RETURN min/max(x)` over lists or mixed types; `cypher_compare` uses proper cross-type Cypher semantics; Aggregation2[9,11,12] pass |
 | dev     | 3548 | 93   | 3789  | 93.6% | feat(Q1): quantifier tautology folding for Quantifier9–12 (+54); detects opaque list vars via `rand()`/`reverse()`/CASE preambles; canonical-key identity check covers `none=!any`, `none=all(!P)`, `all=none(!P)`, `any=!none`, `size([P])=0/1/size(list)/> 0`; constant-pred fold for `none(F)=T`, `any(F)=F`, `all(T)=T`, `single(F)=F` |
+| dev     | 3555 | 86   | 3789  | 93.8% | feat(T1): xsd:duration typed literals + temporal-minus-duration via split-subtract (yearMonthDuration + dayTimeDuration parts via REPLACE regex + COALESCE); STRBEFORE for xs:date subtraction to strip time; Temporal8 scenarios 1-5 example 1 pass |
+| dev     | 3558 | 83   | 3789  | 93.9% | feat(T1b): tck_eval_duration cascade + normalize — fractional years→months (0.5Y→6M), hours≥24→extra days (33H→1D+9H); Temporal8 scenarios 1,4,5 example 3 pass |
 | target  | —    | —    | 3,650 | ≥ 80% | all 37 categories |
 
 **Milestone**: ≥ 80% pass rate across the full 3,650-scenario suite.
