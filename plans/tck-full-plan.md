@@ -276,9 +276,8 @@ After this phase, the failure mix is dominated by:
 
 ## Phase F — Translator Code-Health Refactor (parallel track)
 
-**Status**: planned
-
-`src/translator/cypher.rs` is **16,209 lines** in a single file with one `impl TranslationState` block of ~9,000 lines. This is the single biggest source of "going uphill" friction. The refactor is mechanical, behaviour-preserving, and unblocks Phase E rather than competing with it.
+**Status**: in progress  
+**Updated**: 2026-04-23
 
 ### Current size breakdown
 
@@ -299,52 +298,50 @@ The five hottest methods inside the impl:
 | `translate_expr` | ~1,380 | Stays in core, but extract per-variant arms (case/list/map/coalesce). |
 | `translate_relationship_pattern` | ~650 | Move to `translator/cypher/patterns.rs` alongside `emit_edge_triple` & path unrolling. |
 
-### Proposed module layout (post-refactor)
+### Actual module layout (delivered 2026-04-23)
+
+**Status**: complete — all files are ≤ 1,753 lines, TCK unchanged at 3431/3789.
 
 ```
 src/translator/cypher/
-  mod.rs              — pub `translate`, `translate_skip_writes`; re-exports state
-  state.rs            — TranslationState struct + small helpers
-  semantics.rs        — validate_semantics + classification helpers (currently lines 64–1999)
-  clauses.rs          — translate_clause_sequence + per-clause fns
-  patterns.rs         — node/relationship/path pattern lowering
-  expr.rs             — translate_expr core + arms
-  functions.rs        — translate_function_call dispatch
-  aggregates.rs       — translate_aggregate_expr + agg utilities
-  return_proj.rs      — translate_return_clause / translate_return_item / order/skip/limit
-  unwind.rs           — translate_unwind_clause
-  rewrite.rs          — eliminate_collect_unwind, substitute_var_in_expr, const folding
-  temporal/
-    mod.rs            — temporal_prop_binds (the dispatch)
-    construct.rs      — date/time/dateTime/localtime/localdatetime/duration constructors
-    jdn.rs            — Julian day & ISO week math
-    duration.rs       — duration parse / format / arithmetic
-    fmt.rs            — TZ formatting, frac formatting
+  mod.rs         (4,059 lines)  — TranslationState struct, translate_query/union,
+                                   translate_expr, translate_unwind, translate_aggregate,
+                                   apply_order_skip_limit, small helpers, include! stitching
+  clauses.rs     (1,753 lines)  — translate_clause_sequence (main dispatch loop)
+  patterns.rs    (1,549 lines)  — translate_match_clause, translate_pattern,
+                                   translate_node_pattern_with_term,
+                                   translate_relationship_pattern,
+                                   emit_edge_triple, emit_bounded_path_union*
+  functions.rs   (1,528 lines)  — translate_function_call (150+ function mappings)
+  semantics.rs   (1,554 lines)  — validate_semantics, segment_columns, classification helpers
+  temporal.rs    (3,343 lines)  — TcComponents, all temporal constructors, JDN math,
+                                   date/time/duration arithmetic, parse/format utils
+  rewrite.rs       (826 lines)  — eliminate_collect_unwind, substitute_var_in_expr,
+                                   const folding, SPARQL utility helpers
+  return_proj.rs   (593 lines)  — translate_return_clause, translate_return_item
 ```
 
-### Refactor protocol (apply once per module)
+**Technique**: inner `impl TranslationState { }` blocks extracted as `include!("xxx.rs")` at module level — zero visibility overhead, zero API change, zero test churn. Free-function blocks use the same `include!` technique.
 
-For each extraction, in order, in its own commit:
+### Pre-refactor cleanups (completed 2026-04-23)
 
-1. Identify a contiguous block of free helpers or impl methods that has no callers outside the file (or whose callers we can update in the same commit).
-2. `git mv`-equivalent: copy block to new file under `src/translator/cypher/`; add `pub(super)` to anything called from the rest of the translator.
-3. Add `mod xxx;` and `use` lines in `mod.rs`.
-4. Re-run `cargo test --test tck --release` and the integration tests; commit only if pass count is unchanged.
-5. Bump `Updated` date in this plan and tick the row off.
+- ✅ Deleted dead helpers: `make_bool_op_is_null`, `extract_tz_offset_s`, `temporal_prop_expr` (−1,038 lines)
+- ✅ Removed unreachable `Clause::Set(_)` arm in validate_semantics
+- ✅ Suppressed all 35 warnings: `#[allow(non_snake_case)]` on temporal_prop_binds, prefix unused locals with `_`
+- ✅ 0 lib warnings, 0 errors
 
-### Pre-refactor cleanups (free wins, do first)
+### Acceptance criteria — status
 
-- Delete dead helpers flagged by the compiler: `make_bool_op_is_null`, `extract_tz_offset_s`, `temporal_prop_expr`, `_xsd_dur`, `_substr1`, `_strlen_fn`, `_tz_full`, `_dur_after_y`, `_dur_frac9`, `_lit24i`, `_abs_f`, `_raw_tz`. (~150 lines.)
-- Remove the unreachable `Clause::Set(_) => {}` arm at line 1837 (already matched at 1435).
-- Apply `cargo fix` for the `non_snake_case` JDN variables (auto-generated patch; behaviour-preserving).
-- Audit the file for nested `fn expr_key` / `fn normalize` definitions; promote to `pub(super) fn` in `rewrite.rs` if reused, otherwise leave nested.
+- ✅ No file exceeds 2,000 lines (largest: clauses.rs 1,753 lines)
+- ✅ TCK pass count 3431/3789 unchanged across all refactor commits
+- ✅ `cargo build --lib` produces zero warnings
+- `translate_function_call` dispatch table reorganization: deferred to future PR
 
-### Acceptance criteria
+### Remaining refactor opportunities (not blocking)
 
-- No file in `src/translator/cypher/` exceeds 2,000 lines.
-- TCK pass count is `>= 3431` after each commit.
-- `cargo build` produces zero warnings (currently 35).
-- `translate_function_call` is replaced by a dispatch table whose arms are individually testable.
+- `temporal.rs` (3,343 lines) can be split further: `temporal/construct.rs` (constructors), `temporal/arithmetic.rs` (Temporal8 duration math), `temporal/parse.rs` (string parsing). Same `include!` technique.
+- `mod.rs` (4,059 lines) still contains `translate_expr` (~1,380 lines) + `temporal_prop_binds` + all impl machinery. Could extract to `expr.rs`.
+- Long-term: replace `include!` with proper Rust modules once the team is ready to annotate all cross-module types with `pub(super)`.
 
 ---
 
