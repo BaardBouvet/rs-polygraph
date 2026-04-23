@@ -658,7 +658,12 @@ fn tck_eval_duration(pairs: &[(String, Expression)]) -> Option<String> {
     if result == "P" || result == "PT" {
         result = "PT0S".to_string();
     }
-    Some(format!("\"{}\"", result))
+    // Store duration as xsd:duration typed literal so SPARQL arithmetic works
+    // (plain xsd:string does not support date/time + duration operators in Oxigraph).
+    Some(format!(
+        "\"{}\"^^<http://www.w3.org/2001/XMLSchema#duration>",
+        result
+    ))
 }
 
 /// Convert a SET value expression to a SPARQL expression string for BIND clauses.

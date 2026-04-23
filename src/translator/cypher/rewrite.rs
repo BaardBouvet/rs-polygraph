@@ -824,3 +824,104 @@ fn try_const_fold_pow(base: &SparExpr, exp: &SparExpr) -> Option<SparExpr> {
     )))
 }
 
+/// Returns true if `s` looks like a compile-time temporal value string:
+/// a date (`YYYY-…`) or a time/localtime (`HH:…`).
+fn is_temporal_lit_str(s: &str) -> bool {
+    let b = s.as_bytes();
+    // Date: 4-digit year followed by '-'
+    if b.len() >= 5 && b[4] == b'-' && b[..4].iter().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    // Time / localtime: 2-digit hour followed by ':'
+    if b.len() >= 3 && b[2] == b':' && b[..2].iter().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    false
+}
+
+/// Returns true if `s` is a plain date string (exactly `YYYY-MM-DD`, length 10).
+fn is_date_only_lit_str(s: &str) -> bool {
+    s.len() == 10 && s.as_bytes().get(4) == Some(&b'-')
+}
+
+/// Build a SPARQL expression that computes `temporal - duration`.
+///
+/// Oxigraph supports `temporal - xsd:yearMonthDuration` and
+/// `temporal - xsd:dayTimeDuration` but NOT `temporal - xsd:duration`.
+/// We work around this by splitting the duration into its yearMonth and
+/// dayTime string parts via `STRDT(REPLACE(…), …)` and subtracting each:
+///
+/// ```sparql
+/// COALESCE(temporal - STRDT(REPLACE(STR(dur), "^P(([0-9.]*Y)?([0-9.]*M)?).*", "P$1"), ymd), temporal)
+///   - STRDT(REPLACE(STR(dur), "^P([0-9.]*Y)?([0-9.]*M)?", "P"), dtd)
+/// ```
+///
+/// The outer `COALESCE` handles the case where the DT part reduces to `"P"`
+/// (i.e., the duration has no day/time components), which would make `STRDT`
+/// return UNDEF for an invalid bare `"P"` dayTimeDuration.
+///
+/// When `is_date` is `true` (i.e., the LHS is an `xs:date`), the time
+/// portion of the dayTimeDuration is stripped via `STRBEFORE(dt_str, "T")`
+/// so that hours/minutes/seconds do NOT bleed into the date result.
+/// (Oxigraph converts date→dateTime at midnight before subtracting, which
+/// causes an off-by-one-day error otherwise.)
+fn temporal_subtract_sparql(temporal: SparExpr, dur: SparExpr, is_date: bool) -> SparExpr {
+    use spargebra::algebra::Function;
+
+    let ymd_nn = NamedNode::new_unchecked(XSD_YEAR_MONTH_DUR);
+    let dtd_nn = NamedNode::new_unchecked(XSD_DAY_TIME_DUR);
+
+    // STR(dur) — two copies needed (one per REPLACE call)
+    let dur_str_ym = SparExpr::FunctionCall(Function::Str, vec![dur.clone()]);
+    let dur_str_dt = SparExpr::FunctionCall(Function::Str, vec![dur]);
+
+    // REPLACE(STR(dur), "^P(([0-9.]*Y)?([0-9.]*M)?).*", "P$1") → yearMonth part string
+    let ym_pat = SparExpr::Literal(SparLit::new_simple_literal(
+        "^P(([0-9.]*Y)?([0-9.]*M)?).*",
+    ));
+    let ym_repl = SparExpr::Literal(SparLit::new_simple_literal("P$1"));
+    let ym_str = SparExpr::FunctionCall(Function::Replace, vec![dur_str_ym, ym_pat, ym_repl]);
+
+    // STRDT(ym_str, xsd:yearMonthDuration)
+    let ym_dur = SparExpr::FunctionCall(
+        Function::StrDt,
+        vec![ym_str, SparExpr::NamedNode(ymd_nn)],
+    );
+
+    // REPLACE(STR(dur), "^P([0-9.]*Y)?([0-9.]*M)?", "P") → dayTime part string
+    let dt_pat = SparExpr::Literal(SparLit::new_simple_literal("^P([0-9.]*Y)?([0-9.]*M)?"));
+    let dt_repl = SparExpr::Literal(SparLit::new_simple_literal("P"));
+    let dt_str_full = SparExpr::FunctionCall(Function::Replace, vec![dur_str_dt, dt_pat, dt_repl]);
+
+    // For xs:date arithmetic, Oxigraph implements date - dayTimeDuration by converting
+    // the date to a dateTime at midnight and subtracting, so hours/minutes/seconds cause
+    // an off-by-one-day error.  Strip the time part by taking STRBEFORE(dt_str, "T").
+    let dt_str = if is_date {
+        let t_lit = SparExpr::Literal(SparLit::new_simple_literal("T"));
+        SparExpr::FunctionCall(Function::StrBefore, vec![dt_str_full, t_lit])
+    } else {
+        dt_str_full
+    };
+
+    // STRDT(dt_str, xsd:dayTimeDuration)
+    let dt_dur = SparExpr::FunctionCall(
+        Function::StrDt,
+        vec![dt_str, SparExpr::NamedNode(dtd_nn)],
+    );
+
+    // step1 = COALESCE(temporal - ym_dur, temporal)
+    // Handles: time - yearMonthDuration is UNDEF (time has no year/month), so COALESCE falls
+    // back to temporal unchanged; also handles empty "P" yearMonthDuration → STRDT returns UNDEF.
+    let step1 = SparExpr::Coalesce(vec![
+        SparExpr::Subtract(Box::new(temporal.clone()), Box::new(ym_dur)),
+        temporal,
+    ]);
+
+    // COALESCE(step1 - dt_dur, step1)
+    // Handles: "P" dayTimeDuration (no time component) → STRDT returns UNDEF → COALESCE keeps step1.
+    SparExpr::Coalesce(vec![
+        SparExpr::Subtract(Box::new(step1.clone()), Box::new(dt_dur)),
+        step1,
+    ])
+}
+

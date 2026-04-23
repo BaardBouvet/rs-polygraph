@@ -40,6 +40,8 @@ const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
 const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+const XSD_YEAR_MONTH_DUR: &str = "http://www.w3.org/2001/XMLSchema#yearMonthDuration";
+const XSD_DAY_TIME_DUR: &str = "http://www.w3.org/2001/XMLSchema#dayTimeDuration";
 const DEFAULT_BASE: &str = "http://polygraph.example/";
 
 use crate::result_mapping::schema::{ColumnKind, ProjectedColumn, ProjectionSchema};
@@ -2541,6 +2543,33 @@ impl TranslationState {
                 }
             }
             Expression::Subtract(a, b) => {
+                // Temporal subtract: `temporal - duration` cannot be evaluated by Oxigraph
+                // as a plain `xsd:duration` subtraction, but works when the duration is split
+                // into its yearMonthDuration and dayTimeDuration parts.  Apply the rewrite
+                // whenever the LHS is a compile-time temporal literal bound via WITH.
+                let temporal_info: Option<bool> = match a.as_ref() {
+                    // Variable bound in WITH to a temporal literal → check if it's a plain date.
+                    Expression::Variable(v) => self
+                        .with_lit_vars
+                        .get(v.as_str())
+                        .filter(|s| is_temporal_lit_str(s))
+                        .map(|s| is_date_only_lit_str(s)),
+                    // Inline temporal function call → is_date only for `date(…)`.
+                    Expression::FunctionCall { name, .. } => {
+                        let lc = name.to_ascii_lowercase();
+                        let is_temporal = matches!(
+                            lc.as_str(),
+                            "date" | "time" | "localtime" | "datetime" | "localdatetime"
+                        );
+                        is_temporal.then(|| lc == "date")
+                    }
+                    _ => None,
+                };
+                if let Some(is_date) = temporal_info {
+                    let la = self.translate_expr(a, extra)?;
+                    let lb = self.translate_expr(b, extra)?;
+                    return Ok(temporal_subtract_sparql(la, lb, is_date));
+                }
                 let la = self.translate_expr(a, extra)?;
                 let lb = self.translate_expr(b, extra)?;
                 if let Some(f) = try_const_fold_arith('-', &la, &lb) {
