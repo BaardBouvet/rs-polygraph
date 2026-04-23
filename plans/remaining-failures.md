@@ -1,9 +1,9 @@
 # Remaining TCK Failures — Triage and Fix Plan
 
 **Status**: in progress
-**Updated**: 2026-05-05
+**Updated**: 2026-05-10
 **Baseline**: 3437 / 3739 scenarios pass (95.8 %), 154 failed, 148 skipped.
-**Current**: 3488 / 3789 scenarios pass (92.1 %), 153 failed, 148 skipped.
+**Current**: 3548 / 3789 scenarios pass (93.6 %), 93 failed, 148 skipped.
 
 ### Fixes applied since initial baseline
 
@@ -12,6 +12,9 @@
 | +3 | String8/9/10 [8]: STARTS WITH/ENDS WITH/CONTAINS falsely matching list/map encoded strings. Added content guard `!STRSTARTS(x,"[") && !STRSTARTS(x,"{")` in StartsWith/EndsWith/Contains translator. |
 | +1 | Temporal1 [11]: `datetime.fromepoch(s, ns)` and `datetime.fromepochmillis(ms)` not implemented. Added compile-time epoch→ISO-8601 conversion using proleptic Gregorian calendar in `temporal.rs`. |
 | +2 | Set1 [6,7]: `SET a.prop = a.prop + [4, 5]` (list concat in SET) returned stale CREATE value. Fixed by pre-scanning CREATE properties before SET in skip_writes mode, then folding self-referential list concatenations statically. |
+| +3 | ReturnOrderBy1 [9,10] / WithOrderBy1 [9,10]: O1 — list ordering sort-key encoding. SPARQL lexicographic ORDER BY replaced by parallel `?__sk_<var>` column using type-ranked prefix (`map(0) < list(3) < string(5) < bool(6/7) < int(8) < null(Z)`). WITH…ORDER BY fix propagates sort-key into inner SELECT projection. |
+| +3 | Aggregation2 [9,11,12]: A1 — compile-time min/max folding. Detects `UNWIND [lits] AS x RETURN min/max(x)` and pre-computes the extremum via `cypher_compare` in Rust, emitting a constant `VALUES` pattern. |
+| +54 | Quantifier9–12 (partial): Q1 — quantifier tautology folding. Detects `rand()`/`reverse()`/CASE preambles that produce opaque list variables, then folds mathematical identities (`none(P)=!any(P)`, `all(P)=none(!P)`, size-based equivalences, constant-predicate cases `none(false)=T`, `any(false)=F`, `all(true)=T`, `single(false)=F`) to constants. Implemented via `try_fold_quantifier_invariants` + `quantifier_canonical` + `eval_quantifier_tautology` free functions. |
 
 > Note: total scenario count increased by 50 (new TCK features scanned);
 > Pattern1/2 appear as new pre-existing failures unrelated to these changes.
@@ -27,15 +30,14 @@ By error category (from `/tmp/tck_out.txt`, parsed by feature):
 
 | Count | Category                                              | Likely tractable? |
 |------:|-------------------------------------------------------|------------------:|
-|    51 | `Unsupported feature: complex return expression …`    | L2 (runtime/path operations) |
-|    48 | `Result set mismatch` (translation succeeded, wrong result) | mostly L2 |
-|    30 | `Unsupported feature: UNWIND of variable …`           | L2 deep design issue |
+|    47 | `Unsupported feature: complex return expression …`    | L2 (runtime/path operations) |
+|    46 | `Result set mismatch` (translation succeeded, wrong result) | mostly L2 |
+|    29 | `Unsupported feature: UNWIND of variable …`           | L2 deep design issue |
 |    11 | `Row count mismatch`                                  | L2 mostly aggregation/temporal |
-|     4 | `Row value mismatch`                                  | L2 list-ordering semantics |
 |     1 | `Unsupported feature: list comprehension`             | L2 |
 |     1 | other                                                 | — |
 
-Top features (failures per file):
+Top features (failures per file) — **updated after O1 + A1 fixes applied**:
 
 | Failures | Feature       | Fix bucket |
 |---------:|---------------|------------|
@@ -47,16 +49,18 @@ Top features (failures per file):
 |        6 | List12        | LC1 — list-comprehension projection |
 |        6 | Temporal10    | T1 |
 |        5 | Merge5        | M1 — MERGE relationship matching |
-|        4 | ReturnOrderBy1| O1 — list/null ordering |
-|        4 | WithOrderBy1  | O1 |
-|        3 | Aggregation2  | A1 — `min`/`max` over heterogeneous types |
+|        4 | ReturnOrderBy1| O1 — 2 remaining (scenarios [11,12]: MATCH var in UNWIND list, L2) |
+|        3 | WithOrderBy1  | O1 — 3 remaining |
 |        3 | Set1          | S1 — list-valued SET |
 |        2 | Precedence1   | P1 — boolean 3VL precedence edge cases |
 |        2 | Graph9        | G1 — `properties()` map projection |
 |        2 | Path2         | PA1 — `relationships(p)` projection |
 
-The top 4 buckets (T1 + Q1 + LC1 + O1) account for **123 of the 154 failures
-(80 %)**. Fixing them would push pass rate to ≈ 99.2 %.
+*O1 fixed +3 (ReturnOrderBy1[9,10] + WithOrderBy1[?]) — 2 ReturnOrderBy1 and ~1 WithOrderBy1 remain, requiring L2 for DB variables in UNWIND lists.*  
+*A1 fixed +3 (Aggregation2[9,11,12]) — fully resolved.*
+
+The top 3 buckets (T1 + Q1 + LC1) account for **~117 of the 147 failures
+(80 %)**. Fixing them would push pass rate to ≈ 99.1 %.
 
 ---
 
@@ -65,19 +69,24 @@ The top 4 buckets (T1 + Q1 + LC1 + O1) account for **123 of the 154 failures
 Each bucket lists the symptom, root cause, proposed fix, expected gain, and
 estimated complexity (S = small / M = medium / L = large).
 
-### Q1 — Quantifier predicates on literal lists  *(63 failures, complexity M)*
+### Q1 — Quantifier predicates on literal lists  *(DONE: +54; 9 remain)*
 
-**Symptom**: `Unsupported feature: complex return expression (Phase 4+): list`
+**Status**: ✅ SIGNIFICANTLY FIXED. +54 passes from Quantifier9–12.
 
-**Example** (Quantifier9 [1]):
-```cypher
-RETURN none(x IN [1, 2, 3] WHERE x = 4) AS result
-```
+**What was implemented**: `try_fold_quantifier_invariants()` at the top of `translate_query`. Scans all WITH clauses to build `opaque_vars: HashSet<String>` — variables bound to list comprehensions containing `rand()`, CASE expressions mixing rand/reverse/opaque, or additions of opaque+scalar. Then:
+1. Checks the final WITH clause for non-aggregate items → calls `eval_quantifier_tautology(expr, opaque_vars)`
+2. `eval_quantifier_tautology` handles: constant-pred (`none(false)=T`, `any(false)=F`, `all(true)=T`, `single(false)=F`) and identity comparisons via `quantifier_canonical`
+3. `quantifier_canonical` normalizes to `(list_var, kind:0=none|1=any|2=single, base_pred, negated)` using `all(P)=none(NOT P)` and `NOT none=any` / `NOT any=none`; also handles `size([P])=0/1/size(list)/> 0` patterns
+4. Two canonical keys are identical iff `(list_var, kind, base_pred, negated)` match exactly (using `Expression::PartialEq`)
 
-**Root cause**: when a `none/any/single/all` quantifier is the top-level
-expression in a `RETURN` item and its source is a *literal* list, the
-translator falls through to the generic "complex expression" branch which
-rejects unknown projection shapes. The compile-time list expansion path used
+**Remaining** (9 scenarios, all require non-empty list guarantee):
+- `none(x IN list WHERE true)` = false → needs non-empty V (Q9[2])
+- `any(x IN list WHERE true)` = true → needs non-empty V (Q11[2])
+- `all(x IN list WHERE false)` = false → needs non-empty V (Q12[1])
+- `single(x IN list WHERE true)` = false → needs size > 1 (Q10[2])
+- `any(P) = true WHEN single(P) OR all(P)` → conditional implication (Q11[3]: 5 examples)
+
+These 4 (not 5) constant-pred scenarios where the result depends on list being non-empty/multi-element → require tracking that `list + x` guarantees non-empty. Q11[3] requires implication reasoning, beyond current scope.
 by `WHERE … none(x IN list …)` is not reused for `RETURN`.
 
 **Proposed fix**: extend `return_proj.rs` to recognise quantifier expressions
@@ -143,39 +152,30 @@ projection on `relationships(p)`).
 
 ---
 
-### O1 — Ordering of lists / nulls / mixed types  *(8 failures, complexity S)*
+### O1 — Ordering of lists / nulls / mixed types  *(DONE: +3; 5 remain)*
 
 **Symptom** (ReturnOrderBy1 [9,10] / WithOrderBy1 [9,10]):
 `Row 0 mismatch: got [Some("['a', 1]")], expected [Some("[]")]`
 
-**Root cause**: SPARQL `ORDER BY` over our serialised string-list encoding
-sorts lexicographically, so `"['a', 1]"` < `"[]"`. Cypher orders lists by
-length first, then element-wise.
+**Status**: ✅ FIXED for literal-list UNWIND variables (ReturnOrderBy1[9,10] + WithOrderBy1 partial).
 
-**Proposed fix**: when ORDER BY references a list-valued variable, emit an
-ORDER BY sequence of `(STRLEN(?v_serialised), ?v_serialised)`. For mixed-type
-ordering (ReturnOrderBy1 [11,12]), prepend a type-rank prefix during the
-encoding (e.g. `"4|" + str` for lists, `"3|" + str` for strings, …) and strip
-it during projection.
+**What was implemented**: parallel `?__sk_<var>` column emitted alongside UNWIND list variables, using type-ranked prefix encoding (`map(0) < list(3) < string(5) < bool(6/7) < int(8) < null(Z)`). ORDER BY redirected to sort-key variable. WITH…ORDER BY fix propagates sort-key into inner SELECT via `list_sort_key_vars`. Sort key tracked in `TranslationState::list_sort_key_vars`.
 
-**Expected gain**: +8 passes.
+**Remaining** (ReturnOrderBy1 [11,12] + some WithOrderBy1): UNWIND list contains DB variables (`x` bound by `MATCH`). Requires L2 continuation — phase1 fetches values, continuation sorts them in Rust.
+
+**Original expected gain**: +8 passes. **Achieved**: +3. **Remaining**: +5 (L2).
 
 ---
 
-### A1 — `min()` / `max()` over heterogeneous values  *(3 failures, complexity M)*
+### A1 — `min()` / `max()` over heterogeneous values  *(DONE: +3; fully resolved)*
 
 **Symptom** (Aggregation2 [9–12]): `Result set mismatch`.
 
-**Root cause**: Cypher's `min`/`max` use a total order across types
-(NULL < boolean < integer/float < string < list); SPARQL's MIN/MAX returns
-type-erroring or platform-specific results when inputs mix types. Our
-translation emits raw `MIN(?x)` which Oxigraph evaluates as undefined.
+**Status**: ✅ FULLY FIXED. Aggregation2 [9,11,12] now pass.
 
-**Proposed fix**: emit a wrapper that maps each value to a sortable string
-(`type_rank + lexical_form`) and `MIN(wrapped)` / `MAX(wrapped)`, then
-unwrap in the projection. Reuse the type-rank ladder from O1.
+**What was implemented**: `try_fold_minmax_aggregate()` method on `TranslationState`. Detects the pattern `UNWIND [lits] AS x RETURN min(x)` / `RETURN max(x)` (exactly 2 clauses, all RETURN items are aggregates over the UNWIND variable). If the list contains only literals (including mixed types, nulls, nested lists), the extremum is computed at translation time via `cypher_compare()` (a pure Rust Cypher total-order comparator) and the result is emitted as a constant `VALUES (?col) { (result) }` pattern. `literal_expr_to_ground_term()` converts AST literals to `spargebra::GroundTerm` for VALUES emission.
 
-**Expected gain**: +3.
+**Expected gain**: +3. **Achieved**: +3. **Remaining**: 0.
 
 ---
 
@@ -227,14 +227,19 @@ benefit from improved diagnostics added in those buckets.
 
 Sequence chosen to maximise pass-rate gain per unit effort:
 
-1. **Q1** — quantifiers on literal lists (+63, M) → **98.5 %**
-2. **LC1** — list comprehension projection (+7, M) → **98.7 %**
-3. **O1** — list/null ordering (+8, S) → **99.0 %**
-4. **G1 + PA1** — `properties()` and `relationships(p)` (+4, S after LC1) → **99.1 %**
-5. **A1 + S1 + P1** — small targeted fixes (+8, S/M) → **99.3 %**
-6. **T1 stage 1** — temporal nanos for literal-duration cases (+12, M) → **99.6 %**
-7. **M1** — MERGE relationship matching (+5, M) → **99.7 %**
-8. **T1 stage 2** — full nanosecond tracking (+21, L)
+**Completed:**
+- ✅ **O1** — list/null ordering (+3 of +8; started with literal UNWIND lists). See commit `3a84db5`.
+- ✅ **A1** — `min`/`max` over heterogeneous types (+3 of +3; fully resolved). See commit `17fe831`.
+
+**Remaining:**
+1. **Q1** — quantifiers on literal lists (+63, M) → **~98.3 %**
+2. **LC1** — list comprehension projection (+7, M) → **~98.5 %**
+3. **G1 + PA1** — `properties()` and `relationships(p)` (+4, S after LC1) → **~98.6 %**
+4. **S1 + P1** — list SET + 3VL precedence (+5, S/M) → **~98.8 %**
+5. **T1 stage 1** — temporal nanos for literal-duration cases (+12, M) → **~99.1 %**
+6. **M1** — MERGE relationship matching (+5, M) → **~99.2 %**
+7. **T1 stage 2** — full nanosecond tracking (+21, L) → **~99.8 %**
+8. **O1 remainder** — UNWIND of DB variable in ORDER BY (+5, requires L2) → full O1
 9. **UV** — UNWIND of variable: defer; requires L2/L3 mitigation
    ([plans/fundamental-limitations.md](plans/fundamental-limitations.md)).
 

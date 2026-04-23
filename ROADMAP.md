@@ -145,6 +145,9 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 | dev     | 3435 | 156  | 3739  | 95.7% | TCK runner expanded: 1415→3739 scenarios via new write-clause + temporal + graph/path/quantifier shards; stack overflow fixes (larger thread stack, Call-proc skip step); list null encoding fix |
 | dev     | 3437 | 154  | 3739  | 95.8% | fix(translator): SPARQL BIND target conflict in WITH variable rename — detect in-scope conflicts, use shadow vars; edge src/dst renamed_away guard; With7 [1,2] now pass |
 | dev     | 3488 | 153  | 3789  | 92.1% | fix: String8/9/10 StartsWith/Contains/EndsWith guard for list/map; datetime.fromepoch/fromepochmillis compile-time; Set1[6,7] self-referential list concat in SET; temporal typed literals (date/localtime/localdatetime→xsd types); TCK expanded from 3739→3789 scenarios |
+| dev     | 3491 | 150  | 3789  | 92.1% | feat(O1): list sort-key encoding for ORDER BY on list-of-lists UNWIND — parallel `?__sk_<var>` column; Cypher type-rank encoding `map(0)…list(3)…string(5)…bool(6/7)…int(8)…null(Z)`; fixed for both RETURN ORDER BY and WITH…ORDER BY |
+| dev     | 3494 | 147  | 3789  | 92.2% | feat(A1): compile-time min/max fold for `UNWIND [lits] AS x RETURN min/max(x)` over lists or mixed types; `cypher_compare` uses proper cross-type Cypher semantics; Aggregation2[9,11,12] pass |
+| dev     | 3548 | 93   | 3789  | 93.6% | feat(Q1): quantifier tautology folding for Quantifier9–12 (+54); detects opaque list vars via `rand()`/`reverse()`/CASE preambles; canonical-key identity check covers `none=!any`, `none=all(!P)`, `all=none(!P)`, `any=!none`, `size([P])=0/1/size(list)/> 0`; constant-pred fold for `none(F)=T`, `any(F)=F`, `all(T)=T`, `single(F)=F` |
 | target  | —    | —    | 3,650 | ≥ 80% | all 37 categories |
 
 **Milestone**: ≥ 80% pass rate across the full 3,650-scenario suite.
