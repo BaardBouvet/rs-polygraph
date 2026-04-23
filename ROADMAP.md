@@ -143,6 +143,7 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 | dev     | 3431 | 163  | 3789  | 90.6% | Phase F: translator split into 8 focused files (mod.rs 4059L, clauses.rs 1753L, temporal.rs 3343L, patterns.rs 1549L, functions.rs 1528L, semantics.rs 1554L, rewrite.rs 826L, return_proj.rs 593L); −1,038 dead lines |
 | dev     | 3433 | 161  | 3789  | 90.7% | fix(temporal): xsd:time literals missing :00 seconds — time({hour:10,timezone:'+01:00'}) UNDEF for comparison; +2 passes |
 | dev     | 3435 | 156  | 3739  | 95.7% | TCK runner expanded: 1415→3739 scenarios via new write-clause + temporal + graph/path/quantifier shards; stack overflow fixes (larger thread stack, Call-proc skip step); list null encoding fix |
+| dev     | 3437 | 154  | 3739  | 95.8% | fix(translator): SPARQL BIND target conflict in WITH variable rename — detect in-scope conflicts, use shadow vars; edge src/dst renamed_away guard; With7 [1,2] now pass |
 | target  | —    | —    | 3,650 | ≥ 80% | all 37 categories |
 
 **Milestone**: ≥ 80% pass rate across the full 3,650-scenario suite.
