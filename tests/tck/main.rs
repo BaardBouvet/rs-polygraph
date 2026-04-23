@@ -152,10 +152,7 @@ fn strip_zero_seconds_from_time(v: &str) -> Option<String> {
     // Handle timezone-free localtime: "HH:MM:00" → "HH:MM" (exactly 8 chars, no fraction/TZ).
     if v.len() == 8 {
         let bytes = v.as_bytes();
-        if bytes.get(2) == Some(&b':')
-            && bytes.get(5) == Some(&b':')
-            && &v[6..] == "00"
-        {
+        if bytes.get(2) == Some(&b':') && bytes.get(5) == Some(&b':') && &v[6..] == "00" {
             return Some(v[..5].to_owned());
         }
     }
@@ -203,7 +200,7 @@ fn strip_zero_seconds_from_datetime(v: &str) -> Option<String> {
     let t_pos = v.find('T')?;
     let date_part = &v[..t_pos];
     let time_part = &v[t_pos + 1..]; // everything after 'T'
-    // Apply the time-stripping logic from strip_zero_seconds_from_time.
+                                     // Apply the time-stripping logic from strip_zero_seconds_from_time.
     let stripped_time = strip_zero_seconds_from_time(time_part)?;
     Some(format!("{date_part}T{stripped_time}"))
 }
@@ -2026,7 +2023,6 @@ fn main() {
 }
 
 async fn run_tests() {
-
     let features_dirs: Vec<String> = {
         // Allow nextest to inject shard paths via one or more --dir <path> in run-extra-args.
         let mut dirs: Vec<String> = Vec::new();

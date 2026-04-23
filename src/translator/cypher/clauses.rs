@@ -1996,21 +1996,20 @@ fn resolve_for_fold(
         Expression::Literal(_) => Some(expr.clone()),
         Expression::Add(a, b) => {
             // Recurse to handle chained concatenation.
-            fold_set_list_concat(expr, var, key, current)
-                .or_else(|| {
-                    let a_r = resolve_for_fold(a, var, key, current)?;
-                    let b_r = resolve_for_fold(b, var, key, current)?;
-                    let mut items_a = match a_r {
-                        Expression::List(v) => v,
-                        other => vec![other],
-                    };
-                    let items_b = match b_r {
-                        Expression::List(v) => v,
-                        other => vec![other],
-                    };
-                    items_a.extend(items_b);
-                    Some(Expression::List(items_a))
-                })
+            fold_set_list_concat(expr, var, key, current).or_else(|| {
+                let a_r = resolve_for_fold(a, var, key, current)?;
+                let b_r = resolve_for_fold(b, var, key, current)?;
+                let mut items_a = match a_r {
+                    Expression::List(v) => v,
+                    other => vec![other],
+                };
+                let items_b = match b_r {
+                    Expression::List(v) => v,
+                    other => vec![other],
+                };
+                items_a.extend(items_b);
+                Some(Expression::List(items_a))
+            })
         }
         _ => None,
     }

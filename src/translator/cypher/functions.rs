@@ -1589,5 +1589,4 @@ impl TranslationState {
     }
 
     // ── Aggregate translation ─────────────────────────────────────────────────
-
 }
