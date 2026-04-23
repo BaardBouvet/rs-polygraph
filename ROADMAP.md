@@ -124,6 +124,7 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 - [ ] **Phase B** — Expression engine: string/numeric/type-conversion functions, `CASE WHEN`, list comprehensions, map literals; 558 new scenarios; target ≥ 75%
 - [ ] **Phase C** — Advanced features: graph functions (`type(r)`, `labels(n)`), `EXISTS` / `NOT EXISTS`, quantifiers (compile-time lists), procedure stubs; 670 new scenarios; target ≥ 40%
 - [ ] **Phase D** — Write operations (`CREATE/DELETE/SET/MERGE` → SPARQL Update) and temporal types; 1,370 new scenarios; target ≥ 40%
+- [x] **Phase F** — Code-health refactor: split `src/translator/cypher.rs` (16,209 lines) into 8 focused subfiles under `src/translator/cypher/` using `include!` macro technique; pre-refactor dead-code removal (−1,038 lines); zero TCK regression
 
 **Full-TCK compliance tracker** (updated each release):
 
@@ -139,6 +140,7 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 | dev     | 2595 | 999  | 3789  | 68.5% | Write clause support: REMOVE/SET via SPARQL Update, CREATE/DELETE semantic validation (VariableAlreadyBound, NoSingleRelationshipType, etc.) |
 | dev     | 2627 | 967  | 3789  | 69.3% | MERGE validation (+NoSingleRelType, +VariableAlreadyBound, +path var), MERGE INSERT/MATCH in skip_writes, SetLabel support, SET/MERGE RHS undefined var checks |
 | dev     | 3430 | 164  | 3789  | 90.5% | All Temporal5 scenarios fixed: JDN pos/neg split (Oxigraph right-associative subtraction bug), d.quarters/d.weeks added to TEMPORAL_PROPS; date/time component extraction working for all temporal types |
+| dev     | 3431 | 163  | 3789  | 90.6% | Phase F: translator split into 8 focused files (mod.rs 4059L, clauses.rs 1753L, temporal.rs 3343L, patterns.rs 1549L, functions.rs 1528L, semantics.rs 1554L, rewrite.rs 826L, return_proj.rs 593L); −1,038 dead lines |
 | target  | —    | —    | 3,650 | ≥ 80% | all 37 categories |
 
 **Milestone**: ≥ 80% pass rate across the full 3,650-scenario suite.
