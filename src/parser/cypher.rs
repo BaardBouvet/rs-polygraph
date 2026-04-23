@@ -943,12 +943,50 @@ fn build_comparison_suffix(
                     })
                 }
             };
-            // RHS is comparison_expr (allows chained: a < b < c → a < (b < c))
+            // RHS is comparison_expr.  Detect chained comparisons at the parser level:
+            //   `a < b = c` → comparison_expr(b = c) has a comp_op comparison_suffix
+            //   `a = (b = c)` → comparison_expr((b=c)) has NO comparison_suffix child
+            //   `a = b IS NULL` → comparison_expr(b IS NULL) has IS NULL suffix (not comp_op)
+            //
+            // Only expand when the inner comparison_expr has a comparison_suffix whose
+            // first token is a comp_op (a binary comparison).  IS NULL / IN / STARTS WITH
+            // etc. are unary/keyword suffixes and do NOT trigger chaining; they keep the
+            // "null predicate takes precedence over comparison" rule intact.
             let rhs_pair = children
                 .next()
                 .expect("comp_op is followed by comparison_expr");
-            let rhs = build_comparison_expr(rhs_pair)?;
-            Ok(Expression::Comparison(Box::new(lhs), op, Box::new(rhs)))
+
+            // Check whether any inner comparison_suffix starts with comp_op.
+            let inner_has_comp_suffix = rhs_pair.clone().into_inner()
+                .filter(|p| p.as_rule() == Rule::comparison_suffix)
+                .any(|sfx| {
+                    sfx.into_inner()
+                        .next()
+                        .map(|ch| ch.as_rule() == Rule::comp_op)
+                        .unwrap_or(false)
+                });
+
+            if inner_has_comp_suffix {
+                // Chained comparison: extract the "middle" operand from rhs's add_sub_expr,
+                // then recursively process the remaining comparison suffixes.
+                let mut rhs_inner = rhs_pair.into_inner();
+                let mid_pair = rhs_inner
+                    .next()
+                    .expect("comparison_expr starts with add_sub_expr");
+                let mid = build_add_sub_expr(mid_pair)?;
+                // Process the rest of the chained comparison starting from `mid`.
+                let mut current = mid.clone();
+                for sfx in rhs_inner {
+                    current = build_comparison_suffix(current, sfx)?;
+                }
+                // Expand to (lhs op mid) AND (mid chain rest).
+                let left = Expression::Comparison(Box::new(lhs), op, Box::new(mid));
+                Ok(Expression::And(Box::new(left), Box::new(current)))
+            } else {
+                // Simple or parenthesized RHS — keep as a straightforward Comparison.
+                let rhs = build_comparison_expr(rhs_pair)?;
+                Ok(Expression::Comparison(Box::new(lhs), op, Box::new(rhs)))
+            }
         }
         Rule::regex_op => {
             let rhs_pair = children.next().expect("=~ is followed by add_sub_expr");

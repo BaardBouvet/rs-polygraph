@@ -344,8 +344,280 @@ fn expr_to_sparql_lit(expr: &Expression) -> Option<String> {
             let parts: Vec<String> = items.iter().filter_map(list_elem_to_str).collect();
             Some(format!("\"[{}]\"", parts.join(", ")))
         }
+        Expression::FunctionCall { name, args, .. } => tck_eval_temporal_fn(name, args),
         _ => None,
     }
+}
+
+// ── Temporal constructor evaluation for CREATE/INSERT DATA ────────────────────
+
+/// Evaluate a temporal constructor (date/time/localtime/datetime/localdatetime/duration)
+/// from a function call expression and return a SPARQL literal (with outer quotes).
+fn tck_eval_temporal_fn(fn_name: &str, args: &[Expression]) -> Option<String> {
+    let arg = args.first()?;
+    let lc = fn_name.to_ascii_lowercase();
+    match arg {
+        Expression::Literal(Literal::String(s)) => {
+            // Passthrough: date("2018-11-03") → "2018-11-03"
+            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+            Some(format!("\"{}\"", escaped))
+        }
+        Expression::Map(pairs) => {
+            let get_i = |key: &str| -> Option<i64> {
+                pairs
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                    .and_then(|(_, v)| match v {
+                        Expression::Literal(Literal::Integer(n)) => Some(*n),
+                        Expression::Literal(Literal::Float(f)) => Some(*f as i64),
+                        _ => None,
+                    })
+            };
+            let get_s = |key: &str| -> Option<String> {
+                pairs
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                    .and_then(|(_, v)| match v {
+                        Expression::Literal(Literal::String(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+            };
+            let subsec = subsec_ns(
+                get_i("millisecond"),
+                get_i("microsecond"),
+                get_i("nanosecond"),
+            );
+            match lc.as_str() {
+                "date" => {
+                    let y = get_i("year")?;
+                    let m = get_i("month").unwrap_or(1);
+                    let d = get_i("day").unwrap_or(1);
+                    Some(format!("\"{:04}-{:02}-{:02}\"", y, m, d))
+                }
+                "localtime" => {
+                    let h = get_i("hour").unwrap_or(0);
+                    let m = get_i("minute").unwrap_or(0);
+                    let s = get_i("second").unwrap_or(0);
+                    Some(format!("\"{}\"", tck_fmt_time(h, m, s, subsec)))
+                }
+                "time" => {
+                    let h = get_i("hour").unwrap_or(0);
+                    let m = get_i("minute").unwrap_or(0);
+                    let s = get_i("second").unwrap_or(0);
+                    let tz = get_s("timezone").unwrap_or_else(|| "Z".to_owned());
+                    Some(format!("\"{}{}\"", tck_fmt_time(h, m, s, subsec), tz))
+                }
+                "localdatetime" => {
+                    let y = get_i("year")?;
+                    let mo = get_i("month").unwrap_or(1);
+                    let d = get_i("day").unwrap_or(1);
+                    let h = get_i("hour").unwrap_or(0);
+                    let mi = get_i("minute").unwrap_or(0);
+                    let s = get_i("second").unwrap_or(0);
+                    Some(format!(
+                        "\"{:04}-{:02}-{:02}T{}\"",
+                        y,
+                        mo,
+                        d,
+                        tck_fmt_time(h, mi, s, subsec)
+                    ))
+                }
+                "datetime" => {
+                    let y = get_i("year")?;
+                    let mo = get_i("month").unwrap_or(1);
+                    let d = get_i("day").unwrap_or(1);
+                    let h = get_i("hour").unwrap_or(0);
+                    let mi = get_i("minute").unwrap_or(0);
+                    let s = get_i("second").unwrap_or(0);
+                    let tz = get_s("timezone")
+                        .map(|t| tck_tz_month(&t, mo))
+                        .unwrap_or_else(|| "Z".to_owned());
+                    Some(format!(
+                        "\"{:04}-{:02}-{:02}T{}{}\"",
+                        y,
+                        mo,
+                        d,
+                        tck_fmt_time(h, mi, s, subsec),
+                        tz
+                    ))
+                }
+                "duration" => tck_eval_duration(pairs),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Compute total sub-second nanoseconds from millisecond/microsecond/nanosecond map fields.
+fn subsec_ns(ms: Option<i64>, us: Option<i64>, ns: Option<i64>) -> i64 {
+    ms.unwrap_or(0) * 1_000_000 + us.unwrap_or(0) * 1_000 + ns.unwrap_or(0)
+}
+
+/// Format time as "HH:MM[:SS[.frac]]".
+fn tck_fmt_time(h: i64, m: i64, s: i64, ns: i64) -> String {
+    if s == 0 && ns == 0 {
+        format!("{:02}:{:02}", h, m)
+    } else if ns == 0 {
+        format!("{:02}:{:02}:{:02}", h, m, s)
+    } else {
+        let frac = format!("{:09}", ns);
+        let frac = frac.trim_end_matches('0');
+        format!("{:02}:{:02}:{:02}.{}", h, m, s, frac)
+    }
+}
+
+/// Month-aware TZ suffix for named timezones (matches tc_tz_suffix_month in cypher.rs).
+fn tck_tz_month(tz: &str, month: i64) -> String {
+    if tz == "Z" || tz.starts_with('+') || tz.starts_with('-') {
+        return tz.to_owned();
+    }
+    let is_summer = matches!(month, 4 | 5 | 6 | 7 | 8 | 9);
+    let (winter, summer) = match tz {
+        "Europe/Stockholm" | "Europe/Paris" | "Europe/Berlin" | "Europe/Rome" | "Europe/Madrid"
+        | "Europe/Amsterdam" | "Europe/Brussels" | "Europe/Copenhagen" | "Europe/Warsaw"
+        | "Europe/Vienna" | "Europe/Zurich" | "Europe/Prague" | "Europe/Budapest" => {
+            ("+01:00", "+02:00")
+        }
+        "Europe/London" | "Europe/Dublin" | "Europe/Lisbon" => ("Z", "+01:00"),
+        "UTC" | "Etc/UTC" => ("Z", "Z"),
+        "America/New_York" | "America/Toronto" | "America/Detroit" => ("-05:00", "-04:00"),
+        "America/Los_Angeles" | "America/San_Francisco" => ("-08:00", "-07:00"),
+        "Asia/Tokyo" => ("+09:00", "+09:00"),
+        "Asia/Shanghai" | "Asia/Beijing" | "Asia/Hong_Kong" => ("+08:00", "+08:00"),
+        "Pacific/Honolulu" | "Pacific/Johnston" => ("-10:00", "-10:00"),
+        _ => ("Z", "Z"),
+    };
+    let offset = if is_summer { summer } else { winter };
+    if offset == "Z" {
+        format!("Z[{}]", tz)
+    } else {
+        format!("{}[{}]", offset, tz)
+    }
+}
+
+/// Evaluate a duration({...}) map to an ISO 8601 duration literal string (with outer quotes).
+fn tck_eval_duration(pairs: &[(String, Expression)]) -> Option<String> {
+    let get_f = |key: &str| -> Option<f64> {
+        pairs
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .and_then(|(_, v)| match v {
+                Expression::Literal(Literal::Float(f)) => Some(*f),
+                Expression::Literal(Literal::Integer(n)) => Some(*n as f64),
+                _ => None,
+            })
+    };
+    let years = get_f("years").or_else(|| get_f("year"));
+    let months_f = get_f("months").or_else(|| get_f("month")).unwrap_or(0.0);
+    let weeks_f = get_f("weeks").or_else(|| get_f("week")).unwrap_or(0.0);
+    let days_raw = get_f("days").or_else(|| get_f("day")).unwrap_or(0.0);
+    let hours_raw = get_f("hours").or_else(|| get_f("hour")).unwrap_or(0.0);
+    let mins_raw = get_f("minutes").or_else(|| get_f("minute")).unwrap_or(0.0);
+    let secs_raw = get_f("seconds").or_else(|| get_f("second")).unwrap_or(0.0);
+    let ms_f = get_f("milliseconds")
+        .or_else(|| get_f("millisecond"))
+        .unwrap_or(0.0);
+    let us_f = get_f("microseconds")
+        .or_else(|| get_f("microsecond"))
+        .unwrap_or(0.0);
+    let ns_f = get_f("nanoseconds")
+        .or_else(|| get_f("nanosecond"))
+        .unwrap_or(0.0);
+
+    if years.is_none()
+        && months_f == 0.0
+        && weeks_f == 0.0
+        && days_raw == 0.0
+        && hours_raw == 0.0
+        && mins_raw == 0.0
+        && secs_raw == 0.0
+        && ms_f == 0.0
+        && us_f == 0.0
+        && ns_f == 0.0
+    {
+        return None;
+    }
+    // Cascade fractions downward.
+    let months_int = months_f.trunc();
+    let extra_days = months_f.fract() * 30.436875 + weeks_f * 7.0;
+    let days_total = days_raw + extra_days;
+    let days_int = days_total.trunc();
+    let hours_total = hours_raw + days_total.fract() * 24.0;
+    let hours_int = hours_total.trunc();
+    let mins_total = mins_raw + hours_total.fract() * 60.0;
+    let mins_int = mins_total.trunc();
+    let secs_total_f = secs_raw + mins_total.fract() * 60.0;
+
+    let total_ns: i64 = (secs_total_f * 1_000_000_000.0).round() as i64
+        + (ms_f * 1_000_000.0).round() as i64
+        + (us_f * 1_000.0).round() as i64
+        + ns_f.round() as i64;
+    let s_whole = if total_ns >= 0 {
+        total_ns / 1_000_000_000
+    } else {
+        -((-total_ns) / 1_000_000_000)
+    };
+    let remain_ns = total_ns - s_whole * 1_000_000_000;
+    let carry_min = if s_whole >= 0 {
+        s_whole / 60
+    } else {
+        -((-s_whole) / 60)
+    };
+    let s_final = s_whole - carry_min * 60;
+    let min_total = mins_int as i64 + carry_min;
+
+    let mut date_s = String::new();
+    if let Some(y) = years {
+        if y != 0.0 {
+            date_s.push_str(&format!("{}Y", y as i64));
+        }
+    }
+    if months_int != 0.0 {
+        date_s.push_str(&format!("{}M", months_int as i64));
+    }
+    if days_int != 0.0 {
+        date_s.push_str(&format!("{}D", days_int as i64));
+    }
+
+    let mut time_s = String::new();
+    if hours_int != 0.0 {
+        time_s.push_str(&format!("{}H", hours_int as i64));
+    }
+    if min_total != 0 {
+        time_s.push_str(&format!("{}M", min_total));
+    }
+    if s_final != 0 || remain_ns != 0 {
+        let neg = s_final < 0 || (s_final == 0 && remain_ns < 0);
+        let abs_sw = s_final.unsigned_abs();
+        let abs_rn = remain_ns.unsigned_abs();
+        let prefix = if neg { "-" } else { "" };
+        if abs_rn == 0 {
+            time_s.push_str(&format!("{}{abs_sw}S", prefix));
+        } else {
+            let frac = format!("{abs_rn:09}");
+            let frac = frac.trim_end_matches('0');
+            time_s.push_str(&format!("{}{abs_sw}.{frac}S", prefix));
+        }
+    }
+
+    let has_time = hours_raw != 0.0
+        || mins_raw != 0.0
+        || secs_raw != 0.0
+        || ms_f != 0.0
+        || us_f != 0.0
+        || ns_f != 0.0
+        || !time_s.is_empty();
+    let mut result = "P".to_string();
+    result.push_str(&date_s);
+    if has_time {
+        result.push('T');
+        result.push_str(&time_s);
+    }
+    if result == "P" || result == "PT" {
+        result = "PT0S".to_string();
+    }
+    Some(format!("\"{}\"", result))
 }
 
 /// Convert a SET value expression to a SPARQL expression string for BIND clauses.
@@ -587,10 +859,13 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             // If the expression is a variable rename, propagate MATCH constraints.
                             if let Expression::Variable(src_var) = &item.expression {
                                 // Look up the source variable in match_node_triples (direct or alias)
-                                let orig = with_aliases.get(src_var.as_str())
+                                let orig = with_aliases
+                                    .get(src_var.as_str())
                                     .cloned()
                                     .unwrap_or_else(|| src_var.clone());
-                                let constraints = match_node_triples.get(orig.as_str()).cloned()
+                                let constraints = match_node_triples
+                                    .get(orig.as_str())
+                                    .cloned()
                                     .or_else(|| {
                                         // Try the src_var directly
                                         match_node_triples.get(src_var.as_str()).cloned()
@@ -600,12 +875,15 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                         vec![format!("?{alias} <{BASE}__node> <{BASE}__node>")]
                                     });
                                 // Re-express constraints in terms of the new alias name
-                                let aliased: Vec<String> = constraints.iter().map(|t| {
-                                    t.replace(&format!("?{src_var} "), &format!("?{alias} "))
-                                      .replace(&format!("?{src_var}>"), &format!("?{alias}>"))
-                                      .replace(&format!("?{orig} "), &format!("?{alias} "))
-                                      .replace(&format!("?{orig}>"), &format!("?{alias}>"))
-                                }).collect();
+                                let aliased: Vec<String> = constraints
+                                    .iter()
+                                    .map(|t| {
+                                        t.replace(&format!("?{src_var} "), &format!("?{alias} "))
+                                            .replace(&format!("?{src_var}>"), &format!("?{alias}>"))
+                                            .replace(&format!("?{orig} "), &format!("?{alias} "))
+                                            .replace(&format!("?{orig}>"), &format!("?{alias}>"))
+                                    })
+                                    .collect();
                                 match_node_triples.insert(alias.clone(), aliased);
                                 with_aliases.insert(alias.clone(), orig);
                             }
@@ -658,7 +936,8 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                 let has_bound_vars = c.pattern.0.iter().any(|pat| {
                     pat.elements.iter().any(|elem| {
                         if let PatternElement::Node(n) = elem {
-                            n.variable.as_ref()
+                            n.variable
+                                .as_ref()
                                 .map(|v| match_node_triples.contains_key(v.as_str()))
                                 .unwrap_or(false)
                         } else {
@@ -682,7 +961,9 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             match elem {
                                 PatternElement::Node(n) => {
                                     let node_ref = if let Some(var) = &n.variable {
-                                        if let Some(constraints) = match_node_triples.get(var.as_str()) {
+                                        if let Some(constraints) =
+                                            match_node_triples.get(var.as_str())
+                                        {
                                             // Pre-bound node: use ?varname in INSERT template.
                                             if seen_bound.insert(var.clone()) {
                                                 for t in constraints {
@@ -702,14 +983,19 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                                     s
                                                 })
                                                 .clone();
-                                            insert_triples.push(format!("{bnode} <{BASE}__node> <{BASE}__node> ."));
+                                            insert_triples.push(format!(
+                                                "{bnode} <{BASE}__node> <{BASE}__node> ."
+                                            ));
                                             for label in &n.labels {
                                                 insert_triples.push(format!("{bnode} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{BASE}{label}> ."));
                                             }
                                             if let Some(props) = &n.properties {
                                                 for (key, val_expr) in props {
-                                                    if let Some(lit) = expr_to_sparql_lit(val_expr) {
-                                                        insert_triples.push(format!("{bnode} <{BASE}{key}> {lit} ."));
+                                                    if let Some(lit) = expr_to_sparql_lit(val_expr)
+                                                    {
+                                                        insert_triples.push(format!(
+                                                            "{bnode} <{BASE}{key}> {lit} ."
+                                                        ));
                                                     }
                                                 }
                                             }
@@ -723,7 +1009,9 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                         // preserves Cypher read-before-write semantics.
                                         let bnode = format!("_:__n{counter}");
                                         counter += 1;
-                                        insert_triples.push(format!("{bnode} <{BASE}__anon_node> <{BASE}__anon_node> ."));
+                                        insert_triples.push(format!(
+                                            "{bnode} <{BASE}__anon_node> <{BASE}__anon_node> ."
+                                        ));
                                         bnode
                                     };
                                     node_refs.push(Some(node_ref));
@@ -736,8 +1024,12 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                         // Second pass: emit edge triples.
                         for (i, elem) in elements.iter().enumerate() {
                             if let PatternElement::Relationship(rel) = elem {
-                                let src_ref = node_refs[..i].iter().filter_map(|x| x.as_deref()).last();
-                                let dst_ref = node_refs[i + 1..].iter().filter_map(|x| x.as_deref()).next();
+                                let src_ref =
+                                    node_refs[..i].iter().filter_map(|x| x.as_deref()).last();
+                                let dst_ref = node_refs[i + 1..]
+                                    .iter()
+                                    .filter_map(|x| x.as_deref())
+                                    .next();
                                 if let (Some(src_b), Some(dst_b)) = (src_ref, dst_ref) {
                                     let (s, o) = match rel.direction {
                                         Direction::Left => (dst_b, src_b),
@@ -750,7 +1042,8 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                             insert_triples.push(format!("{s} <{BASE}{rt}> {o} ."));
                                             if let Some(props) = &rel.properties {
                                                 for (key, val_expr) in props {
-                                                    if let Some(lit) = expr_to_sparql_lit(val_expr) {
+                                                    if let Some(lit) = expr_to_sparql_lit(val_expr)
+                                                    {
                                                         insert_triples.push(format!("<< {s} <{BASE}{rt}> {o} >> <{BASE}{key}> {lit} ."));
                                                     }
                                                 }
@@ -767,7 +1060,14 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                         let where_body = if where_triples.is_empty() {
                             "{ }".to_string()
                         } else {
-                            format!("{{ {} }}", where_triples.iter().map(|t| format!("{t} .")).collect::<Vec<_>>().join(" "))
+                            format!(
+                                "{{ {} }}",
+                                where_triples
+                                    .iter()
+                                    .map(|t| format!("{t} ."))
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            )
                         };
                         updates.push(format!("INSERT {{\n  {insert_body}\n}} WHERE {where_body}"));
                     }

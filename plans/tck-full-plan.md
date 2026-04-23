@@ -1,11 +1,25 @@
 # Full openCypher TCK Suite Expansion Plan
 
 **Status**: in progress  
-**Updated**: 2026-04-15
+**Updated**: 2026-04-23
 
-**Current state**: 2199/2505 (87.8%) across all vendored scenarios  
-**Target state**: ≥ 80% pass rate across all 3,650 scenarios from 37 categories  
-**Gap**: ~350 more scenarios from non-vendored categories (Phase D)
+**Current state**: 3431/3789 (90.6%) — all 36 planned categories vendored.  
+**Target state (Phase 7)**: ≥ 80% across the full suite — **already exceeded**.  
+**Remaining gap**: 163 failing + 195 skipped + 8 parse errors. The work below targets reducing this to < 100 failures while paying down translator debt.
+
+## Assessment snapshot (2026-04-23)
+
+Pareto of failing-step messages from the full TCK run:
+
+| Count | Cause | Where to fix |
+|------:|-------|--------------|
+| 60 | `Unsupported feature: complex return expression` | `translate_return_item` (return projection of compound expressions) |
+| 25 | `Unsupported feature: UNWIND of variable` | `translate_unwind_clause` (needs runtime list lowering or VALUES join) |
+|  4 | `Unsupported feature: variable in UNWIND list literal` | same |
+|  ~3 | `complex return / property access on non-variable / list comprehension` | expression engine recursion |
+|  ~70 | semantic / row-count mismatches | scattered: Match4/Match6 (multigraph), Merge, ReturnOrderBy null lists, write side-effects |
+
+A single fix for "complex return expression" likely converts ~60 failures at once. Combined with UNWIND-of-variable, this is **~90 wins from 2 changes** — by far the highest leverage on the board.
 
 **Target SPARQL dialect**: SPARQL-star / SPARQL 1.2 (Oxigraph 0.4 supports RDF-star natively). SPARQL 1.2 adds `TRIPLE()`, `SUBJECT()`, `PREDICATE()`, `OBJECT()`, and `isTRIPLE()` functions, which directly enable `type(r)` extraction and relationship-as-value scenarios.
 
@@ -232,6 +246,108 @@
 
 ---
 
+## Compliance Tracker
+
+See ROADMAP.md Phase 7 for the full per-release table. Latest: **3431/3789 (90.6%)**, 163 failed, 195 skipped, 8 parse errors.
+
+---
+
+## Phase E — Pareto Cleanup (next, ~90 wins from 2 fixes)
+
+**Status**: planned
+
+These are the highest-leverage gaps still open, ordered by impact.
+
+1. **Complex return expression (60 failures)** — `translate_return_item` rejects compound expressions in `RETURN`. Trace the rejection (see `Unsupported feature: complex return expression (Phase 4+)`), determine which expression shapes are bailing, and route them through `translate_expr` instead of bailing. Expected: ~60 scenarios pass.
+2. **`UNWIND` of variable / non-literal expression (29 failures combined)** — `translate_unwind_clause` only handles compile-time literal lists. For runtime lists known to be a list-typed variable bound by an upstream `WITH … AS` we can:
+   - For literal lists tracked through `WITH`, propagate the list into the UNWIND site (extend the existing `try_resolve_to_items`).
+   - For genuinely runtime lists, lower to a SPARQL subquery that joins on a list-element triple pattern (only works under specific upstream shapes; mark the rest as fundamental).
+3. **List comprehension (1 failure)**, **property access on non-variable base** (1), and the lone non-literal UNWIND case — fix opportunistically while in the file.
+
+After this phase, the failure mix is dominated by:
+- Match4/Match6 multigraph & `[rs*]` runtime-path constraint (already documented as fundamental in `plans/fundamental-limitations.md`)
+- Merge interleaving (write-side ordering)
+- ReturnOrderBy null-list ordering edge cases
+- Skipped Procedure/Call scenarios (intentional)
+
+**Target**: ≤ 100 failing scenarios; ≥ 92% pass rate.
+
+---
+
+## Phase F — Translator Code-Health Refactor (parallel track)
+
+**Status**: planned
+
+`src/translator/cypher.rs` is **16,209 lines** in a single file with one `impl TranslationState` block of ~9,000 lines. This is the single biggest source of "going uphill" friction. The refactor is mechanical, behaviour-preserving, and unblocks Phase E rather than competing with it.
+
+### Current size breakdown
+
+| Region | Lines | Lines (kept inline) |
+|--------|------:|------:|
+| Top-level free helpers (numeric/agg classification, semantics) | 64–1999 | ~1,940 |
+| `impl TranslationState` (one block) | 2001–~11050 | ~9,050 |
+| Free helpers — expression rewriting / const folding | ~11050–11900 | ~850 |
+| Free helpers — temporal (constructors, JDN, durations, fmt) | ~11900–end | **~4,300** |
+
+The five hottest methods inside the impl:
+
+| Method | Approx lines | Action |
+|--------|-------:|--------|
+| `translate_clause_sequence` | ~1,755 | Split per-clause arms into private fns (`translate_with`, `translate_create_clause`, …) in sibling files. |
+| `translate_function_call` | ~1,524 | Move to `translator/cypher/functions.rs`; dispatch table by family (string, numeric, list, map, temporal, predicate). |
+| `temporal_prop_binds` | ~1,280 | Move to `translator/cypher/temporal.rs` with the existing temporal free helpers. |
+| `translate_expr` | ~1,380 | Stays in core, but extract per-variant arms (case/list/map/coalesce). |
+| `translate_relationship_pattern` | ~650 | Move to `translator/cypher/patterns.rs` alongside `emit_edge_triple` & path unrolling. |
+
+### Proposed module layout (post-refactor)
+
+```
+src/translator/cypher/
+  mod.rs              — pub `translate`, `translate_skip_writes`; re-exports state
+  state.rs            — TranslationState struct + small helpers
+  semantics.rs        — validate_semantics + classification helpers (currently lines 64–1999)
+  clauses.rs          — translate_clause_sequence + per-clause fns
+  patterns.rs         — node/relationship/path pattern lowering
+  expr.rs             — translate_expr core + arms
+  functions.rs        — translate_function_call dispatch
+  aggregates.rs       — translate_aggregate_expr + agg utilities
+  return_proj.rs      — translate_return_clause / translate_return_item / order/skip/limit
+  unwind.rs           — translate_unwind_clause
+  rewrite.rs          — eliminate_collect_unwind, substitute_var_in_expr, const folding
+  temporal/
+    mod.rs            — temporal_prop_binds (the dispatch)
+    construct.rs      — date/time/dateTime/localtime/localdatetime/duration constructors
+    jdn.rs            — Julian day & ISO week math
+    duration.rs       — duration parse / format / arithmetic
+    fmt.rs            — TZ formatting, frac formatting
+```
+
+### Refactor protocol (apply once per module)
+
+For each extraction, in order, in its own commit:
+
+1. Identify a contiguous block of free helpers or impl methods that has no callers outside the file (or whose callers we can update in the same commit).
+2. `git mv`-equivalent: copy block to new file under `src/translator/cypher/`; add `pub(super)` to anything called from the rest of the translator.
+3. Add `mod xxx;` and `use` lines in `mod.rs`.
+4. Re-run `cargo test --test tck --release` and the integration tests; commit only if pass count is unchanged.
+5. Bump `Updated` date in this plan and tick the row off.
+
+### Pre-refactor cleanups (free wins, do first)
+
+- Delete dead helpers flagged by the compiler: `make_bool_op_is_null`, `extract_tz_offset_s`, `temporal_prop_expr`, `_xsd_dur`, `_substr1`, `_strlen_fn`, `_tz_full`, `_dur_after_y`, `_dur_frac9`, `_lit24i`, `_abs_f`, `_raw_tz`. (~150 lines.)
+- Remove the unreachable `Clause::Set(_) => {}` arm at line 1837 (already matched at 1435).
+- Apply `cargo fix` for the `non_snake_case` JDN variables (auto-generated patch; behaviour-preserving).
+- Audit the file for nested `fn expr_key` / `fn normalize` definitions; promote to `pub(super) fn` in `rewrite.rs` if reused, otherwise leave nested.
+
+### Acceptance criteria
+
+- No file in `src/translator/cypher/` exceeds 2,000 lines.
+- TCK pass count is `>= 3431` after each commit.
+- `cargo build` produces zero warnings (currently 35).
+- `translate_function_call` is replaced by a dispatch table whose arms are individually testable.
+
+---
+
 ## Vendorization Script
 
 ```bash
@@ -253,15 +369,3 @@ cp -r "$TMPDIR/oc/tck/features/"* "$TARGET/"
 echo "Vendorized $(find "$TARGET" -name '*.feature' | wc -l) feature files"
 echo "$(grep -r 'Scenario:' "$TARGET" --include='*.feature' | wc -l) scenario definitions"
 ```
-
----
-
-## Compliance Tracker
-
-| Release | Pass | Fail | Total | % | Notes |
-|---------|------|------|-------|---|-------|
-| dev     | 461  | 2    | 463   | 99.6% | 4-category subset only |
-| Phase A | —    | —    | 1,035 | target ≥ 80% | after A categories vendorized |
-| Phase B | —    | —    | 1,593 | target ≥ 75% | after B categories vendorized |
-| Phase C | —    | —    | 2,263 | target ≥ 60% | after C categories vendorized |
-| Phase D | —    | —    | 3,650 | target ≥ 80% | full suite |

@@ -138,6 +138,7 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 | dev     | 2548 | 1241 | 3789  | 67.2% | Phase D vendored (create/delete/merge/remove/set/temporal); comprehensive temporal constructors (ISO week/ordinal/quarter/duration) |
 | dev     | 2595 | 999  | 3789  | 68.5% | Write clause support: REMOVE/SET via SPARQL Update, CREATE/DELETE semantic validation (VariableAlreadyBound, NoSingleRelationshipType, etc.) |
 | dev     | 2627 | 967  | 3789  | 69.3% | MERGE validation (+NoSingleRelType, +VariableAlreadyBound, +path var), MERGE INSERT/MATCH in skip_writes, SetLabel support, SET/MERGE RHS undefined var checks |
+| dev     | 3430 | 164  | 3789  | 90.5% | All Temporal5 scenarios fixed: JDN pos/neg split (Oxigraph right-associative subtraction bug), d.quarters/d.weeks added to TEMPORAL_PROPS; date/time component extraction working for all temporal types |
 | target  | —    | —    | 3,650 | ≥ 80% | all 37 categories |
 
 **Milestone**: ≥ 80% pass rate across the full 3,650-scenario suite.

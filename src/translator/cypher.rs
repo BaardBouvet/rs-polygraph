@@ -1882,6 +1882,11 @@ struct TranslationState {
     edge_map: std::collections::HashMap<String, EdgeInfo>,
     /// Aggregates captured while translating expressions (e.g. count(*) inside arithmetic).
     pending_aggs: Vec<(Variable, AggregateExpression)>,
+    /// Pre-extends from temporal property expressions. Drained into the `extends` list
+    /// before the main extend for each RETURN/WITH item, ensuring that intermediate
+    /// BIND variables (needed to avoid SPARQL serialization precedence issues) come
+    /// first in the generated SPARQL.
+    pending_pre_extends: Vec<(Variable, SparExpr)>,
     /// Per-MATCH tracking: each inner Vec holds one or two stored-triple instances for
     /// one relationship hop.  Used to generate pairwise relationship-isomorphism FILTERs.
     iso_hops: Vec<Vec<EdgeIsoSlot>>,
@@ -2001,6 +2006,7 @@ impl TranslationState {
             rdf_star,
             edge_map: Default::default(),
             pending_aggs: Vec::new(),
+            pending_pre_extends: Vec::new(),
             iso_hops: Vec::new(),
             nullable_vars: Default::default(),
             nullable_type_guards: Default::default(),
@@ -6001,6 +6007,12 @@ impl TranslationState {
                     });
 
                     vars.push(var.clone());
+                    // Drain any pre-extends generated during temporal prop translation.
+                    // These must come BEFORE the main extend so intermediate variables
+                    // are bound first (avoids SPARQL operator precedence serialization issues).
+                    if !self.pending_pre_extends.is_empty() {
+                        extends.append(&mut self.pending_pre_extends);
+                    }
                     if let Some((agg_var, agg)) = agg_pair_opt {
                         aggregates.push((agg_var, agg));
                         if let Some(ext_expr) = ext_opt {
@@ -6179,6 +6191,68 @@ impl TranslationState {
                             );
                             return Ok((result_var, None, Some(SparExpr::Literal(int_lit))));
                         }
+                    }
+                }
+                // Check if the property is a known temporal component accessor
+                // (year, month, day, week, weekYear, weekDay, ordinalDay, quarter, dayOfQuarter,
+                //  hour, minute, second, millisecond, microsecond, nanosecond,
+                //  timezone, offset, offsetMinutes, offsetSeconds, epochSeconds, epochMillis,
+                //  years, months, days, hours, minutes, seconds, milliseconds, microseconds,
+                //  nanoseconds, quartersOfYear, monthsOfQuarter, monthsOfYear, daysOfWeek,
+                //  minutesOfHour, secondsOfMinute, millisecondsOfSecond, microsecondsOfSecond,
+                //  nanosecondsOfSecond).
+                // Generate a SPARQL expression that extracts the component from the string value.
+                const TEMPORAL_PROPS: &[&str] = &[
+                    "year",
+                    "month",
+                    "day",
+                    "quarter",
+                    "ordinalDay",
+                    "week",
+                    "weekYear",
+                    "weekDay",
+                    "dayOfQuarter",
+                    "hour",
+                    "minute",
+                    "second",
+                    "millisecond",
+                    "microsecond",
+                    "nanosecond",
+                    "timezone",
+                    "offset",
+                    "offsetMinutes",
+                    "offsetSeconds",
+                    "epochSeconds",
+                    "epochMillis",
+                    "years",
+                    "months",
+                    "quarters",
+                    "weeks",
+                    "days",
+                    "hours",
+                    "minutes",
+                    "seconds",
+                    "milliseconds",
+                    "microseconds",
+                    "nanoseconds",
+                    "quartersOfYear",
+                    "monthsOfQuarter",
+                    "monthsOfYear",
+                    "daysOfWeek",
+                    "minutesOfHour",
+                    "secondsOfMinute",
+                    "millisecondsOfSecond",
+                    "microsecondsOfSecond",
+                    "nanosecondsOfSecond",
+                ];
+                if TEMPORAL_PROPS.contains(&key.as_str())
+                    && !self.node_vars.contains(&var_name)
+                    && !self.edge_map.contains_key(&var_name)
+                {
+                    if let Some(te) =
+                        self.temporal_prop_binds(SparExpr::Variable(base_var.clone()), key.as_str())
+                    {
+                        return Ok((result_var, None, Some(te)));
                     }
                 }
                 // Check whether base_var is a relationship variable.
@@ -7106,14 +7180,58 @@ impl TranslationState {
                         // Real list IN is handled: build SparExpr::In(lhs, vec![each item]).
                         SparExpr::In(Box::new(l), vec![r])
                     }
-                    CompOp::StartsWith => {
-                        SparExpr::FunctionCall(spargebra::algebra::Function::StrStarts, vec![l, r])
-                    }
-                    CompOp::EndsWith => {
-                        SparExpr::FunctionCall(spargebra::algebra::Function::StrEnds, vec![l, r])
-                    }
-                    CompOp::Contains => {
-                        SparExpr::FunctionCall(spargebra::algebra::Function::Contains, vec![l, r])
+                    CompOp::StartsWith | CompOp::EndsWith | CompOp::Contains => {
+                        // openCypher: returns null if either operand is not a plain string.
+                        // Guard: IF(isLiteral(l) && !isNumeric(l) && isLiteral(r) && !isNumeric(r), fn(l,r), null)
+                        let xsd_string_nn = NamedNode::new_unchecked(XSD_STRING);
+                        let xsd_str_expr = SparExpr::NamedNode(xsd_string_nn);
+                        let l_str = SparExpr::And(
+                            Box::new(SparExpr::FunctionCall(
+                                spargebra::algebra::Function::IsLiteral,
+                                vec![l.clone()],
+                            )),
+                            Box::new(SparExpr::Equal(
+                                Box::new(SparExpr::FunctionCall(
+                                    spargebra::algebra::Function::Datatype,
+                                    vec![l.clone()],
+                                )),
+                                Box::new(xsd_str_expr.clone()),
+                            )),
+                        );
+                        let r_str = SparExpr::And(
+                            Box::new(SparExpr::FunctionCall(
+                                spargebra::algebra::Function::IsLiteral,
+                                vec![r.clone()],
+                            )),
+                            Box::new(SparExpr::Equal(
+                                Box::new(SparExpr::FunctionCall(
+                                    spargebra::algebra::Function::Datatype,
+                                    vec![r.clone()],
+                                )),
+                                Box::new(xsd_str_expr),
+                            )),
+                        );
+                        let both_str = SparExpr::And(Box::new(l_str), Box::new(r_str));
+                        let fn_call = match op {
+                            CompOp::StartsWith => SparExpr::FunctionCall(
+                                spargebra::algebra::Function::StrStarts,
+                                vec![l, r],
+                            ),
+                            CompOp::EndsWith => SparExpr::FunctionCall(
+                                spargebra::algebra::Function::StrEnds,
+                                vec![l, r],
+                            ),
+                            _ => SparExpr::FunctionCall(
+                                spargebra::algebra::Function::Contains,
+                                vec![l, r],
+                            ),
+                        };
+                        let null_v = self.fresh_var("null");
+                        SparExpr::If(
+                            Box::new(both_str),
+                            Box::new(fn_call),
+                            Box::new(SparExpr::Variable(null_v)),
+                        )
                     }
                     CompOp::RegexMatch => {
                         SparExpr::FunctionCall(spargebra::algebra::Function::Regex, vec![l, r])
@@ -10391,6 +10509,536 @@ impl TranslationState {
             }),
         }
     }
+
+    /// Extract a temporal property from a SPARQL variable holding a temporal string,
+    /// using intermediate BIND variables to avoid SPARQL serialization precedence issues.
+    /// Pushes intermediate (Variable, SparExpr) pairs to `self.pending_pre_extends`.
+    /// Returns the final expression for the requested property, or None if unknown.
+    fn temporal_prop_binds(&mut self, var_e: SparExpr, prop: &str) -> Option<SparExpr> {
+        use spargebra::algebra::Function;
+        let xsi_nn = NamedNode::new_unchecked(XSD_INTEGER);
+        let xsd_dec_nn = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#decimal");
+
+        // ── Building-block closures (all produce safe expressions) ──────────────
+        let dim =
+            |n: i64| SparExpr::Literal(SparLit::new_typed_literal(n.to_string(), xsi_nn.clone()));
+        let ddm = |s: &str| {
+            SparExpr::Literal(SparLit::new_typed_literal(s.to_owned(), xsd_dec_nn.clone()))
+        };
+        let slit = |s: &str| SparExpr::Literal(SparLit::new_simple_literal(s.to_owned()));
+        let vr = |v: &Variable| SparExpr::Variable(v.clone());
+        let int_cast =
+            |e: SparExpr| SparExpr::FunctionCall(Function::Custom(xsi_nn.clone()), vec![e]);
+        let dec_cast =
+            |e: SparExpr| SparExpr::FunctionCall(Function::Custom(xsd_dec_nn.clone()), vec![e]);
+        let floor_f = |e: SparExpr| SparExpr::FunctionCall(Function::Floor, vec![e]);
+        let ceil_f = |e: SparExpr| SparExpr::FunctionCall(Function::Ceil, vec![e]);
+        let abs_f = |e: SparExpr| SparExpr::FunctionCall(Function::Abs, vec![e]);
+        let substr2 = |s: SparExpr, start: i64, len: i64| {
+            SparExpr::FunctionCall(Function::SubStr, vec![s, dim(start), dim(len)])
+        };
+        let strafter_f =
+            |s: SparExpr, d: &str| SparExpr::FunctionCall(Function::StrAfter, vec![s, slit(d)]);
+        let strbefore_f =
+            |s: SparExpr, d: &str| SparExpr::FunctionCall(Function::StrBefore, vec![s, slit(d)]);
+        let concat_f =
+            |a: SparExpr, b: SparExpr| SparExpr::FunctionCall(Function::Concat, vec![a, b]);
+        let contains_f =
+            |s: SparExpr, sub: &str| SparExpr::FunctionCall(Function::Contains, vec![s, slit(sub)]);
+        let if_f = |c: SparExpr, t: SparExpr, e: SparExpr| {
+            SparExpr::If(Box::new(c), Box::new(t), Box::new(e))
+        };
+        // Safe arithmetic operators (caller ensures no precedence-violating nesting):
+        let add = |a: SparExpr, b: SparExpr| SparExpr::Add(Box::new(a), Box::new(b));
+        let sub = |a: SparExpr, b: SparExpr| SparExpr::Subtract(Box::new(a), Box::new(b));
+        let mul = |a: SparExpr, b: SparExpr| SparExpr::Multiply(Box::new(a), Box::new(b));
+        let div = |a: SparExpr, b: SparExpr| SparExpr::Divide(Box::new(a), Box::new(b));
+
+        let str_e = SparExpr::FunctionCall(Function::Str, vec![var_e.clone()]);
+
+        // ── Simple string-based properties (no intermediate vars needed) ────────
+        // These expressions are all composed of function calls, which spargebra
+        // serializes with correct parenthesization.
+
+        // Time portion helper (IF T-separator present, extract after T; else str itself)
+        let time_str = if_f(
+            contains_f(str_e.clone(), "T"),
+            strafter_f(str_e.clone(), "T"),
+            str_e.clone(),
+        );
+        let t_hour = int_cast(substr2(time_str.clone(), 1, 2));
+        let t_minute = int_cast(substr2(time_str.clone(), 4, 2));
+        let t_second = int_cast(substr2(time_str.clone(), 7, 2));
+        let frac_raw = strafter_f(time_str.clone(), ".");
+        let frac_strip_p = if_f(
+            contains_f(frac_raw.clone(), "+"),
+            strbefore_f(frac_raw.clone(), "+"),
+            frac_raw.clone(),
+        );
+        let frac_strip_z = if_f(
+            contains_f(frac_strip_p.clone(), "Z"),
+            strbefore_f(frac_strip_p.clone(), "Z"),
+            frac_strip_p.clone(),
+        );
+        let frac_clean = if_f(
+            contains_f(frac_strip_z.clone(), "-"),
+            strbefore_f(frac_strip_z.clone(), "-"),
+            frac_strip_z.clone(),
+        );
+        let frac9 = substr2(concat_f(frac_clean.clone(), slit("000000000")), 1, 9);
+        let t_ms = int_cast(substr2(frac9.clone(), 1, 3));
+        let t_us = int_cast(substr2(frac9.clone(), 1, 6));
+        let t_ns = int_cast(frac9.clone());
+
+        // TZ helpers (all function-call based, safe)
+        let has_pos_tz = contains_f(str_e.clone(), "+");
+        let pos_tz_val = concat_f(slit("+"), strafter_f(str_e.clone(), "+"));
+        let pos_tz_clean = if_f(
+            contains_f(pos_tz_val.clone(), "["),
+            strbefore_f(pos_tz_val.clone(), "["),
+            pos_tz_val.clone(),
+        );
+        let has_z = contains_f(str_e.clone(), "Z");
+        let tz_offset_str = if_f(
+            has_z.clone(),
+            slit("Z"),
+            if_f(has_pos_tz.clone(), pos_tz_clean.clone(), slit("")),
+        );
+        let named_tz_raw = if_f(
+            contains_f(str_e.clone(), "["),
+            strafter_f(str_e.clone(), "["),
+            slit(""),
+        );
+        let tz_hh = int_cast(substr2(tz_offset_str.clone(), 2, 2));
+        let tz_mm = int_cast(substr2(tz_offset_str.clone(), 5, 2));
+        let tz_sign = substr2(tz_offset_str.clone(), 1, 1);
+        let tz_is_neg = SparExpr::Equal(Box::new(tz_sign), Box::new(slit("-")));
+        // tz_abs_minutes = tz_hh * 60 + tz_mm (safe: Mul(FC, lit) + FC, mul binds tighter)
+        let tz_abs_min = add(
+            mul(dec_cast(tz_hh.clone()), ddm("60")),
+            dec_cast(tz_mm.clone()),
+        );
+        let tz_minutes = if_f(
+            has_z.clone(),
+            ddm("0"),
+            if_f(
+                tz_is_neg.clone(),
+                SparExpr::UnaryMinus(Box::new(tz_abs_min.clone())),
+                tz_abs_min.clone(),
+            ),
+        );
+        let tz_seconds = mul(tz_minutes.clone(), ddm("60"));
+
+        // Simple properties: return directly (no intermediate BINDs needed)
+        match prop {
+            "year" => return Some(int_cast(substr2(str_e.clone(), 1, 4))),
+            "month" => return Some(int_cast(substr2(str_e.clone(), 6, 2))),
+            "day" => return Some(int_cast(substr2(str_e.clone(), 9, 2))),
+            "quarter" => {
+                let m = int_cast(substr2(str_e.clone(), 6, 2));
+                return Some(int_cast(ceil_f(div(dec_cast(m), ddm("3")))));
+            }
+            "hour" => return Some(t_hour),
+            "minute" => return Some(t_minute),
+            "second" => return Some(t_second),
+            "millisecond" => return Some(t_ms),
+            "microsecond" => return Some(t_us),
+            "nanosecond" => return Some(t_ns),
+            "timezone" => {
+                let named_bare = strbefore_f(named_tz_raw.clone(), "]");
+                return Some(if_f(
+                    contains_f(str_e.clone(), "["),
+                    named_bare,
+                    tz_offset_str.clone(),
+                ));
+            }
+            "offset" => return Some(tz_offset_str.clone()),
+            "offsetMinutes" => return Some(tz_minutes.clone()),
+            "offsetSeconds" => return Some(tz_seconds.clone()),
+            _ => {}
+        }
+
+        // ── Duration string-based properties (no JDN, but may need intermediate BINDs) ──
+        let dur_str = str_e.clone();
+        let dur_after_p = strafter_f(dur_str.clone(), "P");
+        let dur_date_part = if_f(
+            contains_f(dur_after_p.clone(), "T"),
+            strbefore_f(dur_after_p.clone(), "T"),
+            dur_after_p.clone(),
+        );
+        let dur_time_part = if_f(
+            contains_f(dur_str.clone(), "T"),
+            strafter_f(dur_str.clone(), "T"),
+            slit(""),
+        );
+        let dur_years_str = if_f(
+            contains_f(dur_after_p.clone(), "Y"),
+            strbefore_f(dur_after_p.clone(), "Y"),
+            slit("0"),
+        );
+        let dur_years = int_cast(dur_years_str.clone());
+        let dur_date_after_y = if_f(
+            contains_f(dur_date_part.clone(), "Y"),
+            strafter_f(dur_date_part.clone(), "Y"),
+            dur_date_part.clone(),
+        );
+        let dur_date_after_m = if_f(
+            contains_f(dur_date_after_y.clone(), "M"),
+            strafter_f(dur_date_after_y.clone(), "M"),
+            dur_date_after_y.clone(),
+        );
+        let dur_months_str = if_f(
+            contains_f(dur_date_after_y.clone(), "M"),
+            strbefore_f(dur_date_after_y.clone(), "M"),
+            slit("0"),
+        );
+        let dur_months_i = int_cast(dur_months_str.clone());
+        let dur_days_str = if_f(
+            contains_f(dur_date_after_m.clone(), "D"),
+            strbefore_f(dur_date_after_m.clone(), "D"),
+            slit("0"),
+        );
+        let dur_days_i = int_cast(dur_days_str.clone());
+        let dur_hours_str = if_f(
+            contains_f(dur_time_part.clone(), "H"),
+            strbefore_f(dur_time_part.clone(), "H"),
+            slit("0"),
+        );
+        let dur_hours_i = int_cast(dur_hours_str.clone());
+        let dur_after_h = if_f(
+            contains_f(dur_time_part.clone(), "H"),
+            strafter_f(dur_time_part.clone(), "H"),
+            dur_time_part.clone(),
+        );
+        let dur_mins_str = if_f(
+            contains_f(dur_after_h.clone(), "M"),
+            strbefore_f(dur_after_h.clone(), "M"),
+            slit("0"),
+        );
+        let dur_mins_i = int_cast(dur_mins_str.clone());
+        let dur_after_m = if_f(
+            contains_f(dur_after_h.clone(), "M"),
+            strafter_f(dur_after_h.clone(), "M"),
+            dur_after_h.clone(),
+        );
+        let dur_secs_str = if_f(
+            contains_f(dur_after_m.clone(), "S"),
+            strbefore_f(dur_after_m.clone(), "S"),
+            slit("0"),
+        );
+        let dur_secs_f_str = if_f(
+            contains_f(dur_secs_str.clone(), "."),
+            strbefore_f(dur_secs_str.clone(), "."),
+            dur_secs_str.clone(),
+        );
+        let dur_secs_i = int_cast(dur_secs_f_str.clone());
+        let dur_frac_str = if_f(
+            contains_f(dur_secs_str.clone(), "."),
+            strafter_f(dur_secs_str.clone(), "."),
+            slit("0"),
+        );
+        let dur_frac_pad = substr2(concat_f(dur_frac_str.clone(), slit("000000000")), 1, 9);
+        let dur_ns_of_s = int_cast(dur_frac_pad.clone());
+
+        // For duration properties involving total-seconds * multiplier, we need
+        // an intermediate bind to avoid Multiply(Add(...), Lit) precedence issue.
+        // dur_total_secs_expr = hours*3600 + mins*60 + secs (time-part only)
+        // All operands below are function-call results (FC), so:
+        // FC_h * 3600 + FC_m * 60 + FC_s  — Multiply has higher precedence → correct.
+        let dur_time_secs_expr = add(
+            add(
+                mul(dur_hours_i.clone(), dim(3600)),
+                mul(dur_mins_i.clone(), dim(60)),
+            ),
+            dur_secs_i.clone(),
+        );
+
+        let dur_total_months = add(mul(dur_years.clone(), dim(12)), dur_months_i.clone());
+
+        match prop {
+            "years" => return Some(dur_years),
+            "months" => return Some(dur_total_months),
+            "quarters" => {
+                return Some(add(
+                    mul(dur_years.clone(), dim(4)),
+                    int_cast(floor_f(div(dec_cast(dur_months_i.clone()), ddm("3")))),
+                ))
+            }
+            "weeks" => {
+                return Some(int_cast(floor_f(div(
+                    dec_cast(dur_days_i.clone()),
+                    ddm("7"),
+                ))))
+            }
+            "days" => return Some(dur_days_i.clone()),
+            "hours" => return Some(dur_hours_i.clone()),
+            "minutes" => return Some(add(mul(dur_hours_i.clone(), dim(60)), dur_mins_i.clone())),
+            "seconds" => return Some(dur_time_secs_expr.clone()),
+            "milliseconds" => {
+                // Need: dur_time_secs * 1000 + ms_of_sec
+                // Multiply(dur_time_secs_expr=Add(...), Lit) → wrong serialization.
+                // Use intermediate: bind dur_time_secs_expr to a fresh variable first.
+                let v_dts = self.fresh_var("__dur_ts");
+                self.pending_pre_extends
+                    .push((v_dts.clone(), dur_time_secs_expr.clone()));
+                return Some(add(
+                    mul(vr(&v_dts), dim(1000)),
+                    int_cast(substr2(dur_frac_pad.clone(), 1, 3)),
+                ));
+            }
+            "microseconds" => {
+                let v_dts = self.fresh_var("__dur_ts");
+                self.pending_pre_extends
+                    .push((v_dts.clone(), dur_time_secs_expr.clone()));
+                return Some(add(
+                    mul(vr(&v_dts), dim(1_000_000)),
+                    int_cast(substr2(dur_frac_pad.clone(), 1, 6)),
+                ));
+            }
+            "nanoseconds" => {
+                let v_dts = self.fresh_var("__dur_ts");
+                self.pending_pre_extends
+                    .push((v_dts.clone(), dur_time_secs_expr.clone()));
+                return Some(add(
+                    mul(vr(&v_dts), dim(1_000_000_000)),
+                    dur_ns_of_s.clone(),
+                ));
+            }
+            "quartersOfYear" => {
+                return Some(int_cast(floor_f(div(
+                    dec_cast(dur_months_i.clone()),
+                    ddm("3"),
+                ))))
+            }
+            "monthsOfQuarter" => {
+                return Some(int_cast(sub(
+                    dur_months_i.clone(),
+                    mul(
+                        int_cast(floor_f(div(dec_cast(dur_months_i.clone()), ddm("3")))),
+                        dim(3),
+                    ),
+                )))
+            }
+            "monthsOfYear" => return Some(dur_months_i.clone()),
+            "daysOfWeek" => {
+                return Some(int_cast(sub(
+                    dur_days_i.clone(),
+                    mul(
+                        int_cast(floor_f(div(dec_cast(dur_days_i.clone()), ddm("7")))),
+                        dim(7),
+                    ),
+                )))
+            }
+            "minutesOfHour" => return Some(dur_mins_i.clone()),
+            "secondsOfMinute" => return Some(dur_secs_i.clone()),
+            "millisecondsOfSecond" => return Some(int_cast(substr2(dur_frac_pad.clone(), 1, 3))),
+            "microsecondsOfSecond" => return Some(int_cast(substr2(dur_frac_pad.clone(), 1, 6))),
+            "nanosecondsOfSecond" => return Some(dur_ns_of_s.clone()),
+            _ => {}
+        }
+
+        // ── JDN-based date properties — all use intermediate BIND variables ────
+        // Each bind pushes (variable, expression) to pending_pre_extends.
+        // Expressions only reference variables already bound or literals/function-calls.
+
+        // Bind helper: creates fresh var, records the bind, returns the var.
+        macro_rules! bind {
+            ($hint:literal, $expr:expr) => {{
+                let v = self.fresh_var(concat!("__tp_", $hint));
+                self.pending_pre_extends.push((v.clone(), $expr));
+                v
+            }};
+        }
+
+        // Date component extraction
+        let v_Y = bind!("Y", int_cast(substr2(str_e.clone(), 1, 4)));
+        let v_M = bind!("M", int_cast(substr2(str_e.clone(), 6, 2)));
+        let v_D = bind!("D", int_cast(substr2(str_e.clone(), 9, 2)));
+        let v_Yd = bind!("Yd", dec_cast(vr(&v_Y)));
+        let v_Md = bind!("Md", dec_cast(vr(&v_M)));
+        let v_Dd = bind!("Dd", dec_cast(vr(&v_D)));
+
+        // JDN sub-expressions: jdn_a = FLOOR((14 - Md) / 12)
+        let v_14mM = bind!("14mM", sub(ddm("14"), vr(&v_Md)));
+        let v_jdn_a = bind!("jdna", floor_f(div(vr(&v_14mM), ddm("12"))));
+        // jdn_y = Yd + 4800 - jdn_a
+        let v_jdn_y = bind!("jdny", sub(add(vr(&v_Yd), ddm("4800")), vr(&v_jdn_a)));
+        // jdn_m = Md + 12*jdn_a - 3
+        let v_12a = bind!("12a", mul(ddm("12"), vr(&v_jdn_a)));
+        let v_jdn_m = bind!("jdnm", sub(add(vr(&v_Md), vr(&v_12a)), ddm("3")));
+        // FLOOR((153*jdn_m + 2) / 5)
+        let v_153m = bind!("153m", mul(ddm("153"), vr(&v_jdn_m)));
+        let v_153m2 = bind!("153m2", add(vr(&v_153m), ddm("2")));
+        let v_f153m25 = bind!("f153m25", floor_f(div(vr(&v_153m2), ddm("5"))));
+        // Support terms for JDN
+        let v_365y = bind!("365y", mul(ddm("365"), vr(&v_jdn_y)));
+        let v_y4 = bind!("y4", floor_f(div(vr(&v_jdn_y), ddm("4"))));
+        let v_y100 = bind!("y100", floor_f(div(vr(&v_jdn_y), ddm("100"))));
+        let v_y400 = bind!("y400", floor_f(div(vr(&v_jdn_y), ddm("400"))));
+        // JDN = D + f153m25 + 365y + y4 - y100 + y400 - 32045
+        // Oxigraph right-assoc bug: "A - B + C" parses as "A - (B+C)". Fix: separate
+        // positive terms from negative terms, then do a single subtraction.
+        let v_JDN_pos = bind!(
+            "JDNp",
+            add(
+                add(add(add(vr(&v_Dd), vr(&v_f153m25)), vr(&v_365y)), vr(&v_y4)),
+                vr(&v_y400)
+            )
+        );
+        let v_JDN_neg = bind!("JDNn", add(vr(&v_y100), ddm("32045")));
+        let v_JDN = bind!("JDN", sub(vr(&v_JDN_pos), vr(&v_JDN_neg)));
+        // JDN mod 7 and ISO day-of-week
+        let v_JDN7 = bind!("JDN7", floor_f(div(vr(&v_JDN), ddm("7"))));
+        let v_mod7 = bind!("mod7", sub(vr(&v_JDN), mul(ddm("7"), vr(&v_JDN7))));
+
+        if prop == "weekDay" {
+            // iso_dow = mod7 + 1 (1=Mon .. 7=Sun); int_cast wraps the Add in parens ✓
+            return Some(int_cast(add(vr(&v_mod7), ddm("1"))));
+        }
+
+        // Ordinal day = JDN - JDN(Y, 1, 1) + 1
+        let v_y4799 = bind!("y4799", add(vr(&v_Yd), ddm("4799")));
+        let v_365yj1 = bind!("365yj1", mul(ddm("365"), vr(&v_y4799)));
+        let v_yj1_4 = bind!("yj1_4", floor_f(div(vr(&v_y4799), ddm("4"))));
+        let v_yj1_100 = bind!("yj1_100", floor_f(div(vr(&v_y4799), ddm("100"))));
+        let v_yj1_400 = bind!("yj1_400", floor_f(div(vr(&v_y4799), ddm("400"))));
+        // JDN(Y,1,1): same formula as JDN but D=1, m=10 for Jan, so literal 307 = D + floor((153*10+2)/5)
+        // Oxigraph bug fix: split positives/negatives, single final subtraction.
+        let v_JDNj1_pos = bind!(
+            "JDNj1p",
+            add(
+                add(add(ddm("307"), vr(&v_365yj1)), vr(&v_yj1_4)),
+                vr(&v_yj1_400)
+            )
+        );
+        let v_JDNj1_neg = bind!("JDNj1n", add(vr(&v_yj1_100), ddm("32045")));
+        let v_JDN_j1 = bind!("JDNj1", sub(vr(&v_JDNj1_pos), vr(&v_JDNj1_neg)));
+        // ordinalDay = JDN - JDN_j1 + 1; split to avoid "A - B + C" Oxigraph bug
+        if prop == "ordinalDay" {
+            let v_diff_j1 = bind!("dj1", sub(vr(&v_JDN), vr(&v_JDN_j1)));
+            return Some(int_cast(add(vr(&v_diff_j1), ddm("1"))));
+        }
+
+        // ISO week computation requires JDN of nearest Thursday
+        let v_thu_jdn = bind!("thujdn", sub(add(vr(&v_JDN), ddm("3")), vr(&v_mod7)));
+
+        // Compute thu_year via JDN inverse (Gregorian proleptic calendar cycle formula)
+        let v_inv_a = bind!("inva", add(vr(&v_thu_jdn), ddm("32044")));
+        let v_4a = bind!("4a", mul(ddm("4"), vr(&v_inv_a)));
+        let v_4a3 = bind!("4a3", add(vr(&v_4a), ddm("3")));
+        let v_inv_b = bind!("invb", floor_f(div(vr(&v_4a3), ddm("146097"))));
+        let v_146097b = bind!("146b", mul(ddm("146097"), vr(&v_inv_b)));
+        let v_146097b4 = bind!("146b4", floor_f(div(vr(&v_146097b), ddm("4"))));
+        let v_inv_c = bind!("invc", sub(vr(&v_inv_a), vr(&v_146097b4)));
+        let v_4c = bind!("4c", mul(ddm("4"), vr(&v_inv_c)));
+        let v_4c3 = bind!("4c3", add(vr(&v_4c), ddm("3")));
+        let v_inv_d = bind!("invd", floor_f(div(vr(&v_4c3), ddm("1461"))));
+        let v_1461d = bind!("1461d", mul(ddm("1461"), vr(&v_inv_d)));
+        let v_1461d4 = bind!("1461d4", floor_f(div(vr(&v_1461d), ddm("4"))));
+        let v_inv_e = bind!("inve", sub(vr(&v_inv_c), vr(&v_1461d4)));
+        let v_5e = bind!("5e", mul(ddm("5"), vr(&v_inv_e)));
+        let v_5e2 = bind!("5e2", add(vr(&v_5e), ddm("2")));
+        let v_inv_m = bind!("invm", floor_f(div(vr(&v_5e2), ddm("153"))));
+        let v_m10 = bind!("m10", floor_f(div(vr(&v_inv_m), ddm("10"))));
+        let v_100b = bind!("100b", mul(ddm("100"), vr(&v_inv_b)));
+        // thu_year = 100*b + d + floor(m/10) - 4800
+        // Fix Oxigraph bug: "100b + invd - 4800 + m10" → right-assoc gives wrong answer.
+        // Restructure: sum positives first, then single subtract.
+        let v_tyr_pos = bind!("tyrp", add(add(vr(&v_100b), vr(&v_inv_d)), vr(&v_m10)));
+        let v_thu_year = bind!("tyr", sub(vr(&v_tyr_pos), ddm("4800")));
+
+        if prop == "weekYear" {
+            return Some(int_cast(vr(&v_thu_year)));
+        }
+
+        // JDN of Jan 4 of thu_year (for ISO week 1 Monday)
+        let v_ty4799 = bind!("ty4799", add(dec_cast(vr(&v_thu_year)), ddm("4799")));
+        let v_365ty = bind!("365ty", mul(ddm("365"), vr(&v_ty4799)));
+        let v_ty4 = bind!("ty4", floor_f(div(vr(&v_ty4799), ddm("4"))));
+        let v_ty100 = bind!("ty100", floor_f(div(vr(&v_ty4799), ddm("100"))));
+        let v_ty400 = bind!("ty400", floor_f(div(vr(&v_ty4799), ddm("400"))));
+        // JDN(thu_year, 1, 4): D=4, m=10 so 4+306=310. Oxigraph bug fix: pos/neg split.
+        let v_JDNtj4_pos = bind!(
+            "JDNtj4p",
+            add(add(add(ddm("310"), vr(&v_365ty)), vr(&v_ty4)), vr(&v_ty400))
+        );
+        let v_JDNtj4_neg = bind!("JDNtj4n", add(vr(&v_ty100), ddm("32045")));
+        let v_JDN_tj4 = bind!("JDNtj4", sub(vr(&v_JDNtj4_pos), vr(&v_JDNtj4_neg)));
+        let v_tj4_7 = bind!("tj47", floor_f(div(vr(&v_JDN_tj4), ddm("7"))));
+        let v_j4mod7 = bind!("j4m7", sub(vr(&v_JDN_tj4), mul(ddm("7"), vr(&v_tj4_7))));
+        let v_w1_mon = bind!("w1mon", sub(vr(&v_JDN_tj4), vr(&v_j4mod7)));
+        let v_thu_w1 = bind!("thuw1", sub(vr(&v_thu_jdn), vr(&v_w1_mon)));
+        let v_wraw = bind!("wraw", floor_f(div(vr(&v_thu_w1), ddm("7"))));
+        // week = floor(...) + 1; int_cast wraps ✓
+        if prop == "week" {
+            return Some(int_cast(add(vr(&v_wraw), ddm("1"))));
+        }
+
+        // Day of quarter
+        if prop == "dayOfQuarter" {
+            // quarter start month: FLOOR((Md - 1) / 3) * 3 + 1
+            let v_m1 = bind!("m1", sub(vr(&v_Md), ddm("1")));
+            let v_qm3 = bind!("qm3", floor_f(div(vr(&v_m1), ddm("3"))));
+            let v_qsm = bind!("qsm", add(mul(ddm("3"), vr(&v_qm3)), ddm("1")));
+            // JDN of quarter start: use same formula with D=1, M=q_start_m
+            let v_14qs = bind!("14qs", sub(ddm("14"), vr(&v_qsm)));
+            let v_qs_a = bind!("qsa", floor_f(div(vr(&v_14qs), ddm("12"))));
+            let v_qs_y = bind!("qsy", sub(add(vr(&v_Yd), ddm("4800")), vr(&v_qs_a)));
+            let v_12qsa = bind!("12qsa", mul(ddm("12"), vr(&v_qs_a)));
+            let v_qs_m = bind!("qsm2", sub(add(vr(&v_qsm), vr(&v_12qsa)), ddm("3")));
+            let v_153qm = bind!("153qm", mul(ddm("153"), vr(&v_qs_m)));
+            let v_153qm2 = bind!("153qm2", add(vr(&v_153qm), ddm("2")));
+            let v_f153q = bind!("f153q", floor_f(div(vr(&v_153qm2), ddm("5"))));
+            let v_365qy = bind!("365qy", mul(ddm("365"), vr(&v_qs_y)));
+            let v_qy4 = bind!("qy4", floor_f(div(vr(&v_qs_y), ddm("4"))));
+            let v_qy100 = bind!("qy100", floor_f(div(vr(&v_qs_y), ddm("100"))));
+            let v_qy400 = bind!("qy400", floor_f(div(vr(&v_qs_y), ddm("400"))));
+            // JDN of quarter start (D=1): Oxigraph bug fix: pos/neg split.
+            let v_JDNqs_pos = bind!(
+                "JDNqsp",
+                add(
+                    add(add(add(ddm("1"), vr(&v_f153q)), vr(&v_365qy)), vr(&v_qy4)),
+                    vr(&v_qy400)
+                )
+            );
+            let v_JDNqs_neg = bind!("JDNqsn", add(vr(&v_qy100), ddm("32045")));
+            let v_JDN_qs = bind!("JDNqs", sub(vr(&v_JDNqs_pos), vr(&v_JDNqs_neg)));
+            // dayOfQuarter = JDN - JDNqs + 1; split to avoid "A - B + C" Oxigraph bug
+            let v_diff_qs = bind!("dqs", sub(vr(&v_JDN), vr(&v_JDN_qs)));
+            return Some(int_cast(add(vr(&v_diff_qs), ddm("1"))));
+        }
+
+        // epochSeconds / epochMillis
+        if prop == "epochSeconds" || prop == "epochMillis" {
+            // Epoch JDN = 2440588 (JDN of 1970-01-01)
+            let v_JDN_ep = bind!("JDNep", sub(vr(&v_JDN), ddm("2440588")));
+            let v_sd86400 = bind!("sd86400", mul(vr(&v_JDN_ep), ddm("86400")));
+            // Time seconds (from the SPARQL time components — all are function calls, safe)
+            let v_t_h = bind!("tph", dec_cast(int_cast(substr2(time_str.clone(), 1, 2))));
+            let v_t_m = bind!("tpm", dec_cast(int_cast(substr2(time_str.clone(), 4, 2))));
+            let v_t_s = bind!("tps", dec_cast(int_cast(substr2(time_str.clone(), 7, 2))));
+            // h*3600 + m*60 + s
+            let v_tsecs = bind!(
+                "tsecs",
+                add(
+                    add(mul(vr(&v_t_h), ddm("3600")), mul(vr(&v_t_m), ddm("60"))),
+                    vr(&v_t_s)
+                )
+            );
+            let v_tz_s = bind!("tzs", dec_cast(tz_seconds.clone()));
+            // epoch_s = days_from_date * 86400 + time_secs - tz_offset_secs
+            let v_ep_s = bind!("eps", sub(add(vr(&v_sd86400), vr(&v_tsecs)), vr(&v_tz_s)));
+            if prop == "epochSeconds" {
+                return Some(int_cast(vr(&v_ep_s)));
+            }
+            // epochMillis = epoch_s * 1000 + ms
+            let v_ms = bind!("tpms", dec_cast(int_cast(substr2(frac9.clone(), 1, 3))));
+            // ep_s * 1000 + ms: Mul(Var, Lit) + FC → safe ✓
+            return Some(int_cast(add(mul(vr(&v_ep_s), ddm("1000")), vr(&v_ms))));
+        }
+
+        None
+    }
 }
 
 // ── Peephole optimizations ────────────────────────────────────────────────────
@@ -11416,7 +12064,8 @@ fn tc_tz_suffix_month(tz: &str, month: i64) -> String {
     if tz == "Z" || tz.starts_with('+') || tz.starts_with('-') {
         // Strip trailing ":00" seconds from timezone offset when seconds are zero:
         // "+02:05:00" → "+02:05", "+02:05:59" → "+02:05:59"
-        if tz != "Z" && tz.len() == 9 && tz.as_bytes().get(6) == Some(&b':') && tz.ends_with(":00") {
+        if tz != "Z" && tz.len() == 9 && tz.as_bytes().get(6) == Some(&b':') && tz.ends_with(":00")
+        {
             return tz[..6].to_string();
         }
         return tz.to_string();
@@ -12083,9 +12732,7 @@ fn extract_base_time_with_tz(v: &Expression) -> Option<(String, bool)> {
                 ("time", Expression::Literal(Literal::String(s))) => {
                     temporal_parse_time(s).map(|t| (t, true))
                 }
-                ("time", Expression::Map(p)) => {
-                    temporal_time_from_map(p).map(|t| (t, true))
-                }
+                ("time", Expression::Map(p)) => temporal_time_from_map(p).map(|t| (t, true)),
                 ("localtime", Expression::Literal(Literal::String(s))) => {
                     temporal_parse_localtime(s).map(|t| (t, false))
                 }
@@ -12120,7 +12767,10 @@ fn extract_base_time_with_tz(v: &Expression) -> Option<(String, bool)> {
             let has_tz = s.ends_with('Z')
                 || s.contains('+')
                 || s.rfind('-').map_or(false, |p| {
-                    p > 8 && s.as_bytes().get(p + 1).map_or(false, |b| b.is_ascii_digit())
+                    p > 8
+                        && s.as_bytes()
+                            .get(p + 1)
+                            .map_or(false, |b| b.is_ascii_digit())
                 });
             if has_tz {
                 temporal_parse_time(s).map(|t| (t, true))
@@ -12301,7 +12951,10 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
                         || s.contains('+')
                         || s.rfind('-').map_or(false, |p| {
                             // '-' after position 8 is likely TZ sign, not date separator
-                            p > 8 && s.as_bytes().get(p + 1).map_or(false, |b| b.is_ascii_digit())
+                            p > 8
+                                && s.as_bytes()
+                                    .get(p + 1)
+                                    .map_or(false, |b| b.is_ascii_digit())
                         });
                     if has_tz {
                         temporal_parse_time(s).map(|t| (t, true))
@@ -12360,42 +13013,43 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
 
         // Compute wall-clock time: if TZ changed AND base has a known TZ, convert UTC then apply new TZ.
         // If base is a local time (no TZ), just attach the new TZ without conversion.
-        let (h, min, sec, ns) = if new_tz_s != base_tz_s && override_tz.is_some() && !tz_raw_base.is_empty() {
-            // Convert wall clock to UTC then to new TZ.
-            let base_wall_s = bh * 3600 + bmin * 60 + bsec;
-            let utc_s = base_wall_s - base_tz_s;
-            let new_wall_s = utc_s + new_tz_s;
-            let new_h = ((new_wall_s / 3600) % 24 + 24) % 24;
-            let new_min = (new_wall_s % 3600) / 60;
-            let new_sec_v = new_wall_s % 60;
-            (
-                override_h.unwrap_or(new_h),
-                override_min.unwrap_or(new_min.abs()),
-                override_sec.unwrap_or(new_sec_v.abs()),
-                if has_override_subsec {
-                    let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
-                    let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
-                    let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
-                    ms * 1_000_000 + us * 1_000 + ns_v
-                } else {
-                    bns
-                },
-            )
-        } else {
-            (
-                override_h.unwrap_or(bh),
-                override_min.unwrap_or(bmin),
-                override_sec.unwrap_or(bsec),
-                if has_override_subsec {
-                    let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
-                    let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
-                    let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
-                    ms * 1_000_000 + us * 1_000 + ns_v
-                } else {
-                    bns
-                },
-            )
-        };
+        let (h, min, sec, ns) =
+            if new_tz_s != base_tz_s && override_tz.is_some() && !tz_raw_base.is_empty() {
+                // Convert wall clock to UTC then to new TZ.
+                let base_wall_s = bh * 3600 + bmin * 60 + bsec;
+                let utc_s = base_wall_s - base_tz_s;
+                let new_wall_s = utc_s + new_tz_s;
+                let new_h = ((new_wall_s / 3600) % 24 + 24) % 24;
+                let new_min = (new_wall_s % 3600) / 60;
+                let new_sec_v = new_wall_s % 60;
+                (
+                    override_h.unwrap_or(new_h),
+                    override_min.unwrap_or(new_min.abs()),
+                    override_sec.unwrap_or(new_sec_v.abs()),
+                    if has_override_subsec {
+                        let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+                        let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+                        let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+                        ms * 1_000_000 + us * 1_000 + ns_v
+                    } else {
+                        bns
+                    },
+                )
+            } else {
+                (
+                    override_h.unwrap_or(bh),
+                    override_min.unwrap_or(bmin),
+                    override_sec.unwrap_or(bsec),
+                    if has_override_subsec {
+                        let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+                        let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+                        let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+                        ms * 1_000_000 + us * 1_000 + ns_v
+                    } else {
+                        bns
+                    },
+                )
+            };
 
         let time_s = localtime_parts_to_str(h, min, sec, ns);
         return Some(format!("{time_s}{tz_str}"));
@@ -12419,7 +13073,11 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
 fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     // Check for a `datetime` key providing both date+time from an existing datetime/localdatetime.
     if let Some(dt_expr) = pairs.iter().find_map(|(k, v)| {
-        if k.eq_ignore_ascii_case("datetime") { Some(v) } else { None }
+        if k.eq_ignore_ascii_case("datetime") {
+            Some(v)
+        } else {
+            None
+        }
     }) {
         if let Expression::Literal(Literal::String(dt_str)) = dt_expr {
             let t_pos = dt_str.find('T')?;
@@ -12431,7 +13089,9 @@ fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<Str
             let date_parsed = temporal_parse_date(date_str)?;
             let dp: Vec<&str> = date_parsed.splitn(3, '-').collect();
             let (by, bm, bd): (i64, i64, i64) = (
-                dp[0].parse().ok()?, dp[1].parse().ok()?, dp[2].parse().ok()?,
+                dp[0].parse().ok()?,
+                dp[1].parse().ok()?,
+                dp[2].parse().ok()?,
             );
             let (bh, bmin, bsec, bns) = parse_localtime_to_parts(time_body).unwrap_or((0, 0, 0, 0));
             // Apply individual overrides
@@ -12559,7 +13219,11 @@ fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<Str
 fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     // Check for a `datetime` key providing both date+time from an existing datetime/localdatetime.
     if let Some(dt_expr) = pairs.iter().find_map(|(k, v)| {
-        if k.eq_ignore_ascii_case("datetime") { Some(v) } else { None }
+        if k.eq_ignore_ascii_case("datetime") {
+            Some(v)
+        } else {
+            None
+        }
     }) {
         if let Expression::Literal(Literal::String(dt_str)) = dt_expr {
             let t_pos = dt_str.find('T')?;
@@ -12573,58 +13237,72 @@ fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> 
             let date_parsed = temporal_parse_date(date_str)?;
             let dp: Vec<&str> = date_parsed.splitn(3, '-').collect();
             let (by, bm, bd): (i64, i64, i64) = (
-                dp[0].parse().ok()?, dp[1].parse().ok()?, dp[2].parse().ok()?,
+                dp[0].parse().ok()?,
+                dp[1].parse().ok()?,
+                dp[2].parse().ok()?,
             );
             let (bh, bmin, bsec, bns) = parse_localtime_to_parts(time_body).unwrap_or((0, 0, 0, 0));
             // Apply date overrides
             let year = temporal_get_i(pairs, "year").unwrap_or(by);
             let month = temporal_get_i(pairs, "month").unwrap_or(bm);
             let day = temporal_get_i(pairs, "day").unwrap_or(bd);
-            let override_tz_str = temporal_get_s(pairs, "timezone")
-                .map(|s| tc_tz_suffix_month(&s, month));
-            let new_tz_s = override_tz_str.as_deref().and_then(parse_tz_offset_s).unwrap_or(base_tz_s);
+            let override_tz_str =
+                temporal_get_s(pairs, "timezone").map(|s| tc_tz_suffix_month(&s, month));
+            let new_tz_s = override_tz_str
+                .as_deref()
+                .and_then(parse_tz_offset_s)
+                .unwrap_or(base_tz_s);
             let tz = override_tz_str.clone().unwrap_or_else(|| {
                 let n = normalize_tz(base_tz_raw);
-                if n.is_empty() { "Z".to_owned() } else { n }
+                if n.is_empty() {
+                    "Z".to_owned()
+                } else {
+                    n
+                }
             });
             // UTC conversion when TZ changes
-            let (h, min, sec, ns) = if orig_had_tz && override_tz_str.is_some() && new_tz_s != base_tz_s {
-                let base_wall_s = bh * 3600 + bmin * 60 + bsec;
-                let utc_s = base_wall_s - base_tz_s;
-                let new_wall_s = utc_s + new_tz_s;
-                let new_h = ((new_wall_s / 3600) % 24 + 24) % 24;
-                let new_min = ((new_wall_s % 3600) / 60 + 60) % 60;
-                let new_sec = (new_wall_s % 60 + 60) % 60;
-                (
-                    temporal_get_i(pairs, "hour").unwrap_or(new_h),
-                    temporal_get_i(pairs, "minute").unwrap_or(new_min),
-                    temporal_get_i(pairs, "second").unwrap_or(new_sec),
-                    if temporal_get_i(pairs, "millisecond").is_some()
-                        || temporal_get_i(pairs, "microsecond").is_some()
-                        || temporal_get_i(pairs, "nanosecond").is_some()
-                    {
-                        let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
-                        let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
-                        let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
-                        ms * 1_000_000 + us * 1_000 + ns_v
-                    } else { bns },
-                )
-            } else {
-                (
-                    temporal_get_i(pairs, "hour").unwrap_or(bh),
-                    temporal_get_i(pairs, "minute").unwrap_or(bmin),
-                    temporal_get_i(pairs, "second").unwrap_or(bsec),
-                    if temporal_get_i(pairs, "millisecond").is_some()
-                        || temporal_get_i(pairs, "microsecond").is_some()
-                        || temporal_get_i(pairs, "nanosecond").is_some()
-                    {
-                        let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
-                        let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
-                        let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
-                        ms * 1_000_000 + us * 1_000 + ns_v
-                    } else { bns },
-                )
-            };
+            let (h, min, sec, ns) =
+                if orig_had_tz && override_tz_str.is_some() && new_tz_s != base_tz_s {
+                    let base_wall_s = bh * 3600 + bmin * 60 + bsec;
+                    let utc_s = base_wall_s - base_tz_s;
+                    let new_wall_s = utc_s + new_tz_s;
+                    let new_h = ((new_wall_s / 3600) % 24 + 24) % 24;
+                    let new_min = ((new_wall_s % 3600) / 60 + 60) % 60;
+                    let new_sec = (new_wall_s % 60 + 60) % 60;
+                    (
+                        temporal_get_i(pairs, "hour").unwrap_or(new_h),
+                        temporal_get_i(pairs, "minute").unwrap_or(new_min),
+                        temporal_get_i(pairs, "second").unwrap_or(new_sec),
+                        if temporal_get_i(pairs, "millisecond").is_some()
+                            || temporal_get_i(pairs, "microsecond").is_some()
+                            || temporal_get_i(pairs, "nanosecond").is_some()
+                        {
+                            let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+                            let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+                            let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+                            ms * 1_000_000 + us * 1_000 + ns_v
+                        } else {
+                            bns
+                        },
+                    )
+                } else {
+                    (
+                        temporal_get_i(pairs, "hour").unwrap_or(bh),
+                        temporal_get_i(pairs, "minute").unwrap_or(bmin),
+                        temporal_get_i(pairs, "second").unwrap_or(bsec),
+                        if temporal_get_i(pairs, "millisecond").is_some()
+                            || temporal_get_i(pairs, "microsecond").is_some()
+                            || temporal_get_i(pairs, "nanosecond").is_some()
+                        {
+                            let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+                            let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+                            let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+                            ms * 1_000_000 + us * 1_000 + ns_v
+                        } else {
+                            bns
+                        },
+                    )
+                };
             let date_out = format!("{year:04}-{month:02}-{day:02}");
             let time_out = localtime_parts_to_str(h, min, sec, ns);
             return Some(format!("{date_out}T{time_out}{tz}"));
@@ -12640,19 +13318,20 @@ fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> 
         }
     });
     // Check for a `time` key as base for time components, preserving its timezone.
-    let base_time_data: Option<(i64, i64, i64, i64, String, bool)> = pairs.iter().find_map(|(k, v)| {
-        if !k.eq_ignore_ascii_case("time") {
-            return None;
-        }
-        let (time_str, orig_had_tz) = extract_base_time_with_tz(v)?;
-        let (body, tz_raw) = if orig_had_tz {
-            split_tz_owned(&time_str)
-        } else {
-            (time_str.clone(), String::new())
-        };
-        let parts = parse_localtime_to_parts(&body)?;
-        Some((parts.0, parts.1, parts.2, parts.3, tz_raw, orig_had_tz))
-    });
+    let base_time_data: Option<(i64, i64, i64, i64, String, bool)> =
+        pairs.iter().find_map(|(k, v)| {
+            if !k.eq_ignore_ascii_case("time") {
+                return None;
+            }
+            let (time_str, orig_had_tz) = extract_base_time_with_tz(v)?;
+            let (body, tz_raw) = if orig_had_tz {
+                split_tz_owned(&time_str)
+            } else {
+                (time_str.clone(), String::new())
+            };
+            let parts = parse_localtime_to_parts(&body)?;
+            Some((parts.0, parts.1, parts.2, parts.3, tz_raw, orig_had_tz))
+        });
     // Extract date_part and month (for DST timezone computation).
     let (month, date_part) = if let Some((by, bm, bd)) = base_ymd {
         let (base_iso_year, base_week, base_dow) = date_to_iso_week(by, bm, bd);
@@ -12704,8 +13383,7 @@ fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> 
             (1, format!("{year:04}-01-01"))
         }
     };
-    let override_tz_str = temporal_get_s(pairs, "timezone")
-        .map(|s| tc_tz_suffix_month(&s, month));
+    let override_tz_str = temporal_get_s(pairs, "timezone").map(|s| tc_tz_suffix_month(&s, month));
     if let Some((bh, bmin, bsec, bns, ref base_tz_raw, orig_had_tz)) = base_time_data {
         let override_h = temporal_get_i(pairs, "hour");
         let override_min = temporal_get_i(pairs, "minute");
@@ -12731,42 +13409,42 @@ fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> 
             }
         });
         // Apply UTC conversion if: base had TZ, override differs, override is provided.
-        let (h, min, sec, ns) =
-            if orig_had_tz && override_tz_str.is_some() && new_tz_s != base_tz_s {
-                let base_wall_s = bh * 3600 + bmin * 60 + bsec;
-                let utc_s = base_wall_s - base_tz_s;
-                let new_wall_s = utc_s + new_tz_s;
-                let new_h = ((new_wall_s / 3600) % 24 + 24) % 24;
-                let new_min = (new_wall_s % 3600) / 60;
-                let new_sec_v = new_wall_s % 60;
-                (
-                    override_h.unwrap_or(new_h),
-                    override_min.unwrap_or(new_min.abs()),
-                    override_sec.unwrap_or(new_sec_v.abs()),
-                    if has_override_subsec {
-                        let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
-                        let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
-                        let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
-                        ms * 1_000_000 + us * 1_000 + ns_v
-                    } else {
-                        bns
-                    },
-                )
-            } else {
-                (
-                    override_h.unwrap_or(bh),
-                    override_min.unwrap_or(bmin),
-                    override_sec.unwrap_or(bsec),
-                    if has_override_subsec {
-                        let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
-                        let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
-                        let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
-                        ms * 1_000_000 + us * 1_000 + ns_v
-                    } else {
-                        bns
-                    },
-                )
-            };
+        let (h, min, sec, ns) = if orig_had_tz && override_tz_str.is_some() && new_tz_s != base_tz_s
+        {
+            let base_wall_s = bh * 3600 + bmin * 60 + bsec;
+            let utc_s = base_wall_s - base_tz_s;
+            let new_wall_s = utc_s + new_tz_s;
+            let new_h = ((new_wall_s / 3600) % 24 + 24) % 24;
+            let new_min = (new_wall_s % 3600) / 60;
+            let new_sec_v = new_wall_s % 60;
+            (
+                override_h.unwrap_or(new_h),
+                override_min.unwrap_or(new_min.abs()),
+                override_sec.unwrap_or(new_sec_v.abs()),
+                if has_override_subsec {
+                    let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+                    let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+                    let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+                    ms * 1_000_000 + us * 1_000 + ns_v
+                } else {
+                    bns
+                },
+            )
+        } else {
+            (
+                override_h.unwrap_or(bh),
+                override_min.unwrap_or(bmin),
+                override_sec.unwrap_or(bsec),
+                if has_override_subsec {
+                    let ms = temporal_get_i(pairs, "millisecond").unwrap_or(0);
+                    let us = temporal_get_i(pairs, "microsecond").unwrap_or(0);
+                    let ns_v = temporal_get_i(pairs, "nanosecond").unwrap_or(0);
+                    ms * 1_000_000 + us * 1_000 + ns_v
+                } else {
+                    bns
+                },
+            )
+        };
         let time_part = localtime_parts_to_str(h, min, sec, ns);
         return Some(format!("{date_part}T{time_part}{tz}"));
     }
@@ -12785,14 +13463,21 @@ fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> 
 
 /// Parsed components of an ISO 8601 duration like `P12Y5M14DT16H13M10.5S`.
 struct ParsedDuration {
-    years: i64, months: i64, days: i64,
-    hours: i64, minutes: i64, seconds: i64, subsec_ns: i64,
+    years: i64,
+    months: i64,
+    days: i64,
+    hours: i64,
+    minutes: i64,
+    seconds: i64,
+    subsec_ns: i64,
 }
 
 /// Parse an ISO 8601 duration string into its numeric components.
 /// Returns None if the string is not a valid duration.
 fn parse_duration_components(s: &str) -> Option<ParsedDuration> {
-    if !s.starts_with('P') { return None; }
+    if !s.starts_with('P') {
+        return None;
+    }
     let body = &s[1..];
     let t_pos = body.find('T');
     let date_str = t_pos.map_or(body, |p| &body[..p]);
@@ -12824,7 +13509,7 @@ fn parse_duration_components(s: &str) -> Option<ParsedDuration> {
 
     let years = dv[0].trunc() as i64;
     let months = dv[1].trunc() as i64;
-    let days = dv[3].trunc() as i64;  // Weeks already cascaded to days in our construction
+    let days = dv[3].trunc() as i64; // Weeks already cascaded to days in our construction
     let hours = tv[0].trunc() as i64;
     let minutes = tv[1].trunc() as i64;
     let secs_total_f = tv[2];
@@ -12834,7 +13519,998 @@ fn parse_duration_components(s: &str) -> Option<ParsedDuration> {
     let seconds = sec_whole as i64;
     let subsec_ns = ((secs_total_f - sec_whole) * 1_000_000_000.0).round() as i64;
 
-    Some(ParsedDuration { years, months, days, hours, minutes, seconds, subsec_ns })
+    Some(ParsedDuration {
+        years,
+        months,
+        days,
+        hours,
+        minutes,
+        seconds,
+        subsec_ns,
+    })
+}
+
+/// Generate a SPARQL algebra expression to extract a temporal component from a SPARQL variable
+/// that holds a temporal literal string (date, localtime, time, localdatetime, datetime, or duration).
+///
+/// Returns None if `prop` is not a recognized temporal accessor.
+///
+/// The generated expressions are format-agnostic using SUBSTR, STRAFTER, STRBEFORE, FLOOR, CEIL,
+/// and xsd:integer casts. They naturally return null/error for wrong-format values.
+fn temporal_prop_expr(var_e: SparExpr, prop: &str) -> Option<SparExpr> {
+    use spargebra::algebra::Function;
+    let xsi_nn = NamedNode::new_unchecked(XSD_INTEGER);
+    let xsd_dec_nn = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#decimal");
+
+    // ── Building blocks ───────────────────────────────────────────────────────
+    let str_e = SparExpr::FunctionCall(Function::Str, vec![var_e.clone()]);
+    let int_lit =
+        |n: i64| SparExpr::Literal(SparLit::new_typed_literal(n.to_string(), xsi_nn.clone()));
+    let int_cast = |e: SparExpr| SparExpr::FunctionCall(Function::Custom(xsi_nn.clone()), vec![e]);
+    let dec_cast =
+        |e: SparExpr| SparExpr::FunctionCall(Function::Custom(xsd_dec_nn.clone()), vec![e]);
+    let slit = |s: &str| SparExpr::Literal(SparLit::new_simple_literal(s.to_owned()));
+    let substr2 = |s: SparExpr, start: i64, len: i64| {
+        SparExpr::FunctionCall(Function::SubStr, vec![s, int_lit(start), int_lit(len)])
+    };
+    let substr1 =
+        |s: SparExpr, start: i64| SparExpr::FunctionCall(Function::SubStr, vec![s, int_lit(start)]);
+    let floor_fn = |e: SparExpr| SparExpr::FunctionCall(Function::Floor, vec![e]);
+    let ceil_fn = |e: SparExpr| SparExpr::FunctionCall(Function::Ceil, vec![e]);
+    let strafter_fn =
+        |s: SparExpr, delim: &str| SparExpr::FunctionCall(Function::StrAfter, vec![s, slit(delim)]);
+    let strbefore_fn = |s: SparExpr, delim: &str| {
+        SparExpr::FunctionCall(Function::StrBefore, vec![s, slit(delim)])
+    };
+    let concat_fn = |a: SparExpr, b: SparExpr| SparExpr::FunctionCall(Function::Concat, vec![a, b]);
+    let contains_fn =
+        |s: SparExpr, sub: &str| SparExpr::FunctionCall(Function::Contains, vec![s, slit(sub)]);
+    let if_fn =
+        |c: SparExpr, t: SparExpr, e: SparExpr| SparExpr::If(Box::new(c), Box::new(t), Box::new(e));
+    let abs_fn = |e: SparExpr| SparExpr::FunctionCall(Function::Abs, vec![e]);
+    let strlen_fn = |e: SparExpr| SparExpr::FunctionCall(Function::StrLen, vec![e]);
+
+    // ── Time extraction helpers (string like "HH:MM:SS.frac±TZ") ─────────────
+    // For a time/localtime string, extract the time-only portion (strip date prefix if any).
+    // If str contains 'T': time_str = STRAFTER(str, "T"), else time_str = str.
+    let time_str = if_fn(
+        contains_fn(str_e.clone(), "T"),
+        strafter_fn(str_e.clone(), "T"),
+        str_e.clone(),
+    );
+
+    // hour/minute/second from "HH:MM:SS..." at positions 1,4,7 of time_str.
+    let t_hour = int_cast(substr2(time_str.clone(), 1, 2));
+    let t_minute = int_cast(substr2(time_str.clone(), 4, 2));
+    let t_second_int = int_cast(substr2(time_str.clone(), 7, 2));
+
+    // Fraction extraction: frac_raw = STRAFTER(time_str, ".") or "" if no '.'.
+    // Strip TZ from frac_raw: take STRBEFORE(frac_raw, "+"), or "Z", or "-" suffix.
+    let frac_raw = strafter_fn(time_str.clone(), ".");
+    let frac_strip_p = if_fn(
+        contains_fn(frac_raw.clone(), "+"),
+        strbefore_fn(frac_raw.clone(), "+"),
+        frac_raw.clone(),
+    );
+    let frac_strip_z = if_fn(
+        contains_fn(frac_strip_p.clone(), "Z"),
+        strbefore_fn(frac_strip_p.clone(), "Z"),
+        frac_strip_p.clone(),
+    );
+    let frac_clean = if_fn(
+        contains_fn(frac_strip_z.clone(), "-"),
+        strbefore_fn(frac_strip_z.clone(), "-"),
+        frac_strip_z.clone(),
+    );
+
+    // Pad frac to 9 digits: SUBSTR(CONCAT(frac_clean, "000000000"), 1, 9)
+    let frac9 = substr2(concat_fn(frac_clean.clone(), slit("000000000")), 1, 9);
+
+    // millisecond = INT(SUBSTR(frac9, 1, 3)), microsecond = INT(SUBSTR(frac9, 1, 6))
+    let t_ms = int_cast(substr2(frac9.clone(), 1, 3));
+    let t_us = int_cast(substr2(frac9.clone(), 1, 6));
+    let t_ns = int_cast(frac9.clone());
+
+    // ── TZ extraction from time/datetime string ────────────────────────────────
+    // tz_raw = IF(CONTAINS(str, "+"), STRAFTER(str, "+"), IF(str ends with "Z", "+00:00", ""))
+    // For bracket TZ: "12:00+01:00[Europe/Stockholm]" → tz_offset = "+01:00"
+    // We use: tz_part = everything from the last +/- before the end (before any bracket).
+    // Simpler: STRAFTER(time_str, "+") for positive TZ, IF contains "-" after pos 5:
+    // Actually: Use STRAFTER(str, "+") for "+HH:MM" or handle negatives via STRBEFORE logic.
+    // For simplicity:
+    //   tz_offset_str = IF(CONTAINS(str,"Z"),"Z", IF(CONTAINS(str,"+"), "+"+STRAFTER(str,"+"), IF(strlen(STR)>5 and "-" after pos5, probably "-"+STRAFTER(time_str,"-"), ""))
+    // This is complex. Let's do it step by step for the specific case +HH:MM and -HH:MM.
+    let has_pos_tz = contains_fn(str_e.clone(), "+");
+    let pos_tz_val = concat_fn(slit("+"), strafter_fn(str_e.clone(), "+"));
+    // Strip bracket from positive TZ: STRBEFORE("+01:00[...", "[") → "+01:00"
+    let pos_tz_clean = if_fn(
+        contains_fn(pos_tz_val.clone(), "["),
+        strbefore_fn(pos_tz_val.clone(), "["),
+        pos_tz_val.clone(),
+    );
+    let has_z = contains_fn(str_e.clone(), "Z");
+    let tz_offset_str = if_fn(
+        has_z.clone(),
+        slit("Z"),
+        if_fn(has_pos_tz.clone(), pos_tz_clean.clone(), slit("")),
+    );
+    // For named TZ: "[Region/City]" part
+    let named_tz_raw = if_fn(
+        contains_fn(str_e.clone(), "["),
+        strafter_fn(str_e.clone(), "["),
+        slit(""),
+    );
+    let named_tz = concat_fn(slit("["), named_tz_raw.clone()); // "[Europe/Stockholm]"
+                                                               // Full timezone string: "+01:00[Europe/Stockholm]" or "+00:00" or "Z"
+    let tz_full = if_fn(
+        contains_fn(str_e.clone(), "["),
+        concat_fn(tz_offset_str.clone(), named_tz.clone()),
+        tz_offset_str.clone(),
+    );
+
+    // offsetMinutes: parse "+HH:MM" → H*60 + M
+    // tz_offset_str examples: "+01:00", "Z", ""
+    let tz_hh = int_cast(substr2(tz_offset_str.clone(), 2, 2)); // parse HH from "+HH:MM"
+    let tz_mm_str = substr2(tz_offset_str.clone(), 5, 2); // parse MM
+    let tz_mm = int_cast(tz_mm_str.clone());
+    let tz_sign_ch = substr2(tz_offset_str.clone(), 1, 1); // "+" or "-"
+    let tz_is_neg = SparExpr::Equal(Box::new(tz_sign_ch.clone()), Box::new(slit("-")));
+    let tz_abs_minutes = SparExpr::Add(
+        Box::new(SparExpr::Multiply(
+            Box::new(tz_hh.clone()),
+            Box::new(int_lit(60)),
+        )),
+        Box::new(tz_mm.clone()),
+    );
+    let tz_minutes = if_fn(
+        has_z.clone(),
+        int_lit(0),
+        if_fn(
+            tz_is_neg.clone(),
+            SparExpr::UnaryMinus(Box::new(tz_abs_minutes.clone())),
+            tz_abs_minutes.clone(),
+        ),
+    );
+    let tz_seconds = SparExpr::Multiply(Box::new(tz_minutes.clone()), Box::new(int_lit(60)));
+
+    // ── Date extraction helpers (string like "YYYY-MM-DD" or "YYYY-MM-DDT...") ─
+    // Date part is always at positions 1-10 of str_e.
+    let d_year = int_cast(substr2(str_e.clone(), 1, 4));
+    let d_month = int_cast(substr2(str_e.clone(), 6, 2));
+    let d_day = int_cast(substr2(str_e.clone(), 9, 2));
+    let d_quarter = int_cast(ceil_fn(SparExpr::Divide(
+        Box::new(dec_cast(d_month.clone())),
+        Box::new(SparExpr::Literal(SparLit::new_typed_literal(
+            "3".to_owned(),
+            xsd_dec_nn.clone(),
+        ))),
+    )));
+
+    // ── JDN (Julian Day Number) computation ───────────────────────────────────
+    // JDN = D + FLOOR((153*M + 2)/5) + 365*Y + FLOOR(Y/4) - FLOOR(Y/100) + FLOOR(Y/400) - 32045
+    // where: a = FLOOR((14 - M) / 12), y = Y + 4800 - a, m = M + 12*a - 3
+    // Uses decimal arithmetic via SPARQL.
+    let d_year_d = dec_cast(d_year.clone());
+    let d_month_d = dec_cast(d_month.clone());
+    let d_day_d = dec_cast(d_day.clone());
+    let lit14d = SparExpr::Literal(SparLit::new_typed_literal(
+        "14".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit12d = SparExpr::Literal(SparLit::new_typed_literal(
+        "12".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit3d = SparExpr::Literal(SparLit::new_typed_literal(
+        "3".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit5d = SparExpr::Literal(SparLit::new_typed_literal(
+        "5".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit2d = SparExpr::Literal(SparLit::new_typed_literal(
+        "2".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit4800d = SparExpr::Literal(SparLit::new_typed_literal(
+        "4800".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit365d = SparExpr::Literal(SparLit::new_typed_literal(
+        "365".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit4d = SparExpr::Literal(SparLit::new_typed_literal(
+        "4".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit100d = SparExpr::Literal(SparLit::new_typed_literal(
+        "100".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit400d = SparExpr::Literal(SparLit::new_typed_literal(
+        "400".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit32045d = SparExpr::Literal(SparLit::new_typed_literal(
+        "32045".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit153d = SparExpr::Literal(SparLit::new_typed_literal(
+        "153".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit1d = SparExpr::Literal(SparLit::new_typed_literal(
+        "1".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit7d = SparExpr::Literal(SparLit::new_typed_literal(
+        "7".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+
+    // a = FLOOR((14 - M) / 12)
+    let jdn_a = floor_fn(SparExpr::Divide(
+        Box::new(SparExpr::Subtract(
+            Box::new(lit14d.clone()),
+            Box::new(d_month_d.clone()),
+        )),
+        Box::new(lit12d.clone()),
+    ));
+    // y = Y + 4800 - a
+    let jdn_y = SparExpr::Subtract(
+        Box::new(SparExpr::Add(
+            Box::new(d_year_d.clone()),
+            Box::new(lit4800d.clone()),
+        )),
+        Box::new(jdn_a.clone()),
+    );
+    // m = M + 12*a - 3
+    let jdn_m = SparExpr::Subtract(
+        Box::new(SparExpr::Add(
+            Box::new(d_month_d.clone()),
+            Box::new(SparExpr::Multiply(
+                Box::new(lit12d.clone()),
+                Box::new(jdn_a.clone()),
+            )),
+        )),
+        Box::new(lit3d.clone()),
+    );
+    // JDN = D + FLOOR((153*m+2)/5) + 365*y + FLOOR(y/4) - FLOOR(y/100) + FLOOR(y/400) - 32045
+    let jdn_val = SparExpr::Subtract(
+        Box::new(SparExpr::Add(
+            Box::new(SparExpr::Subtract(
+                Box::new(SparExpr::Add(
+                    Box::new(SparExpr::Add(
+                        Box::new(SparExpr::Add(
+                            Box::new(d_day_d.clone()),
+                            Box::new(floor_fn(SparExpr::Divide(
+                                Box::new(SparExpr::Add(
+                                    Box::new(SparExpr::Multiply(
+                                        Box::new(lit153d.clone()),
+                                        Box::new(jdn_m.clone()),
+                                    )),
+                                    Box::new(lit2d.clone()),
+                                )),
+                                Box::new(lit5d.clone()),
+                            ))),
+                        )),
+                        Box::new(SparExpr::Multiply(
+                            Box::new(lit365d.clone()),
+                            Box::new(jdn_y.clone()),
+                        )),
+                    )),
+                    Box::new(floor_fn(SparExpr::Divide(
+                        Box::new(jdn_y.clone()),
+                        Box::new(lit4d.clone()),
+                    ))),
+                )),
+                Box::new(floor_fn(SparExpr::Divide(
+                    Box::new(jdn_y.clone()),
+                    Box::new(lit100d.clone()),
+                ))),
+            )),
+            Box::new(floor_fn(SparExpr::Divide(
+                Box::new(jdn_y.clone()),
+                Box::new(lit400d.clone()),
+            ))),
+        )),
+        Box::new(lit32045d.clone()),
+    );
+
+    // ISO day-of-week from JDN: DoW = (JDN mod 7) + 1 (1=Mon...7=Sun)
+    // JDN mod 7 = JDN - 7*FLOOR(JDN/7)
+    let jdn_mod7 = SparExpr::Subtract(
+        Box::new(jdn_val.clone()),
+        Box::new(SparExpr::Multiply(
+            Box::new(lit7d.clone()),
+            Box::new(floor_fn(SparExpr::Divide(
+                Box::new(jdn_val.clone()),
+                Box::new(lit7d.clone()),
+            ))),
+        )),
+    );
+    let iso_dow = int_cast(SparExpr::Add(
+        Box::new(jdn_mod7.clone()),
+        Box::new(lit1d.clone()),
+    ));
+
+    // Ordinal day = JDN - JDN(Y, 1, 1) + 1
+    // JDN(Y, 1, 1): a₁=FLOOR((14-1)/12)=1, y₁=Y+4800-1=Y+4799, m₁=1+12-3=10
+    // JDN(Y,1,1) = 1 + FLOOR((153*10+2)/5) + 365*(Y+4799) + FLOOR((Y+4799)/4) - FLOOR((Y+4799)/100) + FLOOR((Y+4799)/400) - 32045
+    //            = 1 + FLOOR(1532/5) + 365*(Y+4799) + ...
+    // = 1 + 306 + 365*(Y+4799) + FLOOR((Y+4799)/4) - FLOOR((Y+4799)/100) + FLOOR((Y+4799)/400) - 32045
+    let lit4799d = SparExpr::Literal(SparLit::new_typed_literal(
+        "4799".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit306d = SparExpr::Literal(SparLit::new_typed_literal(
+        "306".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let y_jan1 = SparExpr::Add(Box::new(d_year_d.clone()), Box::new(lit4799d.clone()));
+    let jdn_jan1 = SparExpr::Subtract(
+        Box::new(SparExpr::Add(
+            Box::new(SparExpr::Subtract(
+                Box::new(SparExpr::Add(
+                    Box::new(SparExpr::Add(
+                        Box::new(SparExpr::Add(
+                            Box::new(lit1d.clone()),
+                            Box::new(lit306d.clone()),
+                        )),
+                        Box::new(SparExpr::Multiply(
+                            Box::new(lit365d.clone()),
+                            Box::new(y_jan1.clone()),
+                        )),
+                    )),
+                    Box::new(floor_fn(SparExpr::Divide(
+                        Box::new(y_jan1.clone()),
+                        Box::new(lit4d.clone()),
+                    ))),
+                )),
+                Box::new(floor_fn(SparExpr::Divide(
+                    Box::new(y_jan1.clone()),
+                    Box::new(lit100d.clone()),
+                ))),
+            )),
+            Box::new(floor_fn(SparExpr::Divide(
+                Box::new(y_jan1.clone()),
+                Box::new(lit400d.clone()),
+            ))),
+        )),
+        Box::new(lit32045d.clone()),
+    );
+
+    let ordinal_day = int_cast(SparExpr::Add(
+        Box::new(SparExpr::Subtract(
+            Box::new(jdn_val.clone()),
+            Box::new(jdn_jan1.clone()),
+        )),
+        Box::new(lit1d.clone()),
+    ));
+
+    // ISO week number and weekYear computation:
+    // 1. Thursday of the current week: thu_jdn = JDN + 4 - dow (where dow = JDN mod 7 + 1, but +3 for Thu=4)
+    //    thu_jdn = JDN + (4 - dow) = JDN + 3 - jdn_mod7
+    let lit3d2 = SparExpr::Literal(SparLit::new_typed_literal(
+        "3".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let thu_jdn = SparExpr::Subtract(
+        Box::new(SparExpr::Add(
+            Box::new(jdn_val.clone()),
+            Box::new(lit3d2.clone()),
+        )),
+        Box::new(jdn_mod7.clone()),
+    );
+    // 2. Year of thursday: convert thu_jdn back to year using inverse JDN formula.
+    //    Algorithm: a = thu_jdn + 32044; b = (4*a+3)/146097; c = a-(b*146097)/4;
+    //    d = (4*c+3)/1461; e = c-(1461*d)/4; m = (5*e+2)/153;
+    //    thu_year = b*100 + d - 4800 + m/10
+    let lit32044d = SparExpr::Literal(SparLit::new_typed_literal(
+        "32044".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit146097d = SparExpr::Literal(SparLit::new_typed_literal(
+        "146097".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit1461d = SparExpr::Literal(SparLit::new_typed_literal(
+        "1461".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit10d = SparExpr::Literal(SparLit::new_typed_literal(
+        "10".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+    let lit100d2 = SparExpr::Literal(SparLit::new_typed_literal(
+        "100".to_owned(),
+        xsd_dec_nn.clone(),
+    ));
+
+    let inv_a = SparExpr::Add(Box::new(thu_jdn.clone()), Box::new(lit32044d.clone()));
+    let inv_b = floor_fn(SparExpr::Divide(
+        Box::new(SparExpr::Add(
+            Box::new(SparExpr::Multiply(
+                Box::new(lit4d.clone()),
+                Box::new(inv_a.clone()),
+            )),
+            Box::new(lit3d.clone()),
+        )),
+        Box::new(lit146097d.clone()),
+    ));
+    let inv_c = SparExpr::Subtract(
+        Box::new(inv_a.clone()),
+        Box::new(floor_fn(SparExpr::Divide(
+            Box::new(SparExpr::Multiply(
+                Box::new(inv_b.clone()),
+                Box::new(lit146097d.clone()),
+            )),
+            Box::new(lit4d.clone()),
+        ))),
+    );
+    let inv_d = floor_fn(SparExpr::Divide(
+        Box::new(SparExpr::Add(
+            Box::new(SparExpr::Multiply(
+                Box::new(lit4d.clone()),
+                Box::new(inv_c.clone()),
+            )),
+            Box::new(lit3d.clone()),
+        )),
+        Box::new(lit1461d.clone()),
+    ));
+    let inv_e = SparExpr::Subtract(
+        Box::new(inv_c.clone()),
+        Box::new(floor_fn(SparExpr::Divide(
+            Box::new(SparExpr::Multiply(
+                Box::new(lit1461d.clone()),
+                Box::new(inv_d.clone()),
+            )),
+            Box::new(lit4d.clone()),
+        ))),
+    );
+    let inv_m = floor_fn(SparExpr::Divide(
+        Box::new(SparExpr::Add(
+            Box::new(SparExpr::Multiply(
+                Box::new(lit5d.clone()),
+                Box::new(inv_e.clone()),
+            )),
+            Box::new(lit2d.clone()),
+        )),
+        Box::new(lit153d.clone()),
+    ));
+    let thu_year = SparExpr::Add(
+        Box::new(SparExpr::Subtract(
+            Box::new(SparExpr::Add(
+                Box::new(SparExpr::Multiply(
+                    Box::new(inv_b.clone()),
+                    Box::new(lit100d2.clone()),
+                )),
+                Box::new(inv_d.clone()),
+            )),
+            Box::new(lit4800d.clone()),
+        )),
+        Box::new(floor_fn(SparExpr::Divide(
+            Box::new(inv_m.clone()),
+            Box::new(lit10d.clone()),
+        ))),
+    );
+
+    // 3. JDN of Jan 4 of thu_year:
+    //    Use the same formula as jdn_jan1 but with thu_year.
+    let thu_y4799 = SparExpr::Add(Box::new(thu_year.clone()), Box::new(lit4799d.clone()));
+    let jdn_thu_jan4 = SparExpr::Subtract(
+        Box::new(SparExpr::Add(
+            Box::new(SparExpr::Subtract(
+                Box::new(SparExpr::Add(
+                    Box::new(SparExpr::Add(
+                        Box::new(SparExpr::Add(
+                            Box::new(lit4d.clone()),
+                            Box::new(lit306d.clone()),
+                        )),
+                        Box::new(SparExpr::Multiply(
+                            Box::new(lit365d.clone()),
+                            Box::new(thu_y4799.clone()),
+                        )),
+                    )),
+                    Box::new(floor_fn(SparExpr::Divide(
+                        Box::new(thu_y4799.clone()),
+                        Box::new(lit4d.clone()),
+                    ))),
+                )),
+                Box::new(floor_fn(SparExpr::Divide(
+                    Box::new(thu_y4799.clone()),
+                    Box::new(lit100d.clone()),
+                ))),
+            )),
+            Box::new(floor_fn(SparExpr::Divide(
+                Box::new(thu_y4799.clone()),
+                Box::new(lit400d.clone()),
+            ))),
+        )),
+        Box::new(lit32045d.clone()),
+    );
+    // JDN of Jan 4 dow: jan4_mod7 = jdn_thu_jan4 - 7*FLOOR(jdn_thu_jan4/7)
+    let jan4_mod7 = SparExpr::Subtract(
+        Box::new(jdn_thu_jan4.clone()),
+        Box::new(SparExpr::Multiply(
+            Box::new(lit7d.clone()),
+            Box::new(floor_fn(SparExpr::Divide(
+                Box::new(jdn_thu_jan4.clone()),
+                Box::new(lit7d.clone()),
+            ))),
+        )),
+    );
+    // JDN of Monday of week 1: w1_mon = jan4 - jan4_mod7
+    let w1_mon = SparExpr::Subtract(Box::new(jdn_thu_jan4.clone()), Box::new(jan4_mod7.clone()));
+    // Week number = (thu_jdn - w1_mon) / 7 + 1
+    let week_num = int_cast(SparExpr::Add(
+        Box::new(floor_fn(SparExpr::Divide(
+            Box::new(SparExpr::Subtract(
+                Box::new(thu_jdn.clone()),
+                Box::new(w1_mon.clone()),
+            )),
+            Box::new(lit7d.clone()),
+        ))),
+        Box::new(lit1d.clone()),
+    ));
+    let week_year = int_cast(thu_year.clone());
+
+    // ── dayOfQuarter ──────────────────────────────────────────────────────────
+    // Quarter start month for the current date's quarter.
+    // quarter_start_month (1-based): = (quarter - 1)*3 + 1 = ((d_month - 1) / 3)*3 + 1
+    // In SPARQL: FLOOR((month-1)/3)*3+1
+    let lit1d_i = int_lit(1);
+    let q_start_m = SparExpr::Add(
+        Box::new(int_cast(SparExpr::Multiply(
+            Box::new(floor_fn(SparExpr::Divide(
+                Box::new(SparExpr::Subtract(
+                    Box::new(dec_cast(d_month.clone())),
+                    Box::new(lit1d.clone()),
+                )),
+                Box::new(lit3d.clone()),
+            ))),
+            Box::new(lit3d.clone()),
+        ))),
+        Box::new(lit1d_i.clone()),
+    );
+    // JDN of first day of quarter  (same formula but with day=1, month=q_start_m)
+    // To compute JDN(Y, Q_start_M, 1), we reuse the formula with modified m,d.
+    let qs_m_d = dec_cast(q_start_m.clone());
+    let qs_a = floor_fn(SparExpr::Divide(
+        Box::new(SparExpr::Subtract(
+            Box::new(lit14d.clone()),
+            Box::new(qs_m_d.clone()),
+        )),
+        Box::new(lit12d.clone()),
+    ));
+    let qs_y = SparExpr::Subtract(
+        Box::new(SparExpr::Add(
+            Box::new(d_year_d.clone()),
+            Box::new(lit4800d.clone()),
+        )),
+        Box::new(qs_a.clone()),
+    );
+    let qs_m2 = SparExpr::Subtract(
+        Box::new(SparExpr::Add(
+            Box::new(qs_m_d.clone()),
+            Box::new(SparExpr::Multiply(
+                Box::new(lit12d.clone()),
+                Box::new(qs_a.clone()),
+            )),
+        )),
+        Box::new(lit3d.clone()),
+    );
+    let jdn_qs = SparExpr::Subtract(
+        Box::new(SparExpr::Add(
+            Box::new(SparExpr::Subtract(
+                Box::new(SparExpr::Add(
+                    Box::new(SparExpr::Add(
+                        Box::new(SparExpr::Add(
+                            Box::new(lit1d.clone()),
+                            Box::new(floor_fn(SparExpr::Divide(
+                                Box::new(SparExpr::Add(
+                                    Box::new(SparExpr::Multiply(
+                                        Box::new(lit153d.clone()),
+                                        Box::new(qs_m2.clone()),
+                                    )),
+                                    Box::new(lit2d.clone()),
+                                )),
+                                Box::new(lit5d.clone()),
+                            ))),
+                        )),
+                        Box::new(SparExpr::Multiply(
+                            Box::new(lit365d.clone()),
+                            Box::new(qs_y.clone()),
+                        )),
+                    )),
+                    Box::new(floor_fn(SparExpr::Divide(
+                        Box::new(qs_y.clone()),
+                        Box::new(lit4d.clone()),
+                    ))),
+                )),
+                Box::new(floor_fn(SparExpr::Divide(
+                    Box::new(qs_y.clone()),
+                    Box::new(lit100d.clone()),
+                ))),
+            )),
+            Box::new(floor_fn(SparExpr::Divide(
+                Box::new(qs_y.clone()),
+                Box::new(lit400d.clone()),
+            ))),
+        )),
+        Box::new(lit32045d.clone()),
+    );
+    let day_of_quarter = int_cast(SparExpr::Add(
+        Box::new(SparExpr::Subtract(
+            Box::new(jdn_val.clone()),
+            Box::new(jdn_qs.clone()),
+        )),
+        Box::new(lit1d.clone()),
+    ));
+
+    // ── Duration component helpers ────────────────────────────────────────────
+    // Duration strings like "P1Y4M10DT1H1M1.111111111S" or "PT22H"
+    // We use STRAFTER/STRBEFORE to extract components.
+    // Years: STRAFTER(str, "P") → STRBEFORE(result, "Y") if contains "Y"
+    // This is fragile but works for the standard format we generate.
+    // Note: we use IF(..., STRBEFORE(...,"Y"), "0") pattern.
+    let dur_str = str_e.clone(); // The full duration string
+                                 // after_P = STRAFTER(str, "P") — everything after "P"
+    let dur_after_p = strafter_fn(dur_str.clone(), "P");
+    // years part: STRBEFORE(after_P, "Y") if contains "Y", else 0
+    let dur_years_str = if_fn(
+        contains_fn(dur_after_p.clone(), "Y"),
+        strbefore_fn(dur_after_p.clone(), "Y"),
+        slit("0"),
+    );
+    let dur_years = int_cast(dur_years_str.clone());
+    // months: STRBEFORE(after_Y_or_P, "M") where we strip years part first
+    let dur_after_y = if_fn(
+        contains_fn(dur_after_p.clone(), "Y"),
+        strafter_fn(dur_after_p.clone(), "Y"),
+        dur_after_p.clone(),
+    );
+    // After 'Y' comes months (or if no Y, right after P).
+    // But 'M' also appears in minutes; date part ends at 'T'.
+    let dur_date_part = if_fn(
+        contains_fn(dur_after_p.clone(), "T"),
+        strbefore_fn(dur_after_p.clone(), "T"),
+        dur_after_p.clone(),
+    );
+    let dur_time_part = if_fn(
+        contains_fn(dur_str.clone(), "T"),
+        strafter_fn(dur_str.clone(), "T"),
+        slit(""),
+    );
+    // months_str = STRBEFORE(STRAFTER(date_part, Y_or_start), "M")
+    let dur_date_after_y = if_fn(
+        contains_fn(dur_date_part.clone(), "Y"),
+        strafter_fn(dur_date_part.clone(), "Y"),
+        dur_date_part.clone(),
+    );
+    let dur_months_str = if_fn(
+        contains_fn(dur_date_after_y.clone(), "M"),
+        strbefore_fn(dur_date_after_y.clone(), "M"),
+        slit("0"),
+    );
+    let dur_months_i = int_cast(dur_months_str.clone());
+    // days: after "M" in date part, or directly from P if no M
+    let dur_date_after_m = if_fn(
+        contains_fn(dur_date_after_y.clone(), "M"),
+        strafter_fn(dur_date_after_y.clone(), "M"),
+        dur_date_after_y.clone(),
+    );
+    let dur_days_str = if_fn(
+        contains_fn(dur_date_after_m.clone(), "D"),
+        strbefore_fn(dur_date_after_m.clone(), "D"),
+        slit("0"),
+    );
+    let dur_days_i = int_cast(dur_days_str.clone());
+    // hours from time part
+    let dur_hours_str = if_fn(
+        contains_fn(dur_time_part.clone(), "H"),
+        strbefore_fn(dur_time_part.clone(), "H"),
+        slit("0"),
+    );
+    let dur_hours_i = int_cast(dur_hours_str.clone());
+    // minutes from time part (after H)
+    let dur_time_after_h = if_fn(
+        contains_fn(dur_time_part.clone(), "H"),
+        strafter_fn(dur_time_part.clone(), "H"),
+        dur_time_part.clone(),
+    );
+    let dur_mins_str = if_fn(
+        contains_fn(dur_time_after_h.clone(), "M"),
+        strbefore_fn(dur_time_after_h.clone(), "M"),
+        slit("0"),
+    );
+    let dur_mins_i = int_cast(dur_mins_str.clone());
+    // seconds from time part (after M, truncated)
+    let dur_time_after_m = if_fn(
+        contains_fn(dur_time_after_h.clone(), "M"),
+        strafter_fn(dur_time_after_h.clone(), "M"),
+        dur_time_after_h.clone(),
+    );
+    let dur_secs_str = if_fn(
+        contains_fn(dur_time_after_m.clone(), "S"),
+        strbefore_fn(dur_time_after_m.clone(), "S"),
+        slit("0"),
+    );
+    // For seconds, parse integer part only
+    let dur_secs_f = if_fn(
+        contains_fn(dur_secs_str.clone(), "."),
+        strbefore_fn(dur_secs_str.clone(), "."),
+        dur_secs_str.clone(),
+    );
+    let dur_secs_i = int_cast(dur_secs_f.clone());
+    // Subsecond (nanosecond fraction part)
+    let dur_frac_str = if_fn(
+        contains_fn(dur_secs_str.clone(), "."),
+        strafter_fn(dur_secs_str.clone(), "."),
+        slit("0"),
+    );
+    // Note: the fractional seconds in duration can be negative (e.g., "-59.9S" gives frac "9")
+    // We handle this by taking abs() — the nanosecond is always the subsecond fraction.
+    let dur_frac9 = substr2(
+        concat_fn(
+            abs_fn(int_cast(dur_frac_str.clone())).clone(),
+            slit("000000000"),
+        ),
+        1,
+        9,
+    );
+    // Actually we need to pad the frac_str directly:
+    let dur_frac_pad = substr2(concat_fn(dur_frac_str.clone(), slit("000000000")), 1, 9);
+    let dur_ns_of_s = int_cast(dur_frac_pad.clone());
+
+    // Total computed values for duration accessors
+    let lit60i = int_lit(60);
+    let lit3600i = int_lit(3600);
+    let lit24i = int_lit(24);
+    let lit1000i = int_lit(1000);
+    let lit1000000i = int_lit(1_000_000);
+    let lit1000000000i = int_lit(1_000_000_000);
+
+    // total_months = years*12 + months
+    let dur_total_months = SparExpr::Add(
+        Box::new(SparExpr::Multiply(
+            Box::new(dur_years.clone()),
+            Box::new(int_lit(12)),
+        )),
+        Box::new(dur_months_i.clone()),
+    );
+    // time_part_seconds = hours*3600 + mins*60 + secs (NOT including days)
+    // openCypher: d.seconds counts only the time part of the duration.
+    let dur_total_secs = SparExpr::Add(
+        Box::new(SparExpr::Add(
+            Box::new(SparExpr::Multiply(
+                Box::new(dur_hours_i.clone()),
+                Box::new(lit3600i.clone()),
+            )),
+            Box::new(SparExpr::Multiply(
+                Box::new(dur_mins_i.clone()),
+                Box::new(lit60i.clone()),
+            )),
+        )),
+        Box::new(dur_secs_i.clone()),
+    );
+
+    // ── Match property name ───────────────────────────────────────────────────
+    match prop {
+        // Date components
+        "year" => Some(d_year),
+        "month" => Some(d_month),
+        "day" => Some(d_day),
+        "quarter" => Some(d_quarter),
+        "ordinalDay" => Some(ordinal_day),
+        "week" => Some(week_num),
+        "weekYear" => Some(week_year),
+        "weekDay" => Some(iso_dow),
+        "dayOfQuarter" => Some(day_of_quarter),
+        // Time components
+        "hour" => Some(t_hour),
+        "minute" => Some(t_minute),
+        "second" => Some(t_second_int),
+        "millisecond" => Some(t_ms),
+        "microsecond" => Some(t_us),
+        "nanosecond" => Some(t_ns),
+        // Timezone components
+        "timezone" => {
+            // If the string has a named TZ bracket like "[Europe/Stockholm]", return the name.
+            // Otherwise return the numeric offset ("+01:00" or "Z").
+            let named_tz_bare = strbefore_fn(named_tz_raw.clone(), "]");
+            Some(if_fn(
+                contains_fn(str_e.clone(), "["),
+                named_tz_bare,
+                tz_offset_str.clone(),
+            ))
+        }
+        "offset" => Some(tz_offset_str),
+        "offsetMinutes" => Some(tz_minutes),
+        "offsetSeconds" => Some(tz_seconds),
+        // Epoch
+        "epochSeconds" => {
+            // Unix epoch seconds = JDN - JDN(1970,1,1) times 86400 + hour*3600 + min*60 + sec
+            // JDN(1970,1,1) = 2440588
+            let jdn_epoch = SparExpr::Literal(SparLit::new_typed_literal(
+                "2440588".to_owned(),
+                xsd_dec_nn.clone(),
+            ));
+            let days_since_epoch =
+                SparExpr::Subtract(Box::new(jdn_val.clone()), Box::new(jdn_epoch));
+            let secs_from_date = SparExpr::Multiply(
+                Box::new(days_since_epoch),
+                Box::new(SparExpr::Literal(SparLit::new_typed_literal(
+                    "86400".to_owned(),
+                    xsd_dec_nn.clone(),
+                ))),
+            );
+            let secs_from_time = SparExpr::Add(
+                Box::new(SparExpr::Add(
+                    Box::new(SparExpr::Multiply(
+                        Box::new(dec_cast(t_hour.clone())),
+                        Box::new(SparExpr::Literal(SparLit::new_typed_literal(
+                            "3600".to_owned(),
+                            xsd_dec_nn.clone(),
+                        ))),
+                    )),
+                    Box::new(SparExpr::Multiply(
+                        Box::new(dec_cast(t_minute.clone())),
+                        Box::new(SparExpr::Literal(SparLit::new_typed_literal(
+                            "60".to_owned(),
+                            xsd_dec_nn.clone(),
+                        ))),
+                    )),
+                )),
+                Box::new(dec_cast(t_second_int.clone())),
+            );
+            // Adjust for TZ: subtract tz_offset_seconds
+            let tz_secs_offset = dec_cast(tz_seconds.clone());
+            // Not needed if TZ is UTC... Just: epoch = days*86400 + time_s - tz_offset_s
+            // But if no TZ (localtime), no adjustment needed.
+            Some(int_cast(SparExpr::Subtract(
+                Box::new(SparExpr::Add(
+                    Box::new(secs_from_date),
+                    Box::new(secs_from_time),
+                )),
+                Box::new(tz_secs_offset),
+            )))
+        }
+        "epochMillis" => {
+            // Similar to epochSeconds but *1000 + millisecond
+            let jdn_epoch = SparExpr::Literal(SparLit::new_typed_literal(
+                "2440588".to_owned(),
+                xsd_dec_nn.clone(),
+            ));
+            let days_since_epoch =
+                SparExpr::Subtract(Box::new(jdn_val.clone()), Box::new(jdn_epoch));
+            let secs_from_date = SparExpr::Multiply(
+                Box::new(days_since_epoch),
+                Box::new(SparExpr::Literal(SparLit::new_typed_literal(
+                    "86400".to_owned(),
+                    xsd_dec_nn.clone(),
+                ))),
+            );
+            let secs_from_time = SparExpr::Add(
+                Box::new(SparExpr::Add(
+                    Box::new(SparExpr::Multiply(
+                        Box::new(dec_cast(t_hour.clone())),
+                        Box::new(SparExpr::Literal(SparLit::new_typed_literal(
+                            "3600".to_owned(),
+                            xsd_dec_nn.clone(),
+                        ))),
+                    )),
+                    Box::new(SparExpr::Multiply(
+                        Box::new(dec_cast(t_minute.clone())),
+                        Box::new(SparExpr::Literal(SparLit::new_typed_literal(
+                            "60".to_owned(),
+                            xsd_dec_nn.clone(),
+                        ))),
+                    )),
+                )),
+                Box::new(dec_cast(t_second_int.clone())),
+            );
+            let tz_secs_offset = dec_cast(tz_seconds.clone());
+            let epoch_s = SparExpr::Subtract(
+                Box::new(SparExpr::Add(
+                    Box::new(secs_from_date),
+                    Box::new(secs_from_time),
+                )),
+                Box::new(tz_secs_offset),
+            );
+            Some(int_cast(SparExpr::Add(
+                Box::new(SparExpr::Multiply(
+                    Box::new(epoch_s),
+                    Box::new(SparExpr::Literal(SparLit::new_typed_literal(
+                        "1000".to_owned(),
+                        xsd_dec_nn.clone(),
+                    ))),
+                )),
+                Box::new(dec_cast(t_ms.clone())),
+            )))
+        }
+        // Duration components
+        "years" => Some(dur_years),
+        "months" => Some(dur_total_months),
+        "quarters" => Some(int_cast(SparExpr::Add(
+            Box::new(SparExpr::Multiply(
+                Box::new(dur_years.clone()),
+                Box::new(int_lit(4)),
+            )),
+            Box::new(int_cast(floor_fn(SparExpr::Divide(
+                Box::new(dec_cast(dur_months_i.clone())),
+                Box::new(lit3d.clone()),
+            )))),
+        ))),
+        "weeks" => Some(int_cast(floor_fn(SparExpr::Divide(
+            Box::new(dec_cast(dur_days_i.clone())),
+            Box::new(lit7d.clone()),
+        )))),
+        "days" => Some(dur_days_i),
+        "hours" => Some(dur_hours_i),
+        "minutes" => Some(SparExpr::Add(
+            Box::new(SparExpr::Multiply(
+                Box::new(dur_hours_i.clone()),
+                Box::new(lit60i.clone()),
+            )),
+            Box::new(dur_mins_i.clone()),
+        )),
+        "seconds" => Some(dur_total_secs.clone()),
+        "milliseconds" => Some(SparExpr::Add(
+            Box::new(SparExpr::Multiply(
+                Box::new(dur_total_secs.clone()),
+                Box::new(lit1000i.clone()),
+            )),
+            Box::new(int_cast(substr2(dur_frac_pad.clone(), 1, 3))),
+        )),
+        "microseconds" => Some(SparExpr::Add(
+            Box::new(SparExpr::Multiply(
+                Box::new(dur_total_secs.clone()),
+                Box::new(lit1000000i.clone()),
+            )),
+            Box::new(int_cast(substr2(dur_frac_pad.clone(), 1, 6))),
+        )),
+        "nanoseconds" => Some(SparExpr::Add(
+            Box::new(SparExpr::Multiply(
+                Box::new(dur_total_secs.clone()),
+                Box::new(lit1000000000i.clone()),
+            )),
+            Box::new(dur_ns_of_s.clone()),
+        )),
+        "quartersOfYear" => Some(int_cast(floor_fn(SparExpr::Divide(
+            Box::new(dec_cast(dur_months_i.clone())),
+            Box::new(lit3d.clone()),
+        )))),
+        "monthsOfQuarter" => Some(int_cast(SparExpr::Subtract(
+            Box::new(dur_months_i.clone()),
+            Box::new(SparExpr::Multiply(
+                Box::new(int_cast(floor_fn(SparExpr::Divide(
+                    Box::new(dec_cast(dur_months_i.clone())),
+                    Box::new(lit3d.clone()),
+                )))),
+                Box::new(int_lit(3)),
+            )),
+        ))),
+        "monthsOfYear" => Some(dur_months_i),
+        "daysOfWeek" => Some(int_cast(SparExpr::Subtract(
+            Box::new(dur_days_i.clone()),
+            Box::new(SparExpr::Multiply(
+                Box::new(int_cast(floor_fn(SparExpr::Divide(
+                    Box::new(dec_cast(dur_days_i.clone())),
+                    Box::new(lit7d.clone()),
+                )))),
+                Box::new(int_lit(7)),
+            )),
+        ))),
+        "minutesOfHour" => Some(dur_mins_i),
+        "secondsOfMinute" => Some(dur_secs_i),
+        "millisecondsOfSecond" => Some(int_cast(substr2(dur_frac_pad.clone(), 1, 3))),
+        "microsecondsOfSecond" => Some(int_cast(substr2(dur_frac_pad.clone(), 1, 6))),
+        "nanosecondsOfSecond" => Some(dur_ns_of_s),
+        _ => None,
+    }
 }
 
 /// Extract a named component from a duration string. Returns a numeric string or None.
@@ -13071,7 +14747,11 @@ fn temporal_parse_date(s: &str) -> Option<String> {
     };
     // Extended-year format: ±YYYYYYY-MM-DD (year more/less than 4 digits)
     if s.starts_with('+') || s.starts_with('-') {
-        let (sign, rest) = if s.starts_with('-') { (-1i64, &s[1..]) } else { (1, &s[1..]) };
+        let (sign, rest) = if s.starts_with('-') {
+            (-1i64, &s[1..])
+        } else {
+            (1, &s[1..])
+        };
         if let Some(ym_pos) = rest.find('-').filter(|&p| p >= 4) {
             let rest2 = &rest[ym_pos + 1..];
             if rest2.len() >= 5 && rest2.as_bytes().get(2) == Some(&b'-') {
@@ -14111,7 +15791,11 @@ struct TempoVal {
 fn parse_time_ns_ext(s: &str) -> Option<(i128, i64, bool)> {
     let s = s.trim();
     // Strip named timezone [...]
-    let s = if let Some(b) = s.rfind('[') { &s[..b] } else { s };
+    let s = if let Some(b) = s.rfind('[') {
+        &s[..b]
+    } else {
+        s
+    };
     // Detect trailing TZ offset: Z or ±HH[:MM], starting at pos ≥ 5
     let tz_start = s
         .rfind(|c: char| c == 'Z' || c == '+' || c == '-')
@@ -14156,17 +15840,19 @@ fn parse_time_ns_ext(s: &str) -> Option<(i128, i64, bool)> {
             let frac_str = &sec_str[dot + 1..];
             let mut ns_str = frac_str.to_string();
             ns_str.truncate(9);
-            while ns_str.len() < 9 { ns_str.push('0'); }
+            while ns_str.len() < 9 {
+                ns_str.push('0');
+            }
             let ns: i64 = ns_str.parse().ok()?;
             (whole as i128) * 1_000_000_000 + ns as i128
         } else {
             let whole: i64 = sec_str.parse().ok()?;
             (whole as i128) * 1_000_000_000
         }
-    } else { 0 };
-    let local_ns = (h as i128) * 3_600_000_000_000
-        + (m as i128) * 60_000_000_000
-        + sec_ns;
+    } else {
+        0
+    };
+    let local_ns = (h as i128) * 3_600_000_000_000 + (m as i128) * 60_000_000_000 + sec_ns;
     Some((local_ns, tz_secs, has_tz))
 }
 
@@ -14199,7 +15885,11 @@ fn parse_date_ymd(s: &str) -> Option<(i64, i64, i64)> {
 fn temporal_to_val(s: &str) -> Option<TempoVal> {
     let s = s.trim();
     // Strip named timezone suffix [...]
-    let s = if let Some(b) = s.rfind('[') { &s[..b] } else { s };
+    let s = if let Some(b) = s.rfind('[') {
+        &s[..b]
+    } else {
+        s
+    };
     let s = s.trim_end_matches(']');
 
     if let Some(t_pos) = s.find('T') {
@@ -14209,38 +15899,77 @@ fn temporal_to_val(s: &str) -> Option<TempoVal> {
         let (y, m, d) = parse_date_ymd(date_part)?;
         let (local_ns, tz_secs, has_tz) = parse_time_ns_ext(time_raw)?;
         let utc_ns = local_ns - (tz_secs as i128) * 1_000_000_000;
-        Some(TempoVal { has_date: true, has_time: true, has_tz, year: y, month: m, day: d, local_time_ns: local_ns, utc_time_ns: utc_ns })
+        Some(TempoVal {
+            has_date: true,
+            has_time: true,
+            has_tz,
+            year: y,
+            month: m,
+            day: d,
+            local_time_ns: local_ns,
+            utc_time_ns: utc_ns,
+        })
     } else if s.len() >= 3 && s.as_bytes().get(2) == Some(&b':') {
         // time or localtime: HH:MM...
         let (local_ns, tz_secs, has_tz) = parse_time_ns_ext(s)?;
         let utc_ns = local_ns - (tz_secs as i128) * 1_000_000_000;
-        Some(TempoVal { has_date: false, has_time: true, has_tz, year: 0, month: 0, day: 0, local_time_ns: local_ns, utc_time_ns: utc_ns })
+        Some(TempoVal {
+            has_date: false,
+            has_time: true,
+            has_tz,
+            year: 0,
+            month: 0,
+            day: 0,
+            local_time_ns: local_ns,
+            utc_time_ns: utc_ns,
+        })
     } else {
         // date: YYYY-MM-DD
         let (y, m, d) = parse_date_ymd(s)?;
-        Some(TempoVal { has_date: true, has_time: false, has_tz: false, year: y, month: m, day: d, local_time_ns: 0, utc_time_ns: 0 })
+        Some(TempoVal {
+            has_date: true,
+            has_time: false,
+            has_tz: false,
+            year: y,
+            month: m,
+            day: d,
+            local_time_ns: 0,
+            utc_time_ns: 0,
+        })
     }
 }
 
 /// Choose the appropriate time_ns for comparison: UTC when both have_tz, local otherwise.
 fn tempo_time(v: &TempoVal, use_utc: bool) -> i128 {
-    if use_utc { v.utc_time_ns } else { v.local_time_ns }
+    if use_utc {
+        v.utc_time_ns
+    } else {
+        v.local_time_ns
+    }
 }
 
 const DAY_NS: i128 = 86_400_000_000_000;
 
 /// Format signed seconds-in-nanoseconds as "NNS" or "NN.fS".
 fn dur_fmt_sec_ns(ns: i128) -> String {
-    if ns == 0 { return String::new(); }
+    if ns == 0 {
+        return String::new();
+    }
     let neg = ns < 0;
     let abs_ns = ns.unsigned_abs();
     let whole = (abs_ns / 1_000_000_000) as i64;
     let frac_ns = (abs_ns % 1_000_000_000) as i64;
-    let frac_part = if frac_ns == 0 { String::new() } else {
+    let frac_part = if frac_ns == 0 {
+        String::new()
+    } else {
         let s = format!("{frac_ns:09}");
         format!(".{}", s.trim_end_matches('0'))
     };
-    if neg { format!("-{whole}{frac_part}S") } else { format!("{whole}{frac_part}S") }
+    if neg {
+        format!("-{whole}{frac_part}S")
+    } else {
+        format!("{whole}{frac_part}S")
+    }
 }
 
 /// Format a duration as ISO 8601 string.  All non-zero components must have the same sign.
@@ -14249,32 +15978,50 @@ fn dur_fmt(y: i64, mo: i64, d: i64, h: i64, min: i64, s_ns: i128) -> String {
         return "PT0S".to_string();
     }
     let mut result = String::from("P");
-    if y != 0 { result.push_str(&format!("{y}Y")); }
-    if mo != 0 { result.push_str(&format!("{mo}M")); }
-    if d != 0 { result.push_str(&format!("{d}D")); }
+    if y != 0 {
+        result.push_str(&format!("{y}Y"));
+    }
+    if mo != 0 {
+        result.push_str(&format!("{mo}M"));
+    }
+    if d != 0 {
+        result.push_str(&format!("{d}D"));
+    }
     if h != 0 || min != 0 || s_ns != 0 {
         result.push('T');
-        if h != 0 { result.push_str(&format!("{h}H")); }
-        if min != 0 { result.push_str(&format!("{min}M")); }
-        if s_ns != 0 { result.push_str(&dur_fmt_sec_ns(s_ns)); }
+        if h != 0 {
+            result.push_str(&format!("{h}H"));
+        }
+        if min != 0 {
+            result.push_str(&format!("{min}M"));
+        }
+        if s_ns != 0 {
+            result.push_str(&dur_fmt_sec_ns(s_ns));
+        }
     }
     result
 }
 
 /// Split total nanoseconds into (hours, minutes, seconds_ns) with uniform sign.
 fn split_ns_to_hms(total_ns: i128) -> (i64, i64, i128) {
-    if total_ns == 0 { return (0, 0, 0); }
+    if total_ns == 0 {
+        return (0, 0, 0);
+    }
     let neg = total_ns < 0;
     let abs = total_ns.unsigned_abs();
     let h = (abs / 3_600_000_000_000) as i64;
     let rem = abs % 3_600_000_000_000;
     let m = (rem / 60_000_000_000) as i64;
     let s = (rem % 60_000_000_000) as i128;
-    if neg { (-(h as i64), -(m as i64), -(s)) } else { (h as i64, m as i64, s) }
+    if neg {
+        (-(h as i64), -(m as i64), -(s))
+    } else {
+        (h as i64, m as i64, s)
+    }
 }
 
 /// Calendar diff (positive direction only): returns (yd, md, dd) where all ≥ 0.
-fn calendar_diff_pos(y1:i64, m1:i64, d1:i64, y2:i64, m2:i64, d2:i64) -> (i64, i64, i64) {
+fn calendar_diff_pos(y1: i64, m1: i64, d1: i64, y2: i64, m2: i64, d2: i64) -> (i64, i64, i64) {
     let mut yd = y2 - y1;
     let mut md = m2 - m1;
     let mut dd = d2 - d1;
@@ -14296,8 +16043,16 @@ fn temporal_duration_between(lhs: &str, rhs: &str) -> Option<String> {
     let l = temporal_to_val(lhs)?;
     let r = temporal_to_val(rhs)?;
     let use_utc = l.has_tz && r.has_tz;
-    let l_t = if l.has_time { tempo_time(&l, use_utc) } else { 0 };
-    let r_t = if r.has_time { tempo_time(&r, use_utc) } else { 0 };
+    let l_t = if l.has_time {
+        tempo_time(&l, use_utc)
+    } else {
+        0
+    };
+    let r_t = if r.has_time {
+        tempo_time(&r, use_utc)
+    } else {
+        0
+    };
 
     if !l.has_date || !r.has_date {
         // Pure time result.
@@ -14313,7 +16068,8 @@ fn temporal_duration_between(lhs: &str, rhs: &str) -> Option<String> {
 
     if epoch_diff >= 0 {
         // Positive direction: use calendar form Y/M/D.
-        let (mut yd, mut md, mut dd) = calendar_diff_pos(l.year, l.month, l.day, r.year, r.month, r.day);
+        let (mut yd, mut md, mut dd) =
+            calendar_diff_pos(l.year, l.month, l.day, r.year, r.month, r.day);
         let mut t_diff = r_t - l_t;
         if t_diff < 0 {
             // Borrow 1 day.
@@ -14357,19 +16113,33 @@ fn temporal_duration_in_months(lhs: &str, rhs: &str) -> Option<String> {
         return Some("PT0S".to_string());
     }
     let use_utc = l.has_tz && r.has_tz;
-    let l_t = if l.has_time { tempo_time(&l, use_utc) } else { 0 };
-    let r_t = if r.has_time { tempo_time(&r, use_utc) } else { 0 };
+    let l_t = if l.has_time {
+        tempo_time(&l, use_utc)
+    } else {
+        0
+    };
+    let r_t = if r.has_time {
+        tempo_time(&r, use_utc)
+    } else {
+        0
+    };
 
     let mut raw_months = (r.year - l.year) * 12 + (r.month - l.month);
     // Day/time comparison for sub-month adjustment.
     let r_day_ns = (r.day as i128) * DAY_NS + r_t;
     let l_day_ns = (l.day as i128) * DAY_NS + l_t;
     if raw_months >= 0 {
-        if r_day_ns < l_day_ns { raw_months -= 1; }
+        if r_day_ns < l_day_ns {
+            raw_months -= 1;
+        }
     } else {
-        if r_day_ns > l_day_ns { raw_months += 1; }
+        if r_day_ns > l_day_ns {
+            raw_months += 1;
+        }
     }
-    if raw_months == 0 { return Some("PT0S".to_string()); }
+    if raw_months == 0 {
+        return Some("PT0S".to_string());
+    }
     let y = raw_months / 12;
     let m = raw_months % 12;
     Some(dur_fmt(y, m, 0, 0, 0, 0))
@@ -14384,14 +16154,24 @@ fn temporal_duration_in_days(lhs: &str, rhs: &str) -> Option<String> {
         return Some("PT0S".to_string());
     }
     let use_utc = l.has_tz && r.has_tz;
-    let l_t = if l.has_time { tempo_time(&l, use_utc) } else { 0 };
-    let r_t = if r.has_time { tempo_time(&r, use_utc) } else { 0 };
+    let l_t = if l.has_time {
+        tempo_time(&l, use_utc)
+    } else {
+        0
+    };
+    let r_t = if r.has_time {
+        tempo_time(&r, use_utc)
+    } else {
+        0
+    };
     let l_epoch_ns = temporal_epoch(l.year, l.month, l.day) as i128 * DAY_NS;
     let r_epoch_ns = temporal_epoch(r.year, r.month, r.day) as i128 * DAY_NS;
     // Truncate total ns toward zero to get whole days.
     let total_diff_ns = (r_epoch_ns + r_t) - (l_epoch_ns + l_t);
-    let days = (total_diff_ns / DAY_NS) as i64;  // truncates toward zero
-    if days == 0 { return Some("PT0S".to_string()); }
+    let days = (total_diff_ns / DAY_NS) as i64; // truncates toward zero
+    if days == 0 {
+        return Some("PT0S".to_string());
+    }
     Some(format!("P{days}D"))
 }
 
@@ -14400,16 +16180,30 @@ fn temporal_duration_in_seconds(lhs: &str, rhs: &str) -> Option<String> {
     let l = temporal_to_val(lhs)?;
     let r = temporal_to_val(rhs)?;
     let use_utc = l.has_tz && r.has_tz;
-    let l_t = if l.has_time { tempo_time(&l, use_utc) } else { 0 };
-    let r_t = if r.has_time { tempo_time(&r, use_utc) } else { 0 };
+    let l_t = if l.has_time {
+        tempo_time(&l, use_utc)
+    } else {
+        0
+    };
+    let r_t = if r.has_time {
+        tempo_time(&r, use_utc)
+    } else {
+        0
+    };
     let l_epoch_ns = if l.has_date && r.has_date {
         temporal_epoch(l.year, l.month, l.day) as i128 * DAY_NS
-    } else { 0 };
+    } else {
+        0
+    };
     let r_epoch_ns = if l.has_date && r.has_date {
         temporal_epoch(r.year, r.month, r.day) as i128 * DAY_NS
-    } else { 0 };
+    } else {
+        0
+    };
     let total_diff = (r_epoch_ns + r_t) - (l_epoch_ns + l_t);
-    if total_diff == 0 { return Some("PT0S".to_string()); }
+    if total_diff == 0 {
+        return Some("PT0S".to_string());
+    }
     let (h, min, s) = split_ns_to_hms(total_diff);
     Some(dur_fmt(0, 0, 0, h, min, s))
 }
