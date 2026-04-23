@@ -1217,6 +1217,7 @@ impl TranslationState {
                 // Two calls to the same constructor with no args in the same query
                 // will produce the same literal, so duration(v, v) = PT0S correctly.
                 if args.is_empty() {
+                    let xsd_date_nn = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#date");
                     let xsd_time_nn = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#time");
                     let xsd_dt_nn = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime");
                     // Strip variant suffix to get the base function name.
@@ -1226,11 +1227,12 @@ impl TranslationState {
                         .or_else(|| name_lower.strip_suffix(".realtime"))
                         .unwrap_or(name_lower.as_str());
                     let lit = match base_for_zero {
-                        "date" => SparLit::new_simple_literal("2000-01-01".to_owned()),
-                        "localtime" => SparLit::new_simple_literal("00:00".to_owned()),
+                        "date" => SparLit::new_typed_literal("2000-01-01".to_owned(), xsd_date_nn),
+                        "localtime" => SparLit::new_typed_literal("00:00:00".to_owned(), xsd_time_nn.clone()),
                         "time" => SparLit::new_typed_literal("00:00:00Z".to_owned(), xsd_time_nn),
-                        "localdatetime" => SparLit::new_simple_literal("2000-01-01T00:00".to_owned()),
+                        "localdatetime" => SparLit::new_typed_literal("2000-01-01T00:00:00".to_owned(), xsd_dt_nn.clone()),
                         "datetime" => SparLit::new_typed_literal("2000-01-01T00:00Z".to_owned(), xsd_dt_nn),
+                        "duration" => SparLit::new_simple_literal("PT0S".to_owned()),
                         _ => return Ok(SparExpr::Variable(self.fresh_var("null"))),
                     };
                     return Ok(SparExpr::Literal(lit));
@@ -1282,6 +1284,7 @@ impl TranslationState {
                     .or_else(|| name_lower.strip_suffix(".realtime"))
                     .unwrap_or(name_lower.as_str());
 
+                let xsd_date = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#date");
                 let xsd_time = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#time");
                 let xsd_dt =
                     NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime");
@@ -1321,15 +1324,15 @@ impl TranslationState {
                 if let Some(Expression::Map(pairs)) = args.first() {
                     let lit_opt: Option<SparLit> = match base_func {
                         "date" => temporal_date_from_map(pairs)
-                            .map(SparLit::new_simple_literal),
+                            .map(|s| SparLit::new_typed_literal(s, xsd_date.clone())),
                         "localtime" => temporal_localtime_from_map(pairs)
-                            .map(SparLit::new_simple_literal),
+                            .map(|s| SparLit::new_typed_literal(s, xsd_time.clone())),
                         "time" => temporal_time_from_map(pairs)
-                            .map(|s| SparLit::new_typed_literal(s, xsd_time)),
+                            .map(|s| SparLit::new_typed_literal(s, xsd_time.clone())),
                         "localdatetime" => temporal_localdatetime_from_map(pairs)
-                            .map(SparLit::new_simple_literal),
+                            .map(|s| SparLit::new_typed_literal(s, xsd_dt.clone())),
                         "datetime" => temporal_datetime_from_map(pairs)
-                            .map(|s| SparLit::new_typed_literal(s, xsd_dt)),
+                            .map(|s| SparLit::new_typed_literal(s, xsd_dt.clone())),
                         "duration" => temporal_duration_from_map(pairs)
                             .map(SparLit::new_simple_literal),
                         _ => None,
@@ -1340,14 +1343,14 @@ impl TranslationState {
                 // String argument: date('2015-07-21') etc.
                 } else if let Some(Expression::Literal(Literal::String(s))) = args.first() {
                     let lit_opt: Option<SparLit> = match base_func {
-                        "date" => temporal_parse_date(s).map(SparLit::new_simple_literal),
-                        "localtime" => {
-                            temporal_parse_localtime(s).map(SparLit::new_simple_literal)
-                        }
+                        "date" => temporal_parse_date(s)
+                            .map(|v| SparLit::new_typed_literal(v, xsd_date)),
+                        "localtime" => temporal_parse_localtime(s)
+                            .map(|v| SparLit::new_typed_literal(v, xsd_time.clone())),
                         "time" => temporal_parse_time(s)
                             .map(|v| SparLit::new_typed_literal(v, xsd_time)),
                         "localdatetime" => temporal_parse_localdatetime(s)
-                            .map(SparLit::new_simple_literal),
+                            .map(|v| SparLit::new_typed_literal(v, xsd_dt.clone())),
                         "datetime" => temporal_parse_datetime(s)
                             .map(|v| SparLit::new_typed_literal(v, xsd_dt)),
                         "duration" => temporal_parse_duration(s)
@@ -1410,6 +1413,8 @@ impl TranslationState {
                         | "nanosecond"
                 );
 
+                let xsd_date_t =
+                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#date");
                 let xsd_dt =
                     NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime");
                 let xsd_time =
@@ -1420,7 +1425,7 @@ impl TranslationState {
                         let y = comps.year.unwrap_or(0);
                         let m = comps.month.unwrap_or(1);
                         let d = comps.day.unwrap_or(1);
-                        SparLit::new_simple_literal(format!("{y:04}-{m:02}-{d:02}"))
+                        SparLit::new_typed_literal(format!("{y:04}-{m:02}-{d:02}"), xsd_date_t)
                     }
                     "datetime.truncate" => {
                         let y = comps.year.unwrap_or(0);
@@ -1434,7 +1439,7 @@ impl TranslationState {
                         let tz = comps.tz.as_deref().unwrap_or("Z");
                         SparLit::new_typed_literal(
                             format!("{y:04}-{m:02}-{d:02}T{time_part}{tz}"),
-                            xsd_dt,
+                            xsd_dt.clone(),
                         )
                     }
                     "localdatetime.truncate" => {
@@ -1446,16 +1451,17 @@ impl TranslationState {
                         let sec = comps.second.unwrap_or(0);
                         let ns = comps.ns.unwrap_or(0);
                         let time_part = tc_fmt_time(h, min, sec, ns);
-                        SparLit::new_simple_literal(format!(
-                            "{y:04}-{m:02}-{d:02}T{time_part}"
-                        ))
+                        SparLit::new_typed_literal(
+                            format!("{y:04}-{m:02}-{d:02}T{time_part}"),
+                            xsd_dt,
+                        )
                     }
                     "localtime.truncate" => {
                         let h = comps.hour.unwrap_or(0);
                         let min = comps.minute.unwrap_or(0);
                         let sec = comps.second.unwrap_or(0);
                         let ns = comps.ns.unwrap_or(0);
-                        SparLit::new_simple_literal(tc_fmt_time(h, min, sec, ns))
+                        SparLit::new_typed_literal(tc_fmt_time(h, min, sec, ns), xsd_time.clone())
                     }
                     "time.truncate" => {
                         let h = comps.hour.unwrap_or(0);
@@ -1515,6 +1521,65 @@ impl TranslationState {
                     Some(s) => Ok(SparExpr::Literal(SparLit::new_simple_literal(s))),
                     None => Ok(SparExpr::Variable(self.fresh_var("null"))),
                 }
+            }
+
+            // ── datetime.fromepoch / datetime.fromepochmillis ─────────────────
+            "datetime.fromepoch" => {
+                // datetime.fromepoch(seconds, nanoseconds)
+                // Both arguments must be integer literals for compile-time evaluation.
+                let (sec_expr, ns_expr) = match (args.first(), args.get(1)) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: "datetime.fromepoch() requires two arguments".to_string(),
+                        })
+                    }
+                };
+                let epoch_seconds = match get_literal_int(sec_expr) {
+                    Some(v) => v,
+                    None => {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: "datetime.fromepoch() with non-literal seconds".to_string(),
+                        })
+                    }
+                };
+                let nanoseconds = match get_literal_int(ns_expr) {
+                    Some(v) if v >= 0 && v <= 999_999_999 => v as u32,
+                    _ => {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: "datetime.fromepoch() with non-literal or out-of-range nanoseconds"
+                                .to_string(),
+                        })
+                    }
+                };
+                let s = temporal_fromepoch_to_str(epoch_seconds, nanoseconds);
+                // Use a plain string literal to avoid Oxigraph nanosecond normalization.
+                Ok(SparExpr::Literal(SparLit::new_simple_literal(s)))
+            }
+
+            "datetime.fromepochmillis" => {
+                // datetime.fromepochmillis(milliseconds)
+                let millis = match args.first().and_then(get_literal_int) {
+                    Some(v) => v,
+                    None => {
+                        return Err(PolygraphError::UnsupportedFeature {
+                            feature: "datetime.fromepochmillis() with non-literal argument"
+                                .to_string(),
+                        })
+                    }
+                };
+                let epoch_seconds = millis / 1000;
+                let remaining_ms = millis % 1000;
+                let (epoch_seconds, nanoseconds) = if remaining_ms < 0 {
+                    (epoch_seconds - 1, ((remaining_ms + 1000) * 1_000_000) as u32)
+                } else {
+                    (epoch_seconds, (remaining_ms * 1_000_000) as u32)
+                };
+                let xsd_dt = NamedNode::new_unchecked(
+                    "http://www.w3.org/2001/XMLSchema#dateTime",
+                );
+                let s = temporal_fromepoch_to_str(epoch_seconds, nanoseconds);
+                Ok(SparExpr::Literal(SparLit::new_typed_literal(s, xsd_dt)))
             }
 
             _ => Err(PolygraphError::UnsupportedFeature {

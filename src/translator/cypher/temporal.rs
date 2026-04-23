@@ -1016,8 +1016,11 @@ fn temporal_localtime_from_map(pairs: &[(String, Expression)]) -> Option<String>
     let min = temporal_get_i(pairs, "minute").unwrap_or(0);
     let sec = temporal_get_i(pairs, "second");
     let frac = temporal_sub_second(pairs);
+    // Always include seconds to produce a valid xsd:time value ("HH:MM:SS[.frac]").
+    // Strip_zero_seconds_from_time in the TCK runner will canonicalize back to
+    // "HH:MM" when seconds are zero and there is no fractional part.
     match sec {
-        None if frac.is_empty() => Some(format!("{h:02}:{min:02}")),
+        None if frac.is_empty() => Some(format!("{h:02}:{min:02}:00")),
         None => Some(format!("{h:02}:{min:02}:00{frac}")),
         Some(s) => Some(format!("{h:02}:{min:02}:{s:02}{frac}")),
     }
@@ -2004,7 +2007,8 @@ fn temporal_parse_localtime(s: &str) -> Option<String> {
         let h: i64 = s[..2].parse().ok()?;
         let m: i64 = s[3..5].parse().ok()?;
         if s.len() == 5 {
-            return Some(format!("{h:02}:{m:02}"));
+            // HH:MM with no seconds — pad to HH:MM:00 for valid xsd:time format.
+            return Some(format!("{h:02}:{m:02}:00"));
         }
         if s.as_bytes().get(5) == Some(&b':') {
             let sec_str = &s[6..];
@@ -3350,4 +3354,48 @@ fn temporal_duration_in_seconds(lhs: &str, rhs: &str) -> Option<String> {
     }
     let (h, min, s) = split_ns_to_hms(total_diff);
     Some(dur_fmt(0, 0, 0, h, min, s))
+}
+
+// ── Epoch conversion ──────────────────────────────────────────────────────────
+
+/// Convert Unix epoch seconds + sub-second nanoseconds to an ISO 8601 UTC
+/// datetime string, as required by `datetime.fromepoch(seconds, nanoseconds)`.
+/// Nanoseconds must be in 0..=999_999_999.
+fn temporal_fromepoch_to_str(epoch_seconds: i64, nanoseconds: u32) -> String {
+    // Split into Unix days and seconds within the day (always non-negative).
+    let (unix_day, sec_of_day) = if epoch_seconds >= 0 {
+        (epoch_seconds / 86400, (epoch_seconds % 86400) as u64)
+    } else {
+        let d = epoch_seconds / 86400;
+        let s = epoch_seconds % 86400;
+        if s < 0 {
+            (d - 1, (s + 86400) as u64)
+        } else {
+            (d, s as u64)
+        }
+    };
+
+    // Proleptic Gregorian day: temporal_epoch(1970, 1, 1) = 719163.
+    let greg_day = unix_day + 719163;
+    let (year, month, day) = temporal_from_epoch(greg_day);
+
+    let hour = sec_of_day / 3600;
+    let min = (sec_of_day % 3600) / 60;
+    let sec = sec_of_day % 60;
+
+    if nanoseconds == 0 {
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            year, month, day, hour, min, sec
+        )
+    } else {
+        // Trim trailing zeros (e.g. 987_000_000 → "987").
+        let ns_str = format!("{:09}", nanoseconds)
+            .trim_end_matches('0')
+            .to_string();
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{}Z",
+            year, month, day, hour, min, sec, ns_str
+        )
+    }
 }

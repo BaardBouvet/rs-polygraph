@@ -16,6 +16,35 @@ impl TranslationState {
         // In skip_writes mode, pre-scan SET and REMOVE clauses so that MATCH patterns
         // can be adjusted to find nodes/relationships after updates have been applied.
         if self.skip_write_clauses {
+            // First pass: populate node_props_from_create from CREATE clauses so that
+            // self-referential SET expressions (e.g. a.nums = a.nums + [4, 5]) can
+            // be statically folded in the second pass below.
+            for clause in clauses {
+                if let Clause::Create(c) = clause {
+                    for pat in &c.pattern.0 {
+                        for elem in &pat.elements {
+                            if let PatternElement::Node(n) = elem {
+                                if let Some(v) = &n.variable {
+                                    if let Some(props) = &n.properties {
+                                        let prop_map: std::collections::HashMap<
+                                            String,
+                                            Expression,
+                                        > = props
+                                            .iter()
+                                            .map(|(k, vv)| (k.clone(), vv.clone()))
+                                            .collect();
+                                        // Only insert; the main loop will overwrite later.
+                                        self.node_props_from_create
+                                            .entry(v.clone())
+                                            .or_insert(prop_map);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             for clause in clauses {
                 match clause {
                     Clause::Set(s) => {
@@ -33,6 +62,26 @@ impl TranslationState {
                                         .entry(variable.clone())
                                         .or_default()
                                         .insert(key.clone(), value.clone());
+                                } else {
+                                    // Self-referential SET (e.g. a.nums = a.nums + [4, 5]).
+                                    // If the current value is known, fold the expression statically.
+                                    let current = self
+                                        .node_props_from_create
+                                        .get(variable.as_str())
+                                        .and_then(|m| m.get(key.as_str()))
+                                        .cloned();
+                                    if let Some(cur) = current {
+                                        if let Some(folded) =
+                                            fold_set_list_concat(value, variable, key, &cur)
+                                        {
+                                            self.set_tracked_vars
+                                                .insert((variable.clone(), key.clone()));
+                                            self.node_props_from_create
+                                                .entry(variable.clone())
+                                                .or_default()
+                                                .insert(key.clone(), folded);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1475,7 +1524,11 @@ impl TranslationState {
                                                 .iter()
                                                 .map(|(k, v)| (k.clone(), v.clone()))
                                                 .collect();
-                                            self.node_props_from_create.insert(v.clone(), prop_map);
+                                            // Use entry to avoid overwriting pre-scan folded values
+                                            // (e.g. SET a.prop = a.prop + [4,5] already folded).
+                                            self.node_props_from_create
+                                                .entry(v.clone())
+                                                .or_insert(prop_map);
                                         }
                                     }
                                 }
@@ -1889,5 +1942,76 @@ fn extract_tp_vars_for_scope(tp: &TermPattern, vars: &mut std::collections::Hash
             extract_tp_vars_for_scope(&inner.object, vars);
         }
         _ => {}
+    }
+}
+
+/// Attempt to statically fold a self-referential SET list expression.
+///
+/// For `SET var.key = var.key + rhs_list` (or `lhs_list + var.key`), replace
+/// the property access with `current` (the known current value) and evaluate
+/// the concatenation.  Returns the folded `Expression::List` on success.
+fn fold_set_list_concat(
+    expr: &Expression,
+    var: &str,
+    key: &str,
+    current: &Expression,
+) -> Option<Expression> {
+    match expr {
+        Expression::Add(a, b) => {
+            let a_resolved = resolve_for_fold(a, var, key, current)?;
+            let b_resolved = resolve_for_fold(b, var, key, current)?;
+            let mut items_a = match a_resolved {
+                Expression::List(v) => v,
+                other => vec![other],
+            };
+            let items_b = match b_resolved {
+                Expression::List(v) => v,
+                other => vec![other],
+            };
+            items_a.extend(items_b);
+            Some(Expression::List(items_a))
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a sub-expression for fold: replace `var.key` with `current`,
+/// keep literal lists as-is, keep literal scalars as-is.
+fn resolve_for_fold(
+    expr: &Expression,
+    var: &str,
+    key: &str,
+    current: &Expression,
+) -> Option<Expression> {
+    match expr {
+        Expression::Property(base, prop_key) => {
+            if let Expression::Variable(v) = base.as_ref() {
+                if v.as_str() == var && prop_key.as_str() == key {
+                    return Some(current.clone());
+                }
+            }
+            None
+        }
+        Expression::List(_) => Some(expr.clone()),
+        Expression::Literal(_) => Some(expr.clone()),
+        Expression::Add(a, b) => {
+            // Recurse to handle chained concatenation.
+            fold_set_list_concat(expr, var, key, current)
+                .or_else(|| {
+                    let a_r = resolve_for_fold(a, var, key, current)?;
+                    let b_r = resolve_for_fold(b, var, key, current)?;
+                    let mut items_a = match a_r {
+                        Expression::List(v) => v,
+                        other => vec![other],
+                    };
+                    let items_b = match b_r {
+                        Expression::List(v) => v,
+                        other => vec![other],
+                    };
+                    items_a.extend(items_b);
+                    Some(Expression::List(items_a))
+                })
+        }
+        _ => None,
     }
 }

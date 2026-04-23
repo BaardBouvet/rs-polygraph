@@ -80,6 +80,10 @@ pub struct TckWorld {
     query_error: Option<String>,
     /// When true, skip the result/error assertions for this scenario (unsupported feature).
     skip: bool,
+    /// Last Cypher query executed (for diagnostics).
+    last_cypher: Option<String>,
+    /// Last generated SPARQL (for diagnostics).
+    last_sparql: Option<String>,
 }
 
 impl Default for TckWorld {
@@ -90,6 +94,8 @@ impl Default for TckWorld {
             result_rows: Vec::new(),
             query_error: None,
             skip: false,
+            last_cypher: None,
+            last_sparql: None,
         }
     }
 }
@@ -118,6 +124,13 @@ fn term_to_string(term: &Term) -> String {
                     return stripped;
                 }
             }
+            // For xsd:dateTime — strip trailing :00 seconds similarly.
+            if lit.datatype().as_str() == "http://www.w3.org/2001/XMLSchema#dateTime" {
+                let v = lit.value();
+                if let Some(stripped) = strip_zero_seconds_from_datetime(v) {
+                    return stripped;
+                }
+            }
             lit.value().to_owned()
         }
         Term::NamedNode(nn) => nn.as_str().to_owned(),
@@ -126,16 +139,26 @@ fn term_to_string(term: &Term) -> String {
     }
 }
 
-/// Strip trailing `:00` (zero seconds, no fractional part) from a time string that
-/// includes a timezone offset.  Returns `Some(stripped)` on success, `None` if
-/// the seconds component is not `:00` or no timezone is present.
+/// Strip trailing `:00` (zero seconds, no fractional part) from a time string.
+/// Returns `Some(stripped)` on success, `None` if the seconds component is not
+/// `:00` or if the value has a fractional second part.
 ///
 /// Examples:
 ///   `"10:35:00-08:00"` → `Some("10:35-08:00")`
 ///   `"12:35:15+05:00"` → `None`  (seconds ≠ 0)
-///   `"10:35:00"` → `None`  (no timezone, no stripping needed per Cypher convention)
+///   `"10:35:00"` → `Some("10:35")`  (timezone-free localtime)
 ///   `"10:35:00Z"` → `Some("10:35Z")`
 fn strip_zero_seconds_from_time(v: &str) -> Option<String> {
+    // Handle timezone-free localtime: "HH:MM:00" → "HH:MM" (exactly 8 chars, no fraction/TZ).
+    if v.len() == 8 {
+        let bytes = v.as_bytes();
+        if bytes.get(2) == Some(&b':')
+            && bytes.get(5) == Some(&b':')
+            && &v[6..] == "00"
+        {
+            return Some(v[..5].to_owned());
+        }
+    }
     // Handle "Z" UTC suffix: "HH:MM:00Z" → "HH:MM:Z" → "HH:MMZ"
     if v.ends_with('Z') {
         let body = &v[..v.len() - 1]; // strip trailing 'Z'
@@ -162,6 +185,27 @@ fn strip_zero_seconds_from_time(v: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Strip trailing `:00` seconds from a datetime string (xsd:dateTime) if the seconds
+/// component is exactly zero and there is no fractional second.
+///
+/// Works for timezone-free (`YYYY-MM-DDTHH:MM:00`), `Z`-suffix, numeric-offset, and
+/// named-timezone (`[Region/City]`) forms — matching Cypher's canonical display.
+///
+/// Examples:
+///   `"2015-07-21T21:40:00"` → `Some("2015-07-21T21:40")`
+///   `"2015-07-21T21:40:00-01:30"` → `Some("2015-07-21T21:40-01:30")`
+///   `"1984-10-11T12:00:00+01:00[Europe/Stockholm]"` → `Some("1984-10-11T12:00+01:00[Europe/Stockholm]")`
+///   `"1984-10-11T12:00:42"` → `None`  (seconds ≠ 0)
+fn strip_zero_seconds_from_datetime(v: &str) -> Option<String> {
+    // Must contain 'T' separator
+    let t_pos = v.find('T')?;
+    let date_part = &v[..t_pos];
+    let time_part = &v[t_pos + 1..]; // everything after 'T'
+    // Apply the time-stripping logic from strip_zero_seconds_from_time.
+    let stripped_time = strip_zero_seconds_from_time(time_part)?;
+    Some(format!("{date_part}T{stripped_time}"))
 }
 
 /// Format a float in Cypher/Neo4j style: decimal for reasonable magnitudes, scientific otherwise.
@@ -1650,6 +1694,8 @@ async fn executing_query(world: &mut TckWorld, step: &Step) {
         return;
     }
     let cypher = step.docstring.as_deref().unwrap_or("").trim();
+    // Always capture the Cypher (even if translation fails) for diagnostics.
+    world.last_cypher = Some(cypher.to_string());
 
     let sparql = match Transpiler::cypher_to_sparql(cypher, &ENGINE) {
         Err(e)
@@ -1689,6 +1735,8 @@ async fn executing_query(world: &mut TckWorld, step: &Step) {
         }
         Ok(output) => output.sparql,
     };
+
+    world.last_sparql = Some(sparql.clone());
 
     let store = world
         .store
@@ -1764,6 +1812,13 @@ async fn executing_query(world: &mut TckWorld, step: &Step) {
 
 // ── Then — result assertions ──────────────────────────────────────────────────
 
+/// Helper: format the diagnostic context (Cypher + SPARQL) for failure messages.
+fn diag_context(world: &TckWorld) -> String {
+    let cypher = world.last_cypher.as_deref().unwrap_or("<none>");
+    let sparql = world.last_sparql.as_deref().unwrap_or("<none>");
+    format!("\n--- Cypher ---\n{cypher}\n--- SPARQL ---\n{sparql}\n")
+}
+
 /// Core result comparison logic.
 fn compare_results(world: &TckWorld, step: &Step, ordered: bool, sort_lists: bool) {
     let table = step.table.as_ref().expect("step should have a data table");
@@ -1792,10 +1847,11 @@ fn compare_results(world: &TckWorld, step: &Step, ordered: bool, sort_lists: boo
     }
 
     // Scalar result: full value comparison.
+    let ctx = diag_context(world);
     assert_eq!(
         world.result_rows.len(),
         data_rows.len(),
-        "Row count mismatch: got {}, expected {}\nActual: {:#?}\nExpected: {:#?}",
+        "Row count mismatch: got {}, expected {}\nActual: {:#?}\nExpected: {:#?}{ctx}",
         world.result_rows.len(),
         data_rows.len(),
         world.result_rows,
@@ -1841,7 +1897,7 @@ fn compare_results(world: &TckWorld, step: &Step, ordered: bool, sort_lists: boo
         for (i, (act_row, exp_row)) in actual.iter().zip(expected.iter()).enumerate() {
             assert_eq!(
                 act_row, exp_row,
-                "Row {i} mismatch: got {act_row:?}, expected {exp_row:?}"
+                "Row {i} mismatch: got {act_row:?}, expected {exp_row:?}{ctx}"
             );
         }
     } else {
@@ -1857,7 +1913,7 @@ fn compare_results(world: &TckWorld, step: &Step, ordered: bool, sort_lists: boo
         e_sorted.sort_by_key(key);
         assert_eq!(
             a_sorted, e_sorted,
-            "Result set mismatch (sorted):\n  got:      {a_sorted:#?}\n  expected: {e_sorted:#?}"
+            "Result set mismatch (sorted):\n  got:      {a_sorted:#?}\n  expected: {e_sorted:#?}{ctx}"
         );
     }
 }
@@ -1868,7 +1924,8 @@ async fn result_in_any_order(world: &mut TckWorld, step: &Step) {
         return;
     }
     if let Some(err) = &world.query_error {
-        panic!("Expected success but translation/execution failed: {err}");
+        let ctx = diag_context(world);
+        panic!("Expected success but translation/execution failed: {err}{ctx}");
     }
     compare_results(world, step, false, false);
 }
@@ -1879,7 +1936,8 @@ async fn result_in_order(world: &mut TckWorld, step: &Step) {
         return;
     }
     if let Some(err) = &world.query_error {
-        panic!("Expected success but translation/execution failed: {err}");
+        let ctx = diag_context(world);
+        panic!("Expected success but translation/execution failed: {err}{ctx}");
     }
     compare_results(world, step, true, false);
 }
@@ -1890,7 +1948,8 @@ async fn result_ignoring_list_order(world: &mut TckWorld, step: &Step) {
         return;
     }
     if let Some(err) = &world.query_error {
-        panic!("Expected success but translation/execution failed: {err}");
+        let ctx = diag_context(world);
+        panic!("Expected success but translation/execution failed: {err}{ctx}");
     }
     compare_results(world, step, false, true);
 }

@@ -1713,35 +1713,50 @@ impl TranslationState {
                     }
                     CompOp::StartsWith | CompOp::EndsWith | CompOp::Contains => {
                         // openCypher: returns null if either operand is not a plain string.
-                        // Guard: IF(isLiteral(l) && !isNumeric(l) && isLiteral(r) && !isNumeric(r), fn(l,r), null)
+                        // Guard: isLiteral(x) && datatype(x) = xsd:string
+                        //        && !STRSTARTS(x, "[") && !STRSTARTS(x, "{")
+                        // The last two conditions exclude serialized list/map values
+                        // (e.g. "[]"^^xsd:string, "{}"^^xsd:string) that share the
+                        // xsd:string datatype but are NOT Cypher string values.
                         let xsd_string_nn = NamedNode::new_unchecked(XSD_STRING);
                         let xsd_str_expr = SparExpr::NamedNode(xsd_string_nn);
-                        let l_str = SparExpr::And(
-                            Box::new(SparExpr::FunctionCall(
-                                spargebra::algebra::Function::IsLiteral,
-                                vec![l.clone()],
-                            )),
-                            Box::new(SparExpr::Equal(
+                        // Helper: build the is-plain-string guard for one operand.
+                        let make_str_guard = |x: SparExpr, dt: SparExpr| {
+                            let bracket =
+                                SparExpr::Literal(SparLit::new_simple_literal("["));
+                            let brace =
+                                SparExpr::Literal(SparLit::new_simple_literal("{"));
+                            let not_list = SparExpr::Not(Box::new(SparExpr::FunctionCall(
+                                spargebra::algebra::Function::StrStarts,
+                                vec![x.clone(), bracket],
+                            )));
+                            let not_map = SparExpr::Not(Box::new(SparExpr::FunctionCall(
+                                spargebra::algebra::Function::StrStarts,
+                                vec![x.clone(), brace],
+                            )));
+                            let is_xsd_str = SparExpr::And(
                                 Box::new(SparExpr::FunctionCall(
-                                    spargebra::algebra::Function::Datatype,
-                                    vec![l.clone()],
+                                    spargebra::algebra::Function::IsLiteral,
+                                    vec![x.clone()],
                                 )),
-                                Box::new(xsd_str_expr.clone()),
-                            )),
-                        );
-                        let r_str = SparExpr::And(
-                            Box::new(SparExpr::FunctionCall(
-                                spargebra::algebra::Function::IsLiteral,
-                                vec![r.clone()],
-                            )),
-                            Box::new(SparExpr::Equal(
-                                Box::new(SparExpr::FunctionCall(
-                                    spargebra::algebra::Function::Datatype,
-                                    vec![r.clone()],
+                                Box::new(SparExpr::Equal(
+                                    Box::new(SparExpr::FunctionCall(
+                                        spargebra::algebra::Function::Datatype,
+                                        vec![x],
+                                    )),
+                                    Box::new(dt),
                                 )),
-                                Box::new(xsd_str_expr),
-                            )),
-                        );
+                            );
+                            SparExpr::And(
+                                Box::new(SparExpr::And(
+                                    Box::new(is_xsd_str),
+                                    Box::new(not_list),
+                                )),
+                                Box::new(not_map),
+                            )
+                        };
+                        let l_str = make_str_guard(l.clone(), xsd_str_expr.clone());
+                        let r_str = make_str_guard(r.clone(), xsd_str_expr);
                         let both_str = SparExpr::And(Box::new(l_str), Box::new(r_str));
                         let fn_call = match op {
                             CompOp::StartsWith => SparExpr::FunctionCall(
@@ -2761,12 +2776,12 @@ impl TranslationState {
                     .map(|e| match e {
                         Expression::Literal(Literal::Null) => Ok(vec![None]),
                         Expression::List(_) | Expression::Map(_) => {
-                            // Nested list or map literal: encode as serialized string.
-                            let encoded = serialize_list_element(e);
-                            Ok(vec![Some(GroundTerm::Literal(
-                                SparLit::new_simple_literal(encoded),
-                            ))])
-                        }
+                        // Nested list or map literal: encode as serialized string.
+                        let encoded = serialize_list_element(e);
+                        Ok(vec![Some(GroundTerm::Literal(
+                            SparLit::new_simple_literal(encoded),
+                        ))])
+                    }
                         _ => {
                             let ground = self.expr_to_ground_term(e)?;
                             let gt = term_pattern_to_ground(ground)?;
@@ -3343,7 +3358,9 @@ impl TranslationState {
                                 get_int(pairs, "day"),
                             ) {
                                 let s = format!("{y:04}-{m:02}-{d:02}");
-                                return Ok(SparLit::new_simple_literal(s).into());
+                                return Ok(SparLit::new_typed_literal(s,
+                                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#date")
+                                ).into());
                             }
                         }
                         Err(PolygraphError::UnsupportedFeature {
@@ -3355,11 +3372,12 @@ impl TranslationState {
                             if let (Some(h), Some(min)) =
                                 (get_int(pairs, "hour"), get_int(pairs, "minute"))
                             {
+                                // Always include seconds for valid xsd:time
                                 let s = match (
                                     get_int(pairs, "second"),
                                     get_int(pairs, "nanosecond"),
                                 ) {
-                                    (None, _) => format!("{h:02}:{min:02}"),
+                                    (None, _) => format!("{h:02}:{min:02}:00"),
                                     (Some(sec), None) => {
                                         format!("{h:02}:{min:02}:{sec:02}")
                                     }
@@ -3367,7 +3385,9 @@ impl TranslationState {
                                         format!("{h:02}:{min:02}:{sec:02}.{ns:09}")
                                     }
                                 };
-                                return Ok(SparLit::new_simple_literal(s).into());
+                                return Ok(SparLit::new_typed_literal(s,
+                                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#time")
+                                ).into());
                             }
                         }
                         Err(PolygraphError::UnsupportedFeature {
@@ -3383,12 +3403,13 @@ impl TranslationState {
                                 get_int(pairs, "hour"),
                                 get_int(pairs, "minute"),
                             ) {
+                                // Always include seconds for valid xsd:dateTime
                                 let s = match (
                                     get_int(pairs, "second"),
                                     get_int(pairs, "nanosecond"),
                                 ) {
                                     (None, _) => {
-                                        format!("{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}")
+                                        format!("{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}:00")
                                     }
                                     (Some(sec), None) => {
                                         format!("{y:04}-{mo:02}-{d:02}T{h:02}:{min:02}:{sec:02}")
@@ -3399,7 +3420,9 @@ impl TranslationState {
                                         )
                                     }
                                 };
-                                return Ok(SparLit::new_simple_literal(s).into());
+                                return Ok(SparLit::new_typed_literal(s,
+                                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime")
+                                ).into());
                             }
                         }
                         Err(PolygraphError::UnsupportedFeature {

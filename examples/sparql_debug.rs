@@ -1,23 +1,26 @@
+use polygraph::{Transpiler, sparql_engine::TargetEngine};
+struct E; static ENGINE: E = E;
+impl TargetEngine for E {
+    fn base_iri(&self) -> Option<&str> { None }
+    fn supports_rdf_star(&self) -> bool { false }
+    fn supports_federation(&self) -> bool { false }
+    fn finalize(&self, s: String) -> Result<String, polygraph::PolygraphError> { Ok(s) }
+}
 fn main() {
-    use oxigraph::store::Store;
-    let store = Store::new().unwrap();
-    
-    let tests = vec![
-        ("T3_pass", "SELECT ?a WHERE { { SELECT ?a WHERE { { SELECT ?a WHERE { VALUES (?a) { (1) } } } } LIMIT 1 } }"),
-        ("T3_3var", "SELECT ?a ?b ?c WHERE { { SELECT ?a ?b ?c WHERE { { SELECT ?a ?b ?c WHERE { VALUES (?a ?b ?c) { (1 2 3) } } } } LIMIT 1 } }"),
-        ("T_bind_inner", "SELECT ?a ?b WHERE { { SELECT ?a ?b WHERE { { SELECT ?b ?a WHERE { VALUES (?a ?b) { (1 2) } BIND(?a AS ?b) } } } LIMIT 1 } }"),
-        ("T_outervals", "SELECT ?a ?b WHERE { { SELECT ?a ?b WHERE { { SELECT ?a ?b WHERE { VALUES (?a ?b) { (1 2) } } } } LIMIT 1 } VALUES (?c) { (3) } }"),
+    let queries: &[(&str, &str)] = &[
+        ("simple_none_false", "WITH [1,2,3] AS list WITH none(x IN list WHERE false) AS result RETURN result"),
+        ("case_when_basic", "WITH [1,2,3] AS list WITH CASE WHEN 1 > 0 THEN [1] ELSE [2] END + list AS list2 RETURN list2"),
+        ("reverse_var", "WITH [1,2,3] AS list WITH reverse(list) AS r RETURN r"),
+        ("list_comp_return", "RETURN [x IN [1,2,3] | x * 2] AS result"),
+        ("list_comp_where_static", "WITH [1,2,3] AS list WITH [y IN list WHERE y > 1 | y] AS r RETURN r"),
+        ("list_comp_where_rand", "WITH [1,2,3] AS list WITH [y IN list WHERE rand() > 0.5 | y] AS r RETURN r"),
+        ("properties_n", "MATCH (n:A) RETURN properties(n) AS m"),
+        ("collect_names", "MATCH (n) RETURN [x IN collect(n.name) | x + '!'] AS names"),
     ];
-    
-    for (name, q) in &tests {
-        match store.query(*q) {
-            Ok(oxigraph::sparql::QueryResults::Solutions(mut sols)) => {
-                let mut count = 0;
-                while let Some(Ok(_)) = sols.next() { count += 1; }
-                println!("{name}: OK ({count} rows)");
-            }
-            Err(e) => println!("{name}: ERROR: {e}"),
-            _ => {}
+    for (name, q) in queries {
+        match Transpiler::cypher_to_sparql(q, &ENGINE) {
+            Ok(r) => println!("{name}: OK → {}", &r.sparql[..r.sparql.len().min(150)]),
+            Err(e) => println!("{name}: ERROR → {e}"),
         }
     }
 }
