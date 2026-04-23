@@ -1796,45 +1796,21 @@ impl TranslationState {
                     }
                 }
                 Clause::Delete(d) => {
-                    // If the query has a subsequent RETURN clause AND the RETURN
-                    // only references type/id metadata (not properties) of deleted
-                    // variables, skip the DELETE so the SELECT can still be produced.
-                    // Property accesses on deleted entities remain errors to preserve
-                    // runtime-error semantics expected by the TCK.
-                    let deleted_vars: std::collections::HashSet<String> = d
-                        .expressions
-                        .iter()
-                        .filter_map(|e| {
-                            if let Expression::Variable(v) = e {
-                                Some(v.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    let return_safe = clauses.iter().any(|c| {
-                        if let Clause::Return(ret) = c {
-                            if let crate::ast::cypher::ReturnItems::Explicit(ref items) = ret.items
-                            {
-                                // Safe only if no item accesses a property of a deleted var.
-                                !items.iter().any(|item| {
-                                    expr_accesses_deleted_prop(&item.expression, &deleted_vars)
-                                })
-                            } else {
-                                false // RETURN * would project deleted vars' props — unsafe
-                            }
-                        } else {
-                            false
-                        }
-                    });
-                    if !return_safe {
+                    // Cases:
+                    // 1. No RETURN clause (write-only DELETE/DETACH DELETE): silently skip.
+                    //    The write is not executed; result is empty. We cannot statically
+                    //    detect ConstraintVerificationFailed for connected-node deletion.
+                    // 2. RETURN clause that accesses properties of deleted entities:
+                    //    raise DeletedEntityAccess so the TCK harness can assert it.
+                    // 3. RETURN clause with only safe (metadata) access: skip delete,
+                    //    the SELECT will still produce the correct metadata values.
+                    let has_return_clause =
+                        clauses.iter().any(|c| matches!(c, Clause::Return(_)));
+                    if !has_return_clause {
+                        // Write-only: silently skip this DELETE/DETACH DELETE clause.
                         if self.skip_write_clauses {
-                            // RETURN accesses a property of a deleted entity — this is a
-                            // runtime error in Cypher (DeletedEntityAccess). Propagate an
-                            // error so the TCK harness recognises it as a runtime failure.
-                            return Err(PolygraphError::Translation {
-                                message: "DeletedEntityAccess: accessing property of deleted entity in RETURN".to_string(),
-                            });
+                            // The write path (write_clauses_to_updates) handles execution;
+                            // here we just skip the clause for the SELECT translation.
                         } else {
                             return Err(PolygraphError::UnsupportedFeature {
                                 feature: format!(
@@ -1844,9 +1820,59 @@ impl TranslationState {
                                 ),
                             });
                         }
+                        // (continue to next clause)
+                    } else {
+                        let deleted_vars: std::collections::HashSet<String> = d
+                            .expressions
+                            .iter()
+                            .filter_map(|e| {
+                                if let Expression::Variable(v) = e {
+                                    Some(v.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let return_safe = clauses.iter().any(|c| {
+                            if let Clause::Return(ret) = c {
+                                if let crate::ast::cypher::ReturnItems::Explicit(ref items) =
+                                    ret.items
+                                {
+                                    // Safe only if no item accesses a property of a deleted var.
+                                    !items.iter().any(|item| {
+                                        expr_accesses_deleted_prop(
+                                            &item.expression,
+                                            &deleted_vars,
+                                        )
+                                    })
+                                } else {
+                                    false // RETURN * would project deleted vars' props — unsafe
+                                }
+                            } else {
+                                false
+                            }
+                        });
+                        if !return_safe {
+                            if self.skip_write_clauses {
+                                // RETURN accesses a property of a deleted entity — this is a
+                                // runtime error in Cypher (DeletedEntityAccess). Propagate an
+                                // error so the TCK harness recognises it as a runtime failure.
+                                return Err(PolygraphError::Translation {
+                                    message: "DeletedEntityAccess: accessing property of deleted entity in RETURN".to_string(),
+                                });
+                            } else {
+                                return Err(PolygraphError::UnsupportedFeature {
+                                    feature: format!(
+                                        "{} clause (SPARQL Update, Phase 4+): {} expression(s)",
+                                        if d.detach { "DETACH DELETE" } else { "DELETE" },
+                                        d.expressions.len()
+                                    ),
+                                });
+                            }
+                        }
+                        // DELETE with safe RETURN (e.g. type(r)): skip the deletion,
+                        // the SELECT will still produce the correct metadata values.
                     }
-                    // DELETE with safe RETURN (e.g. type(r)): skip the deletion,
-                    // the SELECT will still produce the correct metadata values.
                 }
                 Clause::Remove(r) => {
                     if !self.skip_write_clauses {

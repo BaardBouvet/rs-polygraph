@@ -41,8 +41,8 @@ fn lit_str(val: &str) -> Option<RdfTerm> {
 fn schema_scalar_property_access() {
     let output = Transpiler::cypher_to_sparql("MATCH (n:Person) RETURN n.name", &ENGINE).unwrap();
 
-    assert_eq!(output.schema.columns.len(), 1);
-    let col = &output.schema.columns[0];
+    assert_eq!(output.schema().unwrap().columns.len(), 1);
+    let col = &output.schema().unwrap().columns[0];
     // n.name should be classified as Scalar (it's a property access, not a node).
     assert!(matches!(col.kind, ColumnKind::Scalar { .. }));
 }
@@ -51,8 +51,8 @@ fn schema_scalar_property_access() {
 fn schema_node_variable() {
     let output = Transpiler::cypher_to_sparql("MATCH (n:Person) RETURN n", &ENGINE).unwrap();
 
-    assert_eq!(output.schema.columns.len(), 1);
-    let col = &output.schema.columns[0];
+    assert_eq!(output.schema().unwrap().columns.len(), 1);
+    let col = &output.schema().unwrap().columns[0];
     assert_eq!(col.name, "n");
     assert!(matches!(col.kind, ColumnKind::Node { .. }));
     if let ColumnKind::Node { iri_var } = &col.kind {
@@ -66,8 +66,8 @@ fn schema_aliased_property() {
         Transpiler::cypher_to_sparql("MATCH (n:Person) RETURN n.name AS fullName", &ENGINE)
             .unwrap();
 
-    assert_eq!(output.schema.columns.len(), 1);
-    let col = &output.schema.columns[0];
+    assert_eq!(output.schema().unwrap().columns.len(), 1);
+    let col = &output.schema().unwrap().columns[0];
     assert_eq!(col.name, "fullName");
     assert!(matches!(col.kind, ColumnKind::Scalar { .. }));
 }
@@ -75,7 +75,7 @@ fn schema_aliased_property() {
 #[test]
 fn schema_distinct_flag() {
     let output = Transpiler::cypher_to_sparql("MATCH (n) RETURN DISTINCT n.name", &ENGINE).unwrap();
-    assert!(output.schema.distinct);
+    assert!(output.schema().unwrap().distinct);
 }
 
 #[test]
@@ -86,20 +86,20 @@ fn schema_multiple_columns() {
     )
     .unwrap();
 
-    assert_eq!(output.schema.columns.len(), 3);
-    assert_eq!(output.schema.columns[0].name, "a");
+    assert_eq!(output.schema().unwrap().columns.len(), 3);
+    assert_eq!(output.schema().unwrap().columns[0].name, "a");
     assert!(matches!(
-        output.schema.columns[0].kind,
+        output.schema().unwrap().columns[0].kind,
         ColumnKind::Node { .. }
     ));
-    assert_eq!(output.schema.columns[1].name, "b");
+    assert_eq!(output.schema().unwrap().columns[1].name, "b");
     assert!(matches!(
-        output.schema.columns[1].kind,
+        output.schema().unwrap().columns[1].kind,
         ColumnKind::Node { .. }
     ));
-    assert_eq!(output.schema.columns[2].name, "name");
+    assert_eq!(output.schema().unwrap().columns[2].name, "name");
     assert!(matches!(
-        output.schema.columns[2].kind,
+        output.schema().unwrap().columns[2].kind,
         ColumnKind::Scalar { .. }
     ));
 }
@@ -108,10 +108,10 @@ fn schema_multiple_columns() {
 fn schema_aggregate_is_scalar() {
     let output = Transpiler::cypher_to_sparql("MATCH (n) RETURN count(n) AS cnt", &ENGINE).unwrap();
 
-    assert_eq!(output.schema.columns.len(), 1);
-    assert_eq!(output.schema.columns[0].name, "cnt");
+    assert_eq!(output.schema().unwrap().columns.len(), 1);
+    assert_eq!(output.schema().unwrap().columns[0].name, "cnt");
     assert!(matches!(
-        output.schema.columns[0].kind,
+        output.schema().unwrap().columns[0].kind,
         ColumnKind::Scalar { .. }
     ));
 }
@@ -124,7 +124,7 @@ fn map_scalar_integer_results() {
 
     // Simulate SPARQL engine returning one row with count=5.
     // We need to know the SPARQL variable name for the count column.
-    if let ColumnKind::Scalar { var } = &output.schema.columns[0].kind {
+    if let ColumnKind::Scalar { var } = &output.schema().unwrap().columns[0].kind {
         let solutions = vec![solution(vec![(var.as_str(), lit_int("5"))])];
         let rows = output.map_results(&solutions).unwrap();
         assert_eq!(rows.len(), 1);
@@ -138,7 +138,7 @@ fn map_scalar_integer_results() {
 fn map_null_for_unbound() {
     let output = Transpiler::cypher_to_sparql("MATCH (n) RETURN n.name AS name", &ENGINE).unwrap();
 
-    if let ColumnKind::Scalar { var } = &output.schema.columns[0].kind {
+    if let ColumnKind::Scalar { var } = &output.schema().unwrap().columns[0].kind {
         let solutions = vec![solution(vec![(var.as_str(), None)])];
         let rows = output.map_results(&solutions).unwrap();
         assert_eq!(rows[0]["name"], CypherValue::Null);
@@ -161,6 +161,6 @@ fn output_contains_sparql_and_schema() {
     let output =
         Transpiler::cypher_to_sparql("MATCH (n:Person) WHERE n.age > 30 RETURN n.name", &ENGINE)
             .unwrap();
-    assert!(output.sparql.contains("SELECT"));
-    assert_eq!(output.schema.columns.len(), 1);
+    assert!(output.sparql().unwrap().contains("SELECT"));
+    assert_eq!(output.schema().unwrap().columns.len(), 1);
 }

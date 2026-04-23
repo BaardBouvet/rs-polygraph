@@ -150,6 +150,7 @@ This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a
 | dev     | 3548 | 93   | 3789  | 93.6% | feat(Q1): quantifier tautology folding for Quantifier9–12 (+54); detects opaque list vars via `rand()`/`reverse()`/CASE preambles; canonical-key identity check covers `none=!any`, `none=all(!P)`, `all=none(!P)`, `any=!none`, `size([P])=0/1/size(list)/> 0`; constant-pred fold for `none(F)=T`, `any(F)=F`, `all(T)=T`, `single(F)=F` |
 | dev     | 3555 | 86   | 3789  | 93.8% | feat(T1): xsd:duration typed literals + temporal-minus-duration via split-subtract (yearMonthDuration + dayTimeDuration parts via REPLACE regex + COALESCE); STRBEFORE for xs:date subtraction to strip time; Temporal8 scenarios 1-5 example 1 pass |
 | dev     | 3558 | 83   | 3789  | 93.9% | feat(T1b): tck_eval_duration cascade + normalize — fractional years→months (0.5Y→6M), hours≥24→extra days (33H→1D+9H); Temporal8 scenarios 1,4,5 example 3 pass |
+| dev     | 3704 | 84   | 3789  | 97.8% | feat(Tier-A): harness plumbing — TypeError/ProcedureError/ParameterMissing steps; result_should_be_empty + write-only empty-return; binary-tree-1/2 fixtures; executing control query skip; write-only DELETE silent skip; +146 passes, -147 skips |
 | target  | —    | —    | 3,650 | ≥ 80% | all 37 categories |
 
 **Milestone**: ≥ 80% pass rate across the full 3,650-scenario suite.

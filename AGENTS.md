@@ -17,6 +17,7 @@ All design documents live in `plans/`. Each file carries a **Status** and **Upda
 | [result-mapping.md](plans/result-mapping.md) | in progress | SPARQL results → openCypher values hydration API |
 | [tck-full-plan.md](plans/tck-full-plan.md) | in progress | Full 3,650-scenario TCK expansion (Phases A–D) |
 | [remaining-failures.md](plans/remaining-failures.md) | in progress | Triage of remaining TCK failures + architecture improvements to speed iteration |
+| [remaining-work.md](plans/remaining-work.md) | planned | Phased plan covering all 83 failures, 148 skips, and 8 parse errors with ROI-ordered tiers |
 | [l2-runtime-support.md](plans/l2-runtime-support.md) | planned | Multi-phase (L2) runtime API to close remaining failures + skipped scenarios; `TranspileOutput::Continuation` design |
 | [target-engines.md](plans/target-engines.md) | reference | SPARQL engine capability analysis (`TargetEngine` trait) |
 | [parser-extraction.md](plans/parser-extraction.md) | planned | Extract parser/AST into standalone crate for non-SPARQL reuse |
