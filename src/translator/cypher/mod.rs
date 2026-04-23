@@ -80,6 +80,94 @@ pub fn translate_skip_writes(
     translate_impl(query, base_iri, rdf_star, true)
 }
 
+/// Compare two Cypher literal expressions using Cypher's ascending type ordering.
+///
+/// Type order (ascending): map(0) < list(3) < string(5) < boolean(6/7) < number(8) < null(100).
+/// Within the same type group, values are compared naturally.
+/// Null sorts highest (excluded from min/max aggregate results).
+fn cypher_compare(
+    a: &crate::ast::cypher::Expression,
+    b: &crate::ast::cypher::Expression,
+) -> std::cmp::Ordering {
+    use crate::ast::cypher::{Expression, Literal};
+
+    fn type_rank(e: &Expression) -> u8 {
+        match e {
+            Expression::Literal(Literal::Null) => 100,
+            Expression::Map(_) => 0,
+            Expression::List(_) => 3,
+            Expression::Literal(Literal::String(_)) => 5,
+            Expression::Literal(Literal::Boolean(false)) => 6,
+            Expression::Literal(Literal::Boolean(true)) => 7,
+            Expression::Literal(Literal::Integer(_) | Literal::Float(_)) => 8,
+            _ => 50,
+        }
+    }
+
+    let ra = type_rank(a);
+    let rb = type_rank(b);
+    if ra != rb {
+        return ra.cmp(&rb);
+    }
+    // Same type group: compare by value
+    match (a, b) {
+        (Expression::Literal(Literal::Integer(x)), Expression::Literal(Literal::Integer(y))) => {
+            x.cmp(y)
+        }
+        (Expression::Literal(Literal::Float(x)), Expression::Literal(Literal::Float(y))) => {
+            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Expression::Literal(Literal::Integer(x)), Expression::Literal(Literal::Float(y))) => {
+            (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Expression::Literal(Literal::Float(x)), Expression::Literal(Literal::Integer(y))) => {
+            x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Expression::Literal(Literal::String(x)), Expression::Literal(Literal::String(y))) => {
+            x.cmp(y)
+        }
+        (Expression::Literal(Literal::Boolean(x)), Expression::Literal(Literal::Boolean(y))) => {
+            x.cmp(y)
+        }
+        (Expression::List(xs), Expression::List(ys)) => {
+            for (xi, yi) in xs.iter().zip(ys.iter()) {
+                let ord = cypher_compare(xi, yi);
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            xs.len().cmp(&ys.len())
+        }
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+/// Convert a Cypher literal expression to a SPARQL `GroundTerm` for use in VALUES bindings.
+///
+/// Returns `None` for `null` (mapped to SPARQL UNDEF), `Some(gt)` for all other literals.
+fn literal_expr_to_ground_term(e: &crate::ast::cypher::Expression) -> Option<GroundTerm> {
+    use crate::ast::cypher::{Expression, Literal};
+    match e {
+        Expression::Literal(Literal::Null) => None,
+        Expression::Literal(Literal::Integer(n)) => Some(GroundTerm::Literal(
+            SparLit::new_typed_literal(n.to_string(), NamedNode::new_unchecked(XSD_INTEGER)),
+        )),
+        Expression::Literal(Literal::Float(f)) => Some(GroundTerm::Literal(
+            SparLit::new_typed_literal(f.to_string(), NamedNode::new_unchecked(XSD_DOUBLE)),
+        )),
+        Expression::Literal(Literal::String(s)) => {
+            Some(GroundTerm::Literal(SparLit::new_simple_literal(s.clone())))
+        }
+        Expression::Literal(Literal::Boolean(b)) => Some(GroundTerm::Literal(
+            SparLit::new_typed_literal(b.to_string(), NamedNode::new_unchecked(XSD_BOOLEAN)),
+        )),
+        Expression::List(_) | Expression::Map(_) => Some(GroundTerm::Literal(
+            SparLit::new_simple_literal(serialize_list_element(e)),
+        )),
+        _ => None, // non-literal: skip
+    }
+}
+
 fn translate_impl(
     query: &CypherQuery,
     base_iri: Option<&str>,
@@ -1000,7 +1088,129 @@ impl TranslationState {
             return self.translate_union_query(&clauses);
         }
 
+        // A1: compile-time fold for UNWIND [literals] AS x RETURN min/max(x).
+        // For list and mixed-type UNWIND values the normal SPARQL MAX/MIN uses
+        // string comparison on our encoded strings, which does not match Cypher's
+        // cross-type and list ordering rules.  Instead, we compute the extremum
+        // at translation time using the same sort key logic and emit a constant.
+        if let Some(gp) = self.try_fold_minmax_aggregate(&clauses) {
+            return Ok(gp);
+        }
+
         self.translate_clause_sequence(&clauses)
+    }
+
+    /// Attempt to fold `UNWIND [literals] AS x RETURN min(x)` / `max(x)` at
+    /// compile time when the list contains nested lists or mixed types whose
+    /// extremum SPARQL cannot compute correctly via string comparison.
+    ///
+    /// Returns `Some(GraphPattern)` if this optimisation applies; the returned
+    /// pattern is a constant single-row `VALUES` block. Also populates
+    /// `self.projected_columns` to match the pre-computed schema.
+    ///
+    /// Returns `None` if the pattern does not match (caller falls through to
+    /// the normal translation path).
+    fn try_fold_minmax_aggregate(&mut self, clauses: &[Clause]) -> Option<GraphPattern> {
+        use crate::ast::cypher::{AggregateExpr, Expression, Literal, ReturnItems};
+        use crate::result_mapping::schema::{ColumnKind, ProjectedColumn};
+
+        // Must be exactly: UNWIND then RETURN.
+        if clauses.len() != 2 {
+            return None;
+        }
+        let (unwind_var, items) = match &clauses[0] {
+            Clause::Unwind(u) => {
+                if let Expression::List(items) = &u.expression {
+                    (u.variable.as_str(), items.as_slice())
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+        let ret = match &clauses[1] {
+            Clause::Return(r) => r,
+            _ => return None,
+        };
+
+        // Only fold when RETURN has no ordering/pagination and all items are min/max aggregates
+        if ret.order_by.is_some() || ret.skip.is_some() || ret.limit.is_some() || ret.distinct {
+            return None;
+        }
+        let ret_items = match &ret.items {
+            ReturnItems::Explicit(items) => items,
+            _ => return None,
+        };
+        if ret_items.is_empty() {
+            return None;
+        }
+
+        // Check that all RETURN items are min(v) or max(v) over the UNWIND variable
+        // and that the input contains nested lists, maps, or mixed types (cases our
+        // SPARQL string comparison gets wrong).
+        let needs_fold = items.iter().any(|e| {
+            matches!(
+                e,
+                Expression::List(_)
+                    | Expression::Map(_)
+                    | Expression::Literal(Literal::String(_))
+                    | Expression::Literal(Literal::Boolean(_))
+                    | Expression::Literal(Literal::Float(_))
+            )
+        });
+        if !needs_fold {
+            return None;
+        }
+
+        // Non-null items only (null is excluded from min/max).
+        let non_null: Vec<&Expression> = items
+            .iter()
+            .filter(|e| !matches!(e, Expression::Literal(Literal::Null)))
+            .collect();
+
+        let mut result_vars: Vec<Variable> = Vec::new();
+        let mut result_binding: Vec<Option<GroundTerm>> = Vec::new();
+
+        for ri in ret_items {
+            let agg = match &ri.expression {
+                Expression::Aggregate(a) => a,
+                _ => return None, // non-aggregate RETURN item: don't fold
+            };
+            // Check that the aggregate is min(v) or max(v) over the unwind variable
+            let (is_max, inner_var) = match agg {
+                AggregateExpr::Max { expr, .. } => (true, expr.as_ref()),
+                AggregateExpr::Min { expr, .. } => (false, expr.as_ref()),
+                _ => return None,
+            };
+            match inner_var {
+                Expression::Variable(v) if v.as_str() == unwind_var => {}
+                _ => return None,
+            }
+
+            // Compute the extremum using Cypher comparison semantics.
+            let extremum: Option<&&Expression> = if is_max {
+                non_null.iter().max_by(|a, b| cypher_compare(a, b))
+            } else {
+                non_null.iter().min_by(|a, b| cypher_compare(a, b))
+            };
+
+            let gt = extremum.and_then(|e| literal_expr_to_ground_term(e));
+            let var_name = format!("__fold_{}", result_vars.len());
+            let var = Variable::new_unchecked(var_name.clone());
+
+            // Populate projected columns so build_schema() works correctly.
+            self.projected_columns.push(ProjectedColumn {
+                name: var_name.clone(),
+                kind: ColumnKind::Scalar { var: var_name },
+            });
+            result_vars.push(var);
+            result_binding.push(gt);
+        }
+
+        Some(GraphPattern::Values {
+            variables: result_vars,
+            bindings: vec![result_binding],
+        })
     }
 
     /// Split a clause list on `Clause::Union` markers, translate each arm with
