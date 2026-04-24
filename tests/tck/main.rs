@@ -1728,9 +1728,14 @@ CREATE (b1)-[:FRIEND]->(b2), (b2)-[:FRIEND]->(b3),
        (b3)-[:FRIEND]->(b4), (b4)-[:FRIEND]->(b1)
 "#;
     match create_to_insert_data(cypher) {
-        Err(e) => { eprintln!("[TCK fixture] binary-tree-1 parse failed: {e}"); world.skip = true; }
+        Err(e) => {
+            eprintln!("[TCK fixture] binary-tree-1 parse failed: {e}");
+            world.skip = true;
+        }
         Ok(insert_sparql) => {
-            let store = world.store.get_or_insert_with(|| OxStore(Store::new().unwrap()));
+            let store = world
+                .store
+                .get_or_insert_with(|| OxStore(Store::new().unwrap()));
             if let Err(e) = store.0.update(insert_sparql.as_str()) {
                 eprintln!("[TCK fixture] binary-tree-1 insert failed: {e}");
                 world.skip = true;
@@ -1762,9 +1767,14 @@ CREATE (b1)-[:FRIEND]->(b2), (b2)-[:FRIEND]->(b3),
        (b3)-[:FRIEND]->(b4), (b4)-[:FRIEND]->(b1)
 "#;
     match create_to_insert_data(cypher) {
-        Err(e) => { eprintln!("[TCK fixture] binary-tree-2 parse failed: {e}"); world.skip = true; }
+        Err(e) => {
+            eprintln!("[TCK fixture] binary-tree-2 parse failed: {e}");
+            world.skip = true;
+        }
         Ok(insert_sparql) => {
-            let store = world.store.get_or_insert_with(|| OxStore(Store::new().unwrap()));
+            let store = world
+                .store
+                .get_or_insert_with(|| OxStore(Store::new().unwrap()));
             if let Err(e) = store.0.update(insert_sparql.as_str()) {
                 eprintln!("[TCK fixture] binary-tree-2 insert failed: {e}");
                 world.skip = true;
@@ -1827,9 +1837,9 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
             // intermediate bound variables (e.g. from WITH).
             let write_only = {
                 use polygraph::ast::cypher::Clause;
-                parse_cypher(cypher).map(|ast| {
-                    !ast.clauses.iter().any(|c| matches!(c, Clause::Return(_)))
-                }).unwrap_or(true)
+                parse_cypher(cypher)
+                    .map(|ast| !ast.clauses.iter().any(|c| matches!(c, Clause::Return(_))))
+                    .unwrap_or(true)
             };
             match Transpiler::cypher_to_sparql_skip_writes(cypher, &ENGINE) {
                 Ok(output) => match output {

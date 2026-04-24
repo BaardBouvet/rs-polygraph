@@ -809,9 +809,8 @@ impl TranslationState {
                                     }
                                 }
                             }
-                            let with_needs_outer_project =
-                                with_needs_outer_project
-                                    || inner_vars.len() > original_inner_vars.len();
+                            let with_needs_outer_project = with_needs_outer_project
+                                || inner_vars.len() > original_inner_vars.len();
                             current = GraphPattern::Project {
                                 inner: Box::new(current),
                                 variables: inner_vars,
@@ -1804,8 +1803,7 @@ impl TranslationState {
                     //    raise DeletedEntityAccess so the TCK harness can assert it.
                     // 3. RETURN clause with only safe (metadata) access: skip delete,
                     //    the SELECT will still produce the correct metadata values.
-                    let has_return_clause =
-                        clauses.iter().any(|c| matches!(c, Clause::Return(_)));
+                    let has_return_clause = clauses.iter().any(|c| matches!(c, Clause::Return(_)));
                     if !has_return_clause {
                         // Write-only: silently skip this DELETE/DETACH DELETE clause.
                         if self.skip_write_clauses {
@@ -1840,10 +1838,7 @@ impl TranslationState {
                                 {
                                     // Safe only if no item accesses a property of a deleted var.
                                     !items.iter().any(|item| {
-                                        expr_accesses_deleted_prop(
-                                            &item.expression,
-                                            &deleted_vars,
-                                        )
+                                        expr_accesses_deleted_prop(&item.expression, &deleted_vars)
                                     })
                                 } else {
                                     false // RETURN * would project deleted vars' props — unsafe
