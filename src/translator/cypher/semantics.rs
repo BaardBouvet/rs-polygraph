@@ -1020,6 +1020,59 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                             });
                         }
                     }
+                    // SyntaxError: UnexpectedSyntax — patterns are not allowed inside
+                    // SET RHS expressions (e.g. SET n.p = head((n)-[:R]->()).foo).
+                    if let crate::ast::cypher::SetItem::Property { value, .. } = item {
+                        fn contains_pattern_expr(e: &Expression) -> bool {
+                            match e {
+                                Expression::PatternComprehension { .. } => true,
+                                Expression::FunctionCall { args, .. } => {
+                                    args.iter().any(contains_pattern_expr)
+                                }
+                                Expression::Property(b, _) => contains_pattern_expr(b),
+                                Expression::Subscript(a, b) => {
+                                    contains_pattern_expr(a) || contains_pattern_expr(b)
+                                }
+                                Expression::ListSlice { list, start, end } => {
+                                    contains_pattern_expr(list)
+                                        || start.as_deref().map(contains_pattern_expr).unwrap_or(false)
+                                        || end.as_deref().map(contains_pattern_expr).unwrap_or(false)
+                                }
+                                Expression::ListComprehension { list, predicate, projection, .. } => {
+                                    contains_pattern_expr(list)
+                                        || predicate.as_deref().map(contains_pattern_expr).unwrap_or(false)
+                                        || projection.as_deref().map(contains_pattern_expr).unwrap_or(false)
+                                }
+                                Expression::QuantifierExpr { list, predicate, .. } => {
+                                    contains_pattern_expr(list)
+                                        || predicate.as_deref().map(contains_pattern_expr).unwrap_or(false)
+                                }
+                                Expression::Add(a, b)
+                                | Expression::Subtract(a, b)
+                                | Expression::Multiply(a, b)
+                                | Expression::Divide(a, b)
+                                | Expression::Comparison(a, _, b)
+                                | Expression::And(a, b)
+                                | Expression::Or(a, b) => {
+                                    contains_pattern_expr(a) || contains_pattern_expr(b)
+                                }
+                                Expression::Not(e)
+                                | Expression::Negate(e)
+                                | Expression::IsNull(e)
+                                | Expression::IsNotNull(e) => contains_pattern_expr(e),
+                                Expression::List(items) => items.iter().any(contains_pattern_expr),
+                                Expression::Map(pairs) => {
+                                    pairs.iter().any(|(_, v)| contains_pattern_expr(v))
+                                }
+                                _ => false,
+                            }
+                        }
+                        if contains_pattern_expr(value) {
+                            return Err(PolygraphError::Translation {
+                                message: "SyntaxError: UnexpectedSyntax: patterns are not allowed inside SET RHS expressions".to_string(),
+                            });
+                        }
+                    }
                     if let Some(rhs) = rhs_opt {
                         fn collect_set_rhs_vars(expr: &Expression, vars: &mut Vec<String>) {
                             match expr {

@@ -1334,9 +1334,93 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
         Rule::reduce_expr => Err(PolygraphError::UnsupportedFeature {
             feature: "REDUCE expression".to_string(),
         }),
-        Rule::exists_subquery => Err(PolygraphError::UnsupportedFeature {
-            feature: "EXISTS subquery".to_string(),
-        }),
+        Rule::exists_subquery => {
+            // exists_subquery = { kw_EXISTS ~ "{" ~ (statement | (pattern_list ~ where_clause?)) ~ "}" }
+            // We currently only support the simple form: pattern_list with optional WHERE.
+            let mut patterns: Option<PatternList> = None;
+            let mut where_expr: Option<Box<Expression>> = None;
+            for child in inner.into_inner() {
+                match child.as_rule() {
+                    Rule::pattern_list => patterns = Some(build_pattern_list(child)?),
+                    Rule::where_clause => {
+                        where_expr = Some(Box::new(build_where_clause(child)?.expression));
+                    }
+                    Rule::statement => {
+                        // Lower a simple `EXISTS { MATCH pat [WHERE pred] RETURN ... }`
+                        // into ExistsSubquery { patterns, where_ }. Reject anything more
+                        // complex (multiple MATCH, WITH, writes, UNION, etc.).
+                        let mut single_queries: Vec<Pair<Rule>> = Vec::new();
+                        for sq in child.into_inner() {
+                            if sq.as_rule() == Rule::single_query {
+                                single_queries.push(sq);
+                            }
+                        }
+                        if single_queries.len() != 1 {
+                            return Err(PolygraphError::UnsupportedFeature {
+                                feature: "EXISTS subquery with UNION (Phase 4+)".to_string(),
+                            });
+                        }
+                        let mut found_match: Option<Pair<Rule>> = None;
+                        let mut found_where: Option<Pair<Rule>> = None;
+                        let mut saw_return = false;
+                        for cl in single_queries.remove(0).into_inner() {
+                            if cl.as_rule() != Rule::clause {
+                                continue;
+                            }
+                            for inner_cl in cl.into_inner() {
+                                match inner_cl.as_rule() {
+                                    Rule::match_clause => {
+                                        if found_match.is_some() {
+                                            return Err(PolygraphError::UnsupportedFeature {
+                                                feature: "EXISTS subquery with multiple MATCH (Phase 4+)".to_string(),
+                                            });
+                                        }
+                                        // Extract pattern_list and optional where from match_clause.
+                                        for mc_inner in inner_cl.into_inner() {
+                                            match mc_inner.as_rule() {
+                                                Rule::pattern_list => {
+                                                    found_match = Some(mc_inner);
+                                                }
+                                                Rule::where_clause => {
+                                                    found_where = Some(mc_inner);
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    Rule::return_clause => {
+                                        // Ignore RETURN body; existence only depends on
+                                        // whether the WHERE matches.
+                                        saw_return = true;
+                                    }
+                                    _ => {
+                                        return Err(PolygraphError::UnsupportedFeature {
+                                            feature: "EXISTS subquery with non-MATCH/RETURN clauses (Phase 4+)".to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        let _ = saw_return;
+                        let pl_pair = found_match.ok_or_else(|| PolygraphError::UnsupportedFeature {
+                            feature: "EXISTS subquery without MATCH".to_string(),
+                        })?;
+                        patterns = Some(build_pattern_list(pl_pair)?);
+                        if let Some(wp) = found_where {
+                            where_expr = Some(Box::new(build_where_clause(wp)?.expression));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let pl = patterns.ok_or_else(|| PolygraphError::UnsupportedFeature {
+                feature: "EXISTS subquery with no pattern".to_string(),
+            })?;
+            Ok(Expression::ExistsSubquery {
+                patterns: pl,
+                where_: where_expr,
+            })
+        }
         Rule::shortest_path_atom => Err(PolygraphError::UnsupportedFeature {
             feature: "shortestPath / allShortestPaths expression".to_string(),
         }),

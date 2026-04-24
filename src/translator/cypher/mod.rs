@@ -1497,7 +1497,7 @@ impl TranslationState {
     /// Returns `Some(GraphPattern)` (a constant `VALUES`) if folding applies.
     /// Returns `None` to fall through to normal translation.
     fn try_fold_quantifier_invariants(&mut self, clauses: &[Clause]) -> Option<GraphPattern> {
-        use crate::ast::cypher::{AggregateExpr, ReturnItems};
+        use crate::ast::cypher::ReturnItems;
         use crate::result_mapping::schema::{ColumnKind, ProjectedColumn};
 
         // ── Step 1: Build opaque list variable set ────────────────────────────
@@ -2802,6 +2802,26 @@ impl TranslationState {
                     patterns: inner_triples,
                 };
                 let combined = inner_paths.into_iter().fold(bgp, join_patterns);
+                Ok(SparExpr::Exists(Box::new(combined)))
+            }
+            Expression::ExistsSubquery { patterns, where_ } => {
+                // EXISTS { pat[, pat...] [WHERE pred] } → SPARQL EXISTS { joined BGP . FILTER pred }
+                let mut inner_triples: Vec<TriplePattern> = Vec::new();
+                let mut inner_paths: Vec<GraphPattern> = Vec::new();
+                for p in &patterns.0 {
+                    self.translate_pattern(p, &mut inner_triples, &mut inner_paths)?;
+                }
+                let bgp = GraphPattern::Bgp {
+                    patterns: inner_triples,
+                };
+                let mut combined = inner_paths.into_iter().fold(bgp, join_patterns);
+                if let Some(w) = where_ {
+                    let filter_expr = self.translate_expr(w, extra)?;
+                    combined = GraphPattern::Filter {
+                        expr: filter_expr,
+                        inner: Box::new(combined),
+                    };
+                }
                 Ok(SparExpr::Exists(Box::new(combined)))
             }
             Expression::Aggregate(agg) => {

@@ -1237,6 +1237,19 @@ impl TranslationState {
             _ => (src.clone(), dst.clone()),
         };
 
+        // If the requested range is empty (lower > upper) emit a pattern that
+        // matches no rows so surrounding WHERE yields zero solutions.
+        if lower > upper {
+            path_patterns.push(GraphPattern::Filter {
+                expr: SparExpr::Literal(SparLit::new_typed_literal(
+                    "false",
+                    NamedNode::new_unchecked(XSD_BOOLEAN),
+                )),
+                inner: Box::new(empty_bgp()),
+            });
+            return Ok(());
+        }
+
         let mut union_patterns: Vec<GraphPattern> = Vec::new();
 
         for hop_count in lower..=upper {

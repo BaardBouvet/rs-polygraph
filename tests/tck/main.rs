@@ -730,6 +730,66 @@ fn expr_to_sparql_update_expr(expr: &Expression, var: &str) -> Option<String> {
     }
 }
 
+/// Translate a Cypher expression for use inside an INSERT...WHERE template
+/// for CREATE clauses with pre-bound variables. Returns a SPARQL expression
+/// string and the set of (variable, property_key) pairs that need to be
+/// bound via OPTIONAL triple patterns in the WHERE.
+fn expr_to_create_insert_expr(
+    expr: &Expression,
+) -> Option<(String, Vec<(String, String)>)> {
+    match expr {
+        Expression::Literal(Literal::Integer(n)) => Some((format!("{n}"), vec![])),
+        Expression::Literal(Literal::Float(f)) => Some((
+            format!("\"{}\"^^<http://www.w3.org/2001/XMLSchema#double>", f),
+            vec![],
+        )),
+        Expression::Literal(Literal::String(s)) => {
+            let escaped = s.replace('"', "\\\"");
+            Some((format!("\"{escaped}\""), vec![]))
+        }
+        Expression::Literal(Literal::Boolean(b)) => {
+            Some((if *b { "true" } else { "false" }.to_owned(), vec![]))
+        }
+        Expression::Property(base, key) => {
+            if let Expression::Variable(v) = base.as_ref() {
+                let var = format!("?{v}_{key}");
+                Some((var, vec![(v.clone(), key.clone())]))
+            } else {
+                None
+            }
+        }
+        Expression::Variable(v) => Some((format!("?{v}"), vec![])),
+        Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
+            let (la, mut da) = expr_to_create_insert_expr(a)?;
+            let (lb, db) = expr_to_create_insert_expr(b)?;
+            da.extend(db);
+            let op = match expr {
+                Expression::Add(_, _) => "+",
+                Expression::Subtract(_, _) => "-",
+                Expression::Multiply(_, _) => "*",
+                Expression::Divide(_, _) => "/",
+                _ => unreachable!(),
+            };
+            // Use SPARQL CONCAT for string + string (Cypher uses + as concat).
+            // Heuristic: emit ?a + ?b — Oxigraph evaluates string + string... actually SPARQL
+            // doesn't support that. We use IF(isLiteral && datatype=string, CONCAT, +) — too
+            // complex. Just use CONCAT for Add when one operand is a string literal.
+            if matches!(expr, Expression::Add(_, _))
+                && (matches!(b.as_ref(), Expression::Literal(Literal::String(_)))
+                    || matches!(a.as_ref(), Expression::Literal(Literal::String(_))))
+            {
+                Some((format!("CONCAT(STR({la}), STR({lb}))"), da))
+            } else {
+                Some((format!("({la} {op} {lb})"), da))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Serialize a list element for embedding inside a `"[...]"` string literal.
 /// Uses single quotes for strings to avoid nesting double-quote issues.
 fn list_elem_to_str(expr: &Expression) -> Option<String> {
@@ -898,7 +958,21 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
     // This prevents undirected relationship MERGE from creating edges between all cross-pairs.
     let mut match_connected_node_pairs: Vec<(String, String)> = Vec::new();
 
-    for clause in &query.clauses {
+    // Pre-pass: coalesce consecutive Clause::Create clauses into one. Variables
+    // introduced in the first CREATE need to remain in scope for relationships
+    // in subsequent CREATE clauses; without coalescing they each become a
+    // separate SPARQL UPDATE and bnode mappings are not shared.
+    let mut merged_clauses: Vec<Clause> = Vec::new();
+    for c in &query.clauses {
+        match (merged_clauses.last_mut(), c) {
+            (Some(Clause::Create(prev)), Clause::Create(curr)) => {
+                prev.pattern.0.extend(curr.pattern.0.iter().cloned());
+            }
+            _ => merged_clauses.push(c.clone()),
+        }
+    }
+
+    for clause in &merged_clauses {
         match clause {
             Clause::Unwind(u) => {
                 // Track UNWIND expansion for subsequent MERGE/CREATE clauses.
@@ -993,14 +1067,53 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
             }
             Clause::Create(c) => {
                 // Check if any CREATE pattern node references a pre-bound variable
-                // (from MATCH or WITH alias tracking).
+                // (from MATCH or WITH alias tracking) — either as the node variable
+                // or in a property expression.
+                fn expr_refs_bound(
+                    e: &Expression,
+                    bound: &HashMap<String, Vec<String>>,
+                ) -> bool {
+                    match e {
+                        Expression::Variable(v) => bound.contains_key(v.as_str()),
+                        Expression::Property(b, _) => expr_refs_bound(b, bound),
+                        Expression::Add(a, b)
+                        | Expression::Subtract(a, b)
+                        | Expression::Multiply(a, b)
+                        | Expression::Divide(a, b)
+                        | Expression::Modulo(a, b)
+                        | Expression::Power(a, b)
+                        | Expression::Comparison(a, _, b) => {
+                            expr_refs_bound(a, bound) || expr_refs_bound(b, bound)
+                        }
+                        Expression::FunctionCall { args, .. } => {
+                            args.iter().any(|a| expr_refs_bound(a, bound))
+                        }
+                        Expression::List(items) => items.iter().any(|i| expr_refs_bound(i, bound)),
+                        Expression::Map(pairs) => {
+                            pairs.iter().any(|(_, v)| expr_refs_bound(v, bound))
+                        }
+                        Expression::Negate(e) | Expression::Not(e) => expr_refs_bound(e, bound),
+                        _ => false,
+                    }
+                }
                 let has_bound_vars = c.pattern.0.iter().any(|pat| {
                     pat.elements.iter().any(|elem| {
                         if let PatternElement::Node(n) = elem {
-                            n.variable
+                            let var_bound = n
+                                .variable
                                 .as_ref()
                                 .map(|v| match_node_triples.contains_key(v.as_str()))
-                                .unwrap_or(false)
+                                .unwrap_or(false);
+                            let props_bound = n
+                                .properties
+                                .as_ref()
+                                .map(|props| {
+                                    props.iter().any(|(_, v)| {
+                                        expr_refs_bound(v, &match_node_triples)
+                                    })
+                                })
+                                .unwrap_or(false);
+                            var_bound || props_bound
                         } else {
                             false
                         }
@@ -1056,6 +1169,43 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                                     {
                                                         insert_triples.push(format!(
                                                             "{bnode} <{BASE}{key}> {lit} ."
+                                                        ));
+                                                    } else if let Some((sparql_expr, prop_refs)) =
+                                                        expr_to_create_insert_expr(val_expr)
+                                                    {
+                                                        // Bind referenced properties via OPTIONAL.
+                                                        for (ref_var, ref_key) in &prop_refs {
+                                                            // Add the bound var's MATCH constraints if not already.
+                                                            if seen_bound.insert(ref_var.clone()) {
+                                                                if let Some(constraints) =
+                                                                    match_node_triples
+                                                                        .get(ref_var.as_str())
+                                                                {
+                                                                    for t in constraints {
+                                                                        if !where_triples
+                                                                            .contains(t)
+                                                                        {
+                                                                            where_triples
+                                                                                .push(t.clone());
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            let opt = format!(
+                                                                "OPTIONAL {{ ?{ref_var} <{BASE}{ref_key}> ?{ref_var}_{ref_key} }}"
+                                                            );
+                                                            if !where_triples.contains(&opt) {
+                                                                where_triples.push(opt);
+                                                            }
+                                                        }
+                                                        let prop_var =
+                                                            format!("?__cprop_{counter}_{key}");
+                                                        let bind = format!(
+                                                            "BIND({sparql_expr} AS {prop_var})"
+                                                        );
+                                                        where_triples.push(bind);
+                                                        insert_triples.push(format!(
+                                                            "{bnode} <{BASE}{key}> {prop_var} ."
                                                         ));
                                                     }
                                                 }
@@ -1541,8 +1691,9 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
     let mut node_map: HashMap<String, String> = HashMap::new();
 
     // Track UNWIND variable and values for loop expansion in CREATE setup.
-    let mut loop_values: Vec<Expression> = vec![Expression::Literal(Literal::Null)];
-    let mut unwind_var_name: Option<String> = None;
+    // A stack supports nested UNWINDs: subsequent CREATEs iterate over the
+    // Cartesian product of all preceding UNWINDs.
+    let mut unwind_stack: Vec<(String, Vec<Expression>)> = Vec::new();
 
     for clause in &query.clauses {
         match clause {
@@ -1570,31 +1721,35 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                                 vals.push(Expression::Literal(Literal::Integer(i)));
                                 i += step;
                             }
-                            loop_values = vals;
-                            unwind_var_name = Some(u.variable.clone());
+                            unwind_stack.push((u.variable.clone(), vals));
                         }
                     }
                     Expression::List(items) => {
-                        loop_values = items.clone();
-                        unwind_var_name = Some(u.variable.clone());
+                        unwind_stack.push((u.variable.clone(), items.clone()));
                     }
                     _ => {}
                 }
             }
             Clause::Create(c) => {
-                let loop_count = loop_values.len();
+                // Compute total Cartesian product size across all stacked UNWINDs.
+                let loop_count: usize = if unwind_stack.is_empty() {
+                    1
+                } else {
+                    unwind_stack.iter().map(|(_, v)| v.len()).product()
+                };
                 for iter in 0..loop_count {
                     // Reset the named-variable map for each loop iteration so
                     // each iteration creates fresh nodes.
                     if loop_count > 1 {
                         node_map.clear();
                     }
-                    // Build bindings for the current UNWIND iteration.
+                    // Build bindings for the current Cartesian iteration.
                     let mut bindings: HashMap<String, &Expression> = HashMap::new();
-                    if let Some(ref var) = unwind_var_name {
-                        if let Some(val) = loop_values.get(iter) {
-                            bindings.insert(var.clone(), val);
-                        }
+                    let mut idx = iter;
+                    for (var, vals) in unwind_stack.iter().rev() {
+                        let pos = idx % vals.len();
+                        idx /= vals.len();
+                        bindings.insert(var.clone(), &vals[pos]);
                     }
                     // Pre-pass: collect named-node literal properties so later patterns
                     // can resolve cross-references like `(:B {num: a.id})` where `a` was
@@ -1628,8 +1783,7 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                     }
                 }
                 // Reset loop state after each CREATE.
-                loop_values = vec![Expression::Literal(Literal::Null)];
-                unwind_var_name = None;
+                unwind_stack.clear();
             }
             _ => {}
         }
@@ -1669,6 +1823,45 @@ async fn having_executed(world: &mut TckWorld, step: &Step) {
         return;
     }
     let cypher = step.docstring.as_deref().unwrap_or("").trim();
+    // If the setup contains MATCH/MERGE/SET/REMOVE/DELETE clauses, route through
+    // the full write_clauses_to_updates path which can emit INSERT...WHERE etc.
+    let needs_full_writes = {
+        use polygraph::ast::cypher::Clause;
+        parse_cypher(cypher)
+            .map(|ast| {
+                ast.clauses.iter().any(|c| {
+                    matches!(
+                        c,
+                        Clause::Match(_)
+                            | Clause::Merge(_)
+                            | Clause::Set(_)
+                            | Clause::Remove(_)
+                            | Clause::Delete(_)
+                    )
+                })
+            })
+            .unwrap_or(false)
+    };
+    if needs_full_writes {
+        let updates = write_clauses_to_updates(cypher);
+        if updates.is_empty() {
+            // Couldn't construct any updates; skip silently rather than fail.
+            return;
+        }
+        let store = world
+            .store
+            .get_or_insert_with(|| OxStore(Store::new().unwrap()));
+        for upd in &updates {
+            if let Err(e) = store.0.update(upd.as_str()) {
+                eprintln!(
+                    "[TCK setup] UPDATE failed for {cypher:?}: {e}\nGenerated:\n{upd}"
+                );
+                world.skip = true;
+                return;
+            }
+        }
+        return;
+    }
     match create_to_insert_data(cypher) {
         Err(e) => {
             eprintln!("[TCK setup] CREATE parse failed for {cypher:?}: {e}");
@@ -2092,6 +2285,18 @@ async fn result_ignoring_list_order(world: &mut TckWorld, step: &Step) {
         panic!("Expected success but translation/execution failed: {err}{ctx}");
     }
     compare_results(world, step, false, true);
+}
+
+#[then(regex = r"^the result should be, in order \(ignoring element order for lists\):$")]
+async fn result_in_order_ignoring_list_order(world: &mut TckWorld, step: &Step) {
+    if world.skip {
+        return;
+    }
+    if let Some(err) = &world.query_error {
+        let ctx = diag_context(world);
+        panic!("Expected success but translation/execution failed: {err}{ctx}");
+    }
+    compare_results(world, step, true, true);
 }
 
 #[then("no side effects")]

@@ -292,6 +292,12 @@ pub enum Expression {
     /// Pattern predicate in expression context: `(a)-[:T]->(b:Label)`.
     /// Tests for path existence (translates to SPARQL EXISTS).
     PatternPredicate(Pattern),
+    /// EXISTS subquery: `EXISTS { (a)-->(b) WHERE pred }`.
+    /// Translates to SPARQL `EXISTS { bgp . FILTER pred }`.
+    ExistsSubquery {
+        patterns: PatternList,
+        where_: Option<Box<Expression>>,
+    },
     /// CASE expression: `CASE [operand] WHEN val THEN result ... [ELSE default] END`.
     CaseExpression {
         operand: Option<Box<Expression>>,

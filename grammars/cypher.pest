@@ -249,6 +249,7 @@ node_label    = { ":" ~ schema_name }
 
 // Relationship patterns (left, right, undirected, bidir stub)
 rel_pattern   = { full_arrow
+                | left_arrow ~ rel_body ~ right_arrow
                 | left_arrow ~ rel_body ~ rel_dash
                 | rel_dash   ~ rel_body ~ right_arrow
                 | rel_dash   ~ rel_body ~ rel_dash }

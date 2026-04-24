@@ -448,6 +448,7 @@ fn expr_uses_nullable(expr: &Expression, nullable: &std::collections::HashSet<St
         Expression::List(items) => items.iter().any(|i| expr_uses_nullable(i, nullable)),
         Expression::LabelCheck { variable, .. } => nullable.contains(variable),
         Expression::PatternPredicate(_) => false,
+        Expression::ExistsSubquery { .. } => false,
         Expression::Aggregate(_) | Expression::Literal(_) | Expression::Map(_) => false,
         Expression::CaseExpression {
             operand,
