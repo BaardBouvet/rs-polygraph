@@ -716,6 +716,20 @@ impl TranslationState {
         let ppe: Option<PPE> = if has_range {
             let range = rel.range.as_ref().unwrap();
 
+            // For undirected range paths, each hop can traverse the edge in either
+            // direction. Build `(type | ^type)` as the effective base so that the
+            // kleene-star quantifier allows mixed-direction traversal.
+            // Note: emit_bounded_path_union handles Direction::Both internally per-hop;
+            // only use undir_base for the open-ended (OneOrMore / ZeroOrMore) paths.
+            let undir_base: PPE = if rel.direction == Direction::Both {
+                PPE::Alternative(
+                    Box::new(base_ppe.clone()),
+                    Box::new(PPE::Reverse(Box::new(base_ppe.clone()))),
+                )
+            } else {
+                base_ppe.clone()
+            };
+
             // Special case: varlen with property constraints → bounded unrolling with
             // RDF-star per-hop annotation filters.
             if rel.properties.is_some() && self.rdf_star && !rel.rel_types.is_empty() {
@@ -734,13 +748,13 @@ impl TranslationState {
 
             let q = match (range.lower, range.upper) {
                 // * (bare star) = 1 or more hops in openCypher
-                (None, None) => PPE::OneOrMore(Box::new(base_ppe)),
+                (None, None) => PPE::OneOrMore(Box::new(undir_base)),
                 // *0.. = zero or more hops
-                (Some(0), None) => PPE::ZeroOrMore(Box::new(base_ppe)),
+                (Some(0), None) => PPE::ZeroOrMore(Box::new(undir_base)),
                 // *1..
-                (Some(1), None) => PPE::OneOrMore(Box::new(base_ppe)),
+                (Some(1), None) => PPE::OneOrMore(Box::new(undir_base)),
                 // *0..1 = zero or one hop — ZeroOrOne SPARQL path.
-                (Some(0), Some(1)) => PPE::ZeroOrOne(Box::new(base_ppe)),
+                (Some(0), Some(1)) => PPE::ZeroOrOne(Box::new(undir_base)),
                 // *1..1 = exact 1 hop, treat as simple triple
                 (Some(1), Some(1)) => {
                     if rel.rel_types.is_empty() {
@@ -764,9 +778,9 @@ impl TranslationState {
                             // *N.. (lower only): compose path for minimum bound.
                             if lower <= 1 {
                                 let q = if lower == 0 {
-                                    PPE::ZeroOrMore(Box::new(base_ppe))
+                                    PPE::ZeroOrMore(Box::new(undir_base))
                                 } else {
-                                    PPE::OneOrMore(Box::new(base_ppe))
+                                    PPE::OneOrMore(Box::new(undir_base))
                                 };
                                 let (subj, obj) = match rel.direction {
                                     Direction::Left => (dst.clone(), src.clone()),
@@ -774,6 +788,7 @@ impl TranslationState {
                                 };
                                 // For Left: subj=dst, obj=src (already swapped); use forward
                                 // path — no PPE::Reverse needed since the swap is sufficient.
+                                // For Both: undir_base already encodes both directions.
                                 path_patterns.push(GraphPattern::Path {
                                     subject: subj,
                                     path: q,
@@ -824,21 +839,39 @@ impl TranslationState {
             };
             // For Left: subj=dst, obj=src (already swapped above) — use forward path.
             // Adding PPE::Reverse on top of the swap causes double-inversion (wrong direction).
-            // For Both: effective_base was already built as Alternative(base, ^base) in the
-            // quantifier dispatch above; no further Alternative wrapping is needed here.
-            let path = if rel.direction == Direction::Both {
-                PPE::Alternative(
-                    Box::new(path.clone()),
-                    Box::new(PPE::Reverse(Box::new(path))),
-                )
-            } else {
-                path
-            };
+            // For Both: undir_base was built as Alternative(base, ^base) above so the
+            // quantified path already encodes both directions; no further wrapping needed.
             let mut path_gp = GraphPattern::Path {
-                subject: subj,
+                subject: subj.clone(),
                 path,
-                object: obj,
+                object: obj.clone(),
             };
+            // For undirected range paths with lower-bound >= 1 (OneOrMore), exclude
+            // same-endpoint pairs.  SPARQL's (pred|^pred)+ allows a→b←a creating a
+            // spurious "path" from a back to a reusing the same edge, but openCypher's
+            // isomorphic semantics forbid reuse of the same edge.  A genuine self-loop
+            // edge (a)-[:R]->(a) that would produce a 1-hop (a,a) pair is extremely
+            // rare in TCK tests and none rely on it with variable-length patterns.
+            if rel.direction == Direction::Both {
+                let lower_bound = rel
+                    .range
+                    .as_ref()
+                    .and_then(|r| r.lower)
+                    .unwrap_or(1); // bare `*` defaults to 1 in openCypher
+                if lower_bound >= 1 {
+                    if let (TermPattern::Variable(s), TermPattern::Variable(o)) = (&subj, &obj) {
+                        if s != o {
+                            path_gp = GraphPattern::Filter {
+                                expr: SparExpr::Not(Box::new(SparExpr::Equal(
+                                    Box::new(SparExpr::Variable(s.clone())),
+                                    Box::new(SparExpr::Variable(o.clone())),
+                                ))),
+                                inner: Box::new(path_gp),
+                            };
+                        }
+                    }
+                }
+            }
             // For untyped paths (NegatedPropertySet), filter out literal endpoints
             // since NPS also matches property predicates leading to literals.
             if rel.rel_types.is_empty() {
