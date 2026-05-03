@@ -1026,6 +1026,7 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         fn contains_pattern_expr(e: &Expression) -> bool {
                             match e {
                                 Expression::PatternComprehension { .. } => true,
+                                Expression::PatternPredicate(_) => true,
                                 Expression::FunctionCall { args, .. } => {
                                     args.iter().any(contains_pattern_expr)
                                 }
