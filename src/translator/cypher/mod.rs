@@ -2486,6 +2486,31 @@ impl TranslationState {
                     }
                     (None, None) => {}
                 }
+                // Temporal add: `temporal + duration` needs the same split approach as
+                // subtraction so that date + P1M-14DT... applies yearMonth, day, and time
+                // components separately (Oxigraph only applies yearMonth when given a raw
+                // combined xsd:duration in an add/subtract expression).
+                let temporal_add_info: Option<bool> = match a.as_ref() {
+                    Expression::Variable(v) => self
+                        .with_lit_vars
+                        .get(v.as_str())
+                        .filter(|s| is_temporal_lit_str(s))
+                        .map(|s| is_date_only_lit_str(s)),
+                    Expression::FunctionCall { name, .. } => {
+                        let lc = name.to_ascii_lowercase();
+                        let is_temporal = matches!(
+                            lc.as_str(),
+                            "date" | "time" | "localtime" | "datetime" | "localdatetime"
+                        );
+                        is_temporal.then_some(lc == "date")
+                    }
+                    _ => None,
+                };
+                if let Some(is_date_add) = temporal_add_info {
+                    let la = self.translate_expr(a, extra)?;
+                    let lb = self.translate_expr(b, extra)?;
+                    return Ok(temporal_add_sparql(la, lb, is_date_add));
+                }
                 // Check if either operand is a string literal → CONCAT semantics.
                 let a_is_string = matches!(a.as_ref(), Expression::Literal(Literal::String(_)));
                 let b_is_string = matches!(b.as_ref(), Expression::Literal(Literal::String(_)));

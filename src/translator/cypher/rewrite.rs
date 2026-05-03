@@ -845,84 +845,295 @@ fn is_date_only_lit_str(s: &str) -> bool {
     s.len() == 10 && s.as_bytes().get(4) == Some(&b'-')
 }
 
-/// Build a SPARQL expression that computes `temporal - duration`.
+/// Build a SPARQL expression that computes `temporal - duration` (or `temporal + duration`).
 ///
 /// Oxigraph supports `temporal - xsd:yearMonthDuration` and
-/// `temporal - xsd:dayTimeDuration` but NOT `temporal - xsd:duration`.
-/// We work around this by splitting the duration into its yearMonth and
-/// dayTime string parts via `STRDT(REPLACE(…), …)` and subtracting each:
+/// `temporal - xsd:dayTimeDuration` but NOT `temporal - xsd:duration` (the base type).
+/// Additionally `temporal + STRDT(REPLACE(...), yearMonthDuration)` returns UNDEF due to an
+/// Oxigraph quirk, but `temporal - STRDT(CONCAT("-", REPLACE(...)), yearMonthDuration)` works.
 ///
-/// ```sparql
-/// COALESCE(temporal - STRDT(REPLACE(STR(dur), "^P(([0-9.]*Y)?([0-9.]*M)?).*", "P$1"), ymd), temporal)
-///   - STRDT(REPLACE(STR(dur), "^P([0-9.]*Y)?([0-9.]*M)?", "P"), dtd)
-/// ```
+/// Strategy:
+/// - Always SUBTRACT; ADD is expressed as SUBTRACT-of-NEGATED duration components.
+/// - Split duration string into yearMonth ("P$1" via REPLACE) and dayTime (STRBEFORE/STRAFTER) parts.
+/// - For ADD: negate yearMonth via `CONCAT("-", ym_str)`, negate day via sign-flip.
 ///
-/// The outer `COALESCE` handles the case where the DT part reduces to `"P"`
-/// (i.e., the duration has no day/time components), which would make `STRDT`
-/// return UNDEF for an invalid bare `"P"` dayTimeDuration.
-///
-/// When `is_date` is `true` (i.e., the LHS is an `xs:date`), the time
-/// portion of the dayTimeDuration is stripped via `STRBEFORE(dt_str, "T")`
-/// so that hours/minutes/seconds do NOT bleed into the date result.
-/// (Oxigraph converts date→dateTime at midnight before subtracting, which
-/// causes an off-by-one-day error otherwise.)
+/// Handles mixed-sign durations (e.g. `P1M-14DT16H-11M10S`) by splitting into
+/// three independent components: (1) yearMonth, (2) day-only, (3) time-only.
+/// Each is applied with a COALESCE so that inapplicable components (e.g. months
+/// on a localtime, or hours on a date) are silently skipped.
 fn temporal_subtract_sparql(temporal: SparExpr, dur: SparExpr, is_date: bool) -> SparExpr {
+    temporal_arith_sparql(temporal, dur, true, is_date)
+}
+
+/// Counterpart of `temporal_subtract_sparql` for addition.
+pub(super) fn temporal_add_sparql(temporal: SparExpr, dur: SparExpr, is_date: bool) -> SparExpr {
+    temporal_arith_sparql(temporal, dur, false, is_date)
+}
+
+/// Core implementation for temporal ± duration.
+///
+/// For `xsd:date` (`is_date=true`): two-step — yearMonth then day-only (no time component
+/// applied to avoid Oxigraph returning `xsd:dateTime` instead of `xsd:date`).
+/// For all other temporal types: three-step — yearMonth, day-only, time-only.
+/// Negative day strings like `"P-14D"` are normalised to `"-P14D"` which is
+/// a valid `xsd:dayTimeDuration` accepted by Oxigraph.
+fn temporal_arith_sparql(
+    temporal: SparExpr,
+    dur: SparExpr,
+    subtract: bool,
+    is_date: bool,
+) -> SparExpr {
     use spargebra::algebra::Function;
 
     let ymd_nn = NamedNode::new_unchecked(XSD_YEAR_MONTH_DUR);
     let dtd_nn = NamedNode::new_unchecked(XSD_DAY_TIME_DUR);
+    let coalesce2 = |a: SparExpr, b: SparExpr| SparExpr::Coalesce(vec![a, b]);
 
-    // STR(dur) — two copies needed (one per REPLACE call)
+    // ── Step 1: yearMonth part ───────────────────────────────────────────────
+    // SUBTRACT: `temporal - STRDT(REPLACE(…, "P$1"), ym)` — Oxigraph supports this.
+    // ADD: Oxigraph quirk — `temporal + STRDT(REPLACE(…), ym)` returns UNDEF even though
+    //      the value is typed correctly.  Instead, express ADD as SUBTRACT of NEGATED ym:
+    //      `temporal - STRDT(CONCAT("-", REPLACE(…, "P$1")), ym)`
+    //      because `temporal - "-PxYxM"^^ym` = `temporal + PxYxM` ✓ in Oxigraph.
     let dur_str_ym = SparExpr::FunctionCall(Function::Str, vec![dur.clone()]);
-    let dur_str_dt = SparExpr::FunctionCall(Function::Str, vec![dur]);
-
-    // REPLACE(STR(dur), "^P(([0-9.]*Y)?([0-9.]*M)?).*", "P$1") → yearMonth part string
     let ym_pat = SparExpr::Literal(SparLit::new_simple_literal(
         "^P(([0-9.]*Y)?([0-9.]*M)?).*",
     ));
     let ym_repl = SparExpr::Literal(SparLit::new_simple_literal("P$1"));
     let ym_str = SparExpr::FunctionCall(Function::Replace, vec![dur_str_ym, ym_pat, ym_repl]);
-
-    // STRDT(ym_str, xsd:yearMonthDuration)
-    let ym_dur = SparExpr::FunctionCall(
-        Function::StrDt,
-        vec![ym_str, SparExpr::NamedNode(ymd_nn)],
-    );
-
-    // REPLACE(STR(dur), "^P([0-9.]*Y)?([0-9.]*M)?", "P") → dayTime part string
-    let dt_pat = SparExpr::Literal(SparLit::new_simple_literal("^P([0-9.]*Y)?([0-9.]*M)?"));
-    let dt_repl = SparExpr::Literal(SparLit::new_simple_literal("P"));
-    let dt_str_full = SparExpr::FunctionCall(Function::Replace, vec![dur_str_dt, dt_pat, dt_repl]);
-
-    // For xs:date arithmetic, Oxigraph implements date - dayTimeDuration by converting
-    // the date to a dateTime at midnight and subtracting, so hours/minutes/seconds cause
-    // an off-by-one-day error.  Strip the time part by taking STRBEFORE(dt_str, "T").
-    let dt_str = if is_date {
-        let t_lit = SparExpr::Literal(SparLit::new_simple_literal("T"));
-        SparExpr::FunctionCall(Function::StrBefore, vec![dt_str_full, t_lit])
+    let ym_dur = if subtract {
+        // SUBTRACT: date - STRDT(ym_str, ym)
+        SparExpr::FunctionCall(
+            Function::StrDt,
+            vec![ym_str, SparExpr::NamedNode(ymd_nn)],
+        )
     } else {
-        dt_str_full
+        // ADD: date - STRDT(CONCAT("-", ym_str), ym)  (ADD via subtracting negated ym)
+        let neg_lit = SparExpr::Literal(SparLit::new_simple_literal("-"));
+        let neg_ym_str =
+            SparExpr::FunctionCall(Function::Concat, vec![neg_lit, ym_str]);
+        SparExpr::FunctionCall(
+            Function::StrDt,
+            vec![neg_ym_str, SparExpr::NamedNode(ymd_nn)],
+        )
     };
-
-    // STRDT(dt_str, xsd:dayTimeDuration)
-    let dt_dur = SparExpr::FunctionCall(
-        Function::StrDt,
-        vec![dt_str, SparExpr::NamedNode(dtd_nn)],
-    );
-
-    // step1 = COALESCE(temporal - ym_dur, temporal)
-    // Handles: time - yearMonthDuration is UNDEF (time has no year/month), so COALESCE falls
-    // back to temporal unchanged; also handles empty "P" yearMonthDuration → STRDT returns UNDEF.
-    let step1 = SparExpr::Coalesce(vec![
+    // Always SUBTRACT: for ADD we subtracted the negated ym, for SUBTRACT we subtract ym.
+    let step1 = coalesce2(
         SparExpr::Subtract(Box::new(temporal.clone()), Box::new(ym_dur)),
         temporal,
-    ]);
+    );
 
-    // COALESCE(step1 - dt_dur, step1)
-    // Handles: "P" dayTimeDuration (no time component) → STRDT returns UNDEF → COALESCE keeps step1.
-    SparExpr::Coalesce(vec![
-        SparExpr::Subtract(Box::new(step1.clone()), Box::new(dt_dur)),
+    // ── Step 2: day part ─────────────────────────────────────────────────────
+    // Oxigraph implements `temporal - xsd:dayTimeDuration` but NOT
+    // `temporal + xsd:dayTimeDuration`.  For ADD, express as subtract-of-negated.
+    //
+    // day_raw = STRBEFORE(REPLACE(STR(dur), ymStrip, "P"), "T")
+    //           → "P14D" (positive) or "P-14D" (negative component)
+    //
+    // For SUBTRACT: effective = IF("P-14D" style, CONCAT("-P", tail), day_raw)
+    //   → "P-14D" → "-P14D", "P14D" → "P14D"
+    // For ADD:      effective = IF("P-14D" style, CONCAT("P", tail),  CONCAT("-", day_raw))
+    //   → "P-14D" → "P14D",  "P14D" → "-P14D"
+    // Then always: step2 = COALESCE(step1 - STRDT(effective, dtd), step1)
+    let dur_str_dt = SparExpr::FunctionCall(Function::Str, vec![dur.clone()]);
+    let dt_strip_pat =
+        SparExpr::Literal(SparLit::new_simple_literal("^P([0-9.]*Y)?([0-9.]*M)?"));
+    let dt_strip_repl = SparExpr::Literal(SparLit::new_simple_literal("P"));
+    let dt_full =
+        SparExpr::FunctionCall(Function::Replace, vec![dur_str_dt, dt_strip_pat, dt_strip_repl]);
+
+    let t_lit_1 = SparExpr::Literal(SparLit::new_simple_literal("T"));
+    let t_lit_2 = SparExpr::Literal(SparLit::new_simple_literal("T"));
+    let day_raw =
+        SparExpr::FunctionCall(Function::StrBefore, vec![dt_full.clone(), t_lit_1]);
+
+    let p_dash = SparExpr::Literal(SparLit::new_simple_literal("P-"));
+    let dash_p = SparExpr::Literal(SparLit::new_simple_literal("-P"));
+    let p_bare = SparExpr::Literal(SparLit::new_simple_literal("P"));
+    let dash_lit = SparExpr::Literal(SparLit::new_simple_literal("-"));
+    let three = SparExpr::Literal(SparLit::new_typed_literal(
+        "3",
+        NamedNode::new_unchecked(XSD_INTEGER),
+    ));
+    let tail = SparExpr::FunctionCall(Function::SubStr, vec![day_raw.clone(), three]);
+    let is_neg = SparExpr::FunctionCall(Function::StrStarts, vec![day_raw.clone(), p_dash]);
+
+    let effective_day = if subtract {
+        // SUBTRACT: "P-14D" → "-P14D", "P14D" → "P14D"
+        SparExpr::If(
+            Box::new(is_neg),
+            Box::new(SparExpr::FunctionCall(Function::Concat, vec![dash_p, tail])),
+            Box::new(day_raw.clone()),
+        )
+    } else {
+        // ADD: "P-14D" → "P14D", "P14D" → "-P14D"
+        SparExpr::If(
+            Box::new(is_neg),
+            Box::new(SparExpr::FunctionCall(Function::Concat, vec![p_bare, tail])),
+            Box::new(SparExpr::FunctionCall(Function::Concat, vec![dash_lit, day_raw.clone()])),
+        )
+    };
+
+    let day_dur = SparExpr::FunctionCall(
+        Function::StrDt,
+        vec![effective_day, SparExpr::NamedNode(dtd_nn.clone())],
+    );
+    // Always SUBTRACT (ADD used negated value above).
+    let step2 = coalesce2(
+        SparExpr::Subtract(Box::new(step1.clone()), Box::new(day_dur)),
         step1,
-    ])
+    );
+
+    if is_date {
+        step2
+    } else {
+        // ── Step 3: time part (non-date types only) ───────────────────────────
+        // Extract time portion string after "T", e.g. "16H-11M10S".
+        // Normalize to total decimal seconds to avoid Oxigraph rejecting mixed-sign
+        // dayTimeDuration strings like "PT16H-11M10S".
+        //
+        // Algorithm:
+        //   time_raw  = STRAFTER(REPLACE(STR(dur), ym_strip, "P"), "T")
+        //   h = IF(CONTAINS(t, "H"), xsd:decimal(STRBEFORE(t, "H")), 0)
+        //   after_h   = IF(CONTAINS(t, "H"), STRAFTER(t, "H"), t)
+        //   m = IF(CONTAINS(after_h, "M"), xsd:decimal(STRBEFORE(after_h, "M")), 0)
+        //   after_m   = IF(CONTAINS(after_h, "M"), STRAFTER(after_h, "M"), after_h)
+        //   s = IF(CONTAINS(after_m, "S"), xsd:decimal(STRBEFORE(after_m, "S")), 0)
+        //   total     = h * 3600 + m * 60 + s
+        //   time_dur  = STRDT(CONCAT(IF(total>=0, pos_pref, neg_pref), STR(ABS(total)), "S"), dtd)
+        let xsd_decimal_nn =
+            NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#decimal");
+        let dec_cast =
+            |e: SparExpr| SparExpr::FunctionCall(Function::Custom(xsd_decimal_nn.clone()), vec![e]);
+        let dec_0 =
+            || SparExpr::Literal(SparLit::new_typed_literal("0", xsd_decimal_nn.clone()));
+
+        let dur_s = SparExpr::FunctionCall(Function::Str, vec![dur]);
+        let strip_pat =
+            SparExpr::Literal(SparLit::new_simple_literal("^P([0-9.]*Y)?([0-9.]*M)?"));
+        let strip_repl = SparExpr::Literal(SparLit::new_simple_literal("P"));
+        let stripped =
+            SparExpr::FunctionCall(Function::Replace, vec![dur_s, strip_pat, strip_repl]);
+        let time_raw = SparExpr::FunctionCall(Function::StrAfter, vec![stripped, t_lit_2]);
+
+        let h_str = SparExpr::Literal(SparLit::new_simple_literal("H"));
+        let m_str = SparExpr::Literal(SparLit::new_simple_literal("M"));
+        let s_str = SparExpr::Literal(SparLit::new_simple_literal("S"));
+
+        // H value
+        let has_h = SparExpr::FunctionCall(
+            Function::Contains,
+            vec![time_raw.clone(), h_str.clone()],
+        );
+        let h_val = SparExpr::If(
+            Box::new(has_h.clone()),
+            Box::new(dec_cast(SparExpr::FunctionCall(
+                Function::StrBefore,
+                vec![time_raw.clone(), h_str.clone()],
+            ))),
+            Box::new(dec_0()),
+        );
+
+        // after_h = IF(HAS_H, STRAFTER(t, "H"), t)
+        let after_h = SparExpr::If(
+            Box::new(has_h),
+            Box::new(SparExpr::FunctionCall(
+                Function::StrAfter,
+                vec![time_raw.clone(), h_str],
+            )),
+            Box::new(time_raw),
+        );
+
+        // M value
+        let has_m = SparExpr::FunctionCall(
+            Function::Contains,
+            vec![after_h.clone(), m_str.clone()],
+        );
+        let m_val = SparExpr::If(
+            Box::new(has_m.clone()),
+            Box::new(dec_cast(SparExpr::FunctionCall(
+                Function::StrBefore,
+                vec![after_h.clone(), m_str.clone()],
+            ))),
+            Box::new(dec_0()),
+        );
+
+        // after_m = IF(HAS_M, STRAFTER(after_h, "M"), after_h)
+        let after_m = SparExpr::If(
+            Box::new(has_m),
+            Box::new(SparExpr::FunctionCall(
+                Function::StrAfter,
+                vec![after_h.clone(), m_str],
+            )),
+            Box::new(after_h),
+        );
+
+        // S value
+        let has_s = SparExpr::FunctionCall(
+            Function::Contains,
+            vec![after_m.clone(), s_str.clone()],
+        );
+        let s_val = SparExpr::If(
+            Box::new(has_s),
+            Box::new(dec_cast(SparExpr::FunctionCall(
+                Function::StrBefore,
+                vec![after_m.clone(), s_str.clone()],
+            ))),
+            Box::new(dec_0()),
+        );
+
+        // total = h * 3600 + m * 60 + s
+        let c3600 =
+            SparExpr::Literal(SparLit::new_typed_literal("3600", xsd_decimal_nn.clone()));
+        let c60 =
+            SparExpr::Literal(SparLit::new_typed_literal("60", xsd_decimal_nn.clone()));
+        let total = SparExpr::Add(
+            Box::new(SparExpr::Add(
+                Box::new(SparExpr::Multiply(Box::new(h_val), Box::new(c3600))),
+                Box::new(SparExpr::Multiply(Box::new(m_val), Box::new(c60))),
+            )),
+            Box::new(s_val),
+        );
+
+        // For SUBTRACT: positive total → "PT", negative → "-PT" (subtracts that direction)
+        // For ADD:      positive total → "-PT", negative → "PT" (express ADD as subtract-neg)
+        let pos_pref = if subtract { "PT" } else { "-PT" };
+        let neg_pref = if subtract { "-PT" } else { "PT" };
+        let pos_pref_lit = SparExpr::Literal(SparLit::new_simple_literal(pos_pref));
+        let neg_pref_lit = SparExpr::Literal(SparLit::new_simple_literal(neg_pref));
+        let s_suffix = SparExpr::Literal(SparLit::new_simple_literal("S"));
+        let dec_zero =
+            SparExpr::Literal(SparLit::new_typed_literal("0", xsd_decimal_nn.clone()));
+
+        // CONCAT(IF(total >= 0, pos_pref, neg_pref), STR(ABS(total)), "S")
+        let time_str_norm = SparExpr::FunctionCall(
+            Function::Concat,
+            vec![
+                SparExpr::If(
+                    Box::new(SparExpr::GreaterOrEqual(
+                        Box::new(total.clone()),
+                        Box::new(dec_zero),
+                    )),
+                    Box::new(pos_pref_lit),
+                    Box::new(neg_pref_lit),
+                ),
+                SparExpr::FunctionCall(
+                    Function::Str,
+                    vec![SparExpr::FunctionCall(Function::Abs, vec![total])],
+                ),
+                s_suffix,
+            ],
+        );
+
+        let time_dur = SparExpr::FunctionCall(
+            Function::StrDt,
+            vec![time_str_norm, SparExpr::NamedNode(dtd_nn)],
+        );
+        // Always SUBTRACT (ADD uses "-PT..." prefix above, which subtracts a negative = adds).
+        coalesce2(
+            SparExpr::Subtract(Box::new(step2.clone()), Box::new(time_dur)),
+            step2,
+        )
+    }
 }
 

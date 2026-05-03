@@ -739,8 +739,8 @@ impl TranslationState {
                 (Some(0), None) => PPE::ZeroOrMore(Box::new(base_ppe)),
                 // *1..
                 (Some(1), None) => PPE::OneOrMore(Box::new(base_ppe)),
-                // *0..1 or *..1
-                (None, Some(1)) | (Some(0), Some(1)) => PPE::ZeroOrOne(Box::new(base_ppe)),
+                // *0..1 = zero or one hop — ZeroOrOne SPARQL path.
+                (Some(0), Some(1)) => PPE::ZeroOrOne(Box::new(base_ppe)),
                 // *1..1 = exact 1 hop, treat as simple triple
                 (Some(1), Some(1)) => {
                     if rel.rel_types.is_empty() {
@@ -754,8 +754,10 @@ impl TranslationState {
                     }
                 }
                 // Bounded ranges like *M..N — unroll as UNION of fixed-length chains.
+                // Note: unspecified lower bound defaults to 1 in openCypher (not 0),
+                // so *..0 = empty, *..1 = exactly-1-hop, *..2 = 1-or-2 hops, etc.
                 (lo, hi) => {
-                    let lower = lo.unwrap_or(0);
+                    let lower = lo.unwrap_or(1);
                     let upper = match hi {
                         Some(u) => u,
                         None => {
@@ -1254,29 +1256,37 @@ impl TranslationState {
 
         for hop_count in lower..=upper {
             if hop_count == 0 {
-                // Zero-hop: src = dst. Use a FILTER on a sentinel-bound sub-pattern.
-                // Emit a VALUES clause that equates src and dst via a shared variable.
-                // Since src and dst will be bound by surrounding patterns, we use Filter.
-                // Emit an empty BGP with a FILTER(?src = ?dst) — but only if both are vars.
-                let filter_expr = if let (TermPattern::Variable(s), TermPattern::Variable(d)) =
-                    (&effective_src, &effective_dst)
-                {
-                    Some(SparExpr::Equal(
-                        Box::new(SparExpr::Variable(s.clone())),
-                        Box::new(SparExpr::Variable(d.clone())),
-                    ))
-                } else {
-                    None
+                // Zero-hop: src = dst = the same graph node.
+                // Semantics: (a)-[*0]->(c) binds c = a for every node a.
+                //
+                // Strategy: emit the node-sentinel triple for effective_src to
+                // enumerate all Cypher nodes (when src is unbound) or to verify
+                // the node exists (when src is already bound by an outer pattern).
+                // Then BIND effective_dst = effective_src to equate both ends.
+                //
+                // The node sentinel triple is: ?node <base:__node> <base:__node>
+                let sentinel_iri = self.iri("__node");
+                let sentinel_triple = TriplePattern {
+                    subject: effective_src.clone(),
+                    predicate: spargebra::term::NamedNodePattern::NamedNode(sentinel_iri.clone()),
+                    object: TermPattern::NamedNode(sentinel_iri),
                 };
-                let zero_inner = empty_bgp();
-                let zero_pattern = if let Some(f) = filter_expr {
-                    GraphPattern::Filter {
-                        expr: f,
-                        inner: Box::new(zero_inner),
-                    }
-                } else {
-                    GraphPattern::Bgp { patterns: vec![] }
+                let bgp = GraphPattern::Bgp {
+                    patterns: vec![sentinel_triple],
                 };
+                let zero_pattern =
+                    match (&effective_src, &effective_dst) {
+                        // Both are variables and they differ: extend binding.
+                        (TermPattern::Variable(s), TermPattern::Variable(d)) if s != d => {
+                            GraphPattern::Extend {
+                                inner: Box::new(bgp),
+                                variable: d.clone(),
+                                expression: SparExpr::Variable(s.clone()),
+                            }
+                        }
+                        // Same variable or named nodes: just the sentinel triple.
+                        _ => bgp,
+                    };
                 union_patterns.push(zero_pattern);
             } else if hop_count == 1 {
                 // Single hop: emit as a plain path (allows multi-direction).

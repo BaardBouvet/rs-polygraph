@@ -1,44 +1,75 @@
 # Final Mile — Closing the Last 85 TCK Gaps
 
-**Status**: planned
-**Updated**: 2026-04-24
+**Status**: in progress
+**Updated**: 2026-05-13
 
 This plan supersedes the failure inventory in [remaining-work.md](remaining-work.md)
-now that Tier A (harness plumbing) has landed (3558 → 3704 passes).
-It enumerates **every** remaining failure, skip, and parse error and
-groups them into ROI-ordered tiers F–K so the path from 97.8 % to ≥ 99.7 %
-is mechanical.
+now that Tier A (harness plumbing) has landed (3558 → 3704 passes), and Tier FGH
+partial work has pushed to 3734 / 3828 (97.5 %).
 
 ---
 
-## 1. Current Baseline
+## 1. Current Baseline (post-Tier-FGH)
 
-| Bucket            | Count | % of 3789 | Δ from baseline |
-|-------------------|------:|----------:|----------------:|
-| **Passing**       | 3704  | 97.8 %    | +146            |
-| Failing           |   84  |  2.2 %    | +1              |
-| Skipped           |    1  |  0.0 %    | −147            |
-| Parse errors      |    8  |  0.2 %    | 0               |
-| **Total**         | 3789  | 100 %     |                 |
+| Bucket            | Count | % of 3828 |
+|-------------------|------:|----------:|
+| **Passing**       | 3734  | 97.5 %    |
+| Failing           |   94  |  2.5 %    |
+| Skipped           |    0  |  0.0 %    |
+| Parse errors      |    0  |  0.0 %    |
+| **Total**         | 3828  | 100 %     |
+
+### What Tier FGH delivered (+30)
+
+H.1 "in order (ignoring element order for lists)" step, H.2 SyntaxError on
+SET RHS pattern comprehension, H.5 ExistentialSubquery feature vendor + Match5
+cucumber-rs patch, EXISTS subquery translation (+8), Match5 having_executed
+harness routing (+5), nested-UNWIND Cartesian product, CREATE bnode coalescing,
+expression translation in property values.
+
+### What remains from the original F/G/H plan
+
+**Tier F** (duration arithmetic) was designed in F.1–F.3 but *never implemented* —
+all 17 Temporal8 failures are still open.
+
+**Tier G** (translator bug fixes) was partially done. G.1 WITH→MERGE propagation
+(7 failures), G.2 var-length property predicate (3 failures), and two additional
+Match5 bugs (undirected overcount ×2, zero-hop ×5) remain.
+
+**Tier H** remaining: Pattern1/ReturnOrderBy2 wrong-error-type (4 trivial).
 
 ---
 
-## 2. Failure Inventory by Family
+## 2. Failure Inventory — Restated (94 remaining, post-FGH)
 
-| Family                                   | Count | Tier |
-|------------------------------------------|------:|------|
-| Duration arithmetic (Temporal8)          |    13 | F    |
-| DST / IANA timezone (Temporal2/3/10)     |    10 | J    |
-| Phase 4+ complex return expression       |    26 | I    |
-| UNWIND of variable / non-literal list    |    10 | I    |
-| Row-count mismatch (var-length, MERGE)   |    11 | G    |
-| Result-set mismatch (precedence, merge)  |     7 | G/H  |
-| Quantifier11 + List12 edge cases         |     6 | I    |
-| Missing SyntaxError check                |     1 | H    |
-| Missing runtime error (DELETE constr.)   |     1 | K    |
-| **Total failures**                       |    84 |      |
-| Parse errors                             |     8 | H    |
-| Lone skip (in-order list-aware step)     |     1 | H    |
+> KEY FINDING: the "Tier I (L2-runtime)" label was applied too broadly in the
+> original plan. Full audit as of 2026-05-13 shows only **~37** failures genuinely
+> need the post-projection interpreter. The remaining **~57** are unfinished
+> Tier F/G/H/J work.
+
+| Family                                          | Count | Tier | L2? |
+|-------------------------------------------------|------:|------|-----|
+| Duration arithmetic (Temporal8)                 |    17 | F    | No  |
+| DST / IANA timezone (Temporal2/3/10)            |    10 | J    | No  |
+| MERGE+WITH binding propagation (Merge1/5)       |     7 | G    | No  |
+| `relationships(p)` / `nodes(p)` post-projection |    16 | I    | Yes |
+| UNWIND of variable (Quantifier11)               |     6 | I    | Yes |
+| var-length *0 zero-hop (Match5/6)               |     5 | G    | No  |
+| UNWIND [node, rel, …] in harness                |     4 | H    | No  |
+| translator singletons (Graph3/4, With6, etc.)   |     4 | G    | No  |
+| collect+iterate / List12                        |     4 | I    | Yes |
+| Wrong-error-type trivial (Delete1/Pattern1/ROB2)|     4 | H    | No  |
+| var-length misc (Match4:111, Match6:273)        |     3 | G    | No  |
+| collect+precedence (WithOrderBy1, Precedence1)  |     3 | I    | Yes |
+| var-length undirected overcount (Match5:521/564)|     2 | G    | No  |
+| properties(n) map (Graph9)                      |     2 | I    | Yes |
+| pattern comprehension in WITH (Pattern2)        |     2 | I    | Yes |
+| path equality (Comparison1)                     |     1 | G    | No  |
+| EXISTS+non-MATCH (ExistentialSubquery2)         |     1 | I    | Yes |
+| Hard / Tier-K (Match4:192, Set1, List11)        |     3 | K    | —   |
+| **Total**                                       |  **94**|     |     |
+
+**Non-L2 total: ~57 · True L2 total: ~34 · Tier-K: 3**
 
 ---
 
@@ -62,11 +93,21 @@ is mechanical.
  2  clauses/return-orderby/ReturnOrderBy1.feature ← Tier I (UNWIND var)
  2  clauses/merge/Merge1.feature                  ← Tier G (WITH→MERGE propagation)
  2  clauses/match/Match4.feature                  ← Tier G (var-length predicate)
- 1  ea: 12 singletons (Quantifier{9,10,12}, List11,
-        Graph{3,4}, Comparison1, With6, Set1,
-        ReturnOrderBy4, Match6, Delete1)
+ 8  clauses/match/Match5.feature                  ← Tier G (*0 zero-hop ×5, overcount ×2, *..1 ×1)
+ 1  clauses/match/Match6.feature                  ← Tier G (named-path zero-hop)
+ 4  clauses/return-orderby/ReturnOrderBy1.feature ← Tier H (UNWIND [n,r,p])
+ 1  clauses/return-orderby/ReturnOrderBy2.feature ← Tier H (wrong error type)
+ 3  clauses/merge/Merge5.feature                  ← Tier G (WITH→MERGE ×3 more)
+ 1  clauses/delete/Delete1.feature                ← Tier H (wrong error type)
+ 1  clauses/set/Set1.feature                      ← Tier K (list-comp over prop)
+ 1  clauses/with/With6.feature                    ← Tier G (WITH * after CREATE)
+ 2  expressions/graph/Graph3-4.feature            ← Tier G (labels()/type() on list elem)
+ 2  expressions/precedence/Precedence1.feature    ← Tier I (collect+prec)
+ 1  expressions/list/List11.feature               ← Tier K (range()+ALL chain)
+ 1  expressions/comparison/Comparison1.feature    ← Tier G (path equality)
+ 1  clauses/return-orderby/ReturnOrderBy4.feature ← Tier G (singleton)
 ─────────────────────────────────────────────────
-84  total failures
+94  total failures (post-FGH)
 ```
 
 ---

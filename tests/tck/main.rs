@@ -538,16 +538,23 @@ fn tck_tz_month(tz: &str, month: i64) -> String {
 }
 
 /// Evaluate a duration({...}) map to an ISO 8601 duration literal string (with outer quotes).
+/// Evaluate a numeric literal expression (integer, float, or negated form) to f64.
+/// Handles `Negate(Integer(n))` produced by the Cypher parser for values like `-14`.
+fn eval_tck_number_f64(v: &Expression) -> Option<f64> {
+    match v {
+        Expression::Literal(Literal::Float(f)) => Some(*f),
+        Expression::Literal(Literal::Integer(n)) => Some(*n as f64),
+        Expression::Negate(inner) => eval_tck_number_f64(inner).map(|f| -f),
+        _ => None,
+    }
+}
+
 fn tck_eval_duration(pairs: &[(String, Expression)]) -> Option<String> {
     let get_f = |key: &str| -> Option<f64> {
         pairs
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(key))
-            .and_then(|(_, v)| match v {
-                Expression::Literal(Literal::Float(f)) => Some(*f),
-                Expression::Literal(Literal::Integer(n)) => Some(*n as f64),
-                _ => None,
-            })
+            .and_then(|(_, v)| eval_tck_number_f64(v))
     };
     let years = get_f("years").or_else(|| get_f("year"));
     let months_f = get_f("months").or_else(|| get_f("month")).unwrap_or(0.0);
@@ -2074,6 +2081,7 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
     let store = world
         .store
         .get_or_insert_with(|| OxStore(Store::new().unwrap()));
+
     // Register urn:polygraph:unsupported-pow as a real custom function so that
     // unknown-custom-function errors don't break the pow null-propagation tests.
     // When either operand is unbound (Cypher null), spareval returns None before
