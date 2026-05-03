@@ -89,21 +89,37 @@ fn expr_contains_rand(expr: &crate::ast::cypher::Expression) -> bool {
     use crate::ast::cypher::Expression;
     match expr {
         Expression::FunctionCall { name, .. } if name.to_ascii_lowercase() == "rand" => true,
-        Expression::Or(a, b) | Expression::And(a, b) | Expression::Add(a, b)
-        | Expression::Subtract(a, b) | Expression::Multiply(a, b)
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
         | Expression::Comparison(a, _, b) => expr_contains_rand(a) || expr_contains_rand(b),
-        Expression::Not(e) | Expression::Negate(e) | Expression::IsNull(e)
+        Expression::Not(e)
+        | Expression::Negate(e)
+        | Expression::IsNull(e)
         | Expression::IsNotNull(e) => expr_contains_rand(e),
         Expression::FunctionCall { args, .. } => args.iter().any(expr_contains_rand),
         Expression::List(items) => items.iter().any(expr_contains_rand),
-        Expression::ListComprehension { list, predicate, projection, .. } => {
+        Expression::ListComprehension {
+            list,
+            predicate,
+            projection,
+            ..
+        } => {
             expr_contains_rand(list)
                 || predicate.as_deref().map_or(false, expr_contains_rand)
                 || projection.as_deref().map_or(false, expr_contains_rand)
         }
-        Expression::CaseExpression { operand, whens, else_expr } => {
+        Expression::CaseExpression {
+            operand,
+            whens,
+            else_expr,
+        } => {
             operand.as_deref().map_or(false, expr_contains_rand)
-                || whens.iter().any(|(w, t)| expr_contains_rand(w) || expr_contains_rand(t))
+                || whens
+                    .iter()
+                    .any(|(w, t)| expr_contains_rand(w) || expr_contains_rand(t))
                 || else_expr.as_deref().map_or(false, expr_contains_rand)
         }
         _ => false,
@@ -119,9 +135,11 @@ fn clause_expr_is_opaque(
 ) -> bool {
     use crate::ast::cypher::Expression;
     match expr {
-        Expression::ListComprehension { list, predicate: Some(pred), .. } => {
-            matches!(list.as_ref(), Expression::Variable(_)) && expr_contains_rand(pred)
-        }
+        Expression::ListComprehension {
+            list,
+            predicate: Some(pred),
+            ..
+        } => matches!(list.as_ref(), Expression::Variable(_)) && expr_contains_rand(pred),
         Expression::Add(a, b) => {
             let a_opaque = clause_expr_is_opaque(a, opaque_vars)
                 || matches!(a.as_ref(), Expression::Variable(v) if opaque_vars.contains(v.as_str()));
@@ -129,7 +147,9 @@ fn clause_expr_is_opaque(
                 || matches!(b.as_ref(), Expression::Variable(v) if opaque_vars.contains(v.as_str()));
             a_opaque || b_opaque
         }
-        Expression::CaseExpression { whens, else_expr, .. } => {
+        Expression::CaseExpression {
+            whens, else_expr, ..
+        } => {
             whens.iter().any(|(_, t)| {
                 clause_expr_is_opaque(t, opaque_vars)
                     || matches!(t, Expression::Variable(v) if opaque_vars.contains(v.as_str()))
@@ -140,7 +160,8 @@ fn clause_expr_is_opaque(
         }
         Expression::Variable(v) => opaque_vars.contains(v.as_str()),
         Expression::FunctionCall { name, args, .. }
-            if name.to_ascii_lowercase() == "coalesce" || name.to_ascii_lowercase() == "reverse" =>
+            if name.to_ascii_lowercase() == "coalesce"
+                || name.to_ascii_lowercase() == "reverse" =>
         {
             args.iter().any(|a| {
                 clause_expr_is_opaque(a, opaque_vars)
@@ -183,19 +204,25 @@ fn quantifier_canonical(
     use crate::ast::cypher::{CompOp, Expression, Literal, QuantifierKind};
 
     match expr {
-        Expression::QuantifierExpr { kind, list, predicate, .. } => {
+        Expression::QuantifierExpr {
+            kind,
+            list,
+            predicate,
+            ..
+        } => {
             let lv = match list.as_ref() {
                 Expression::Variable(v) if opaque_vars.contains(v.as_str()) => v.clone(),
                 _ => return None,
             };
-            let pred_raw = predicate.as_deref()
+            let pred_raw = predicate
+                .as_deref()
                 .cloned()
                 .unwrap_or(Expression::Literal(Literal::Boolean(true)));
             let (neg, base) = strip_not_chain(pred_raw);
             Some(match kind {
                 QuantifierKind::None => (lv, 0u8, base, neg),
-                QuantifierKind::Any  => (lv, 1u8, base, neg),
-                QuantifierKind::All  => (lv, 0u8, base, !neg), // all(P) = none(NOT P)
+                QuantifierKind::Any => (lv, 1u8, base, neg),
+                QuantifierKind::All => (lv, 0u8, base, !neg), // all(P) = none(NOT P)
                 QuantifierKind::Single => (lv, 2u8, base, neg),
             })
         }
@@ -221,10 +248,13 @@ fn quantifier_canonical(
                     }) = args.first()
                     {
                         let lv = match lc_list.as_ref() {
-                            Expression::Variable(v) if opaque_vars.contains(v.as_str()) => v.clone(),
+                            Expression::Variable(v) if opaque_vars.contains(v.as_str()) => {
+                                v.clone()
+                            }
                             _ => return None,
                         };
-                        let pred_raw = lc_pred.as_deref()
+                        let pred_raw = lc_pred
+                            .as_deref()
                             .cloned()
                             .unwrap_or(Expression::Literal(Literal::Boolean(true)));
                         let (neg, base) = strip_not_chain(pred_raw);
@@ -236,8 +266,9 @@ fn quantifier_canonical(
                                         1 => Some((lv, 2u8, base, neg)),
                                         _ => None,
                                     }
-                                } else if let Expression::FunctionCall { name: n2, args: a2, .. } =
-                                    rhs.as_ref()
+                                } else if let Expression::FunctionCall {
+                                    name: n2, args: a2, ..
+                                } = rhs.as_ref()
                                 {
                                     // size([P]) = size(L) → all(P)
                                     if n2.to_ascii_lowercase() == "size" {
@@ -282,16 +313,21 @@ fn eval_quantifier_tautology(
 
     match expr {
         // Constant-predicate quantifiers (results independent of list size for some kinds)
-        Expression::QuantifierExpr { kind, list, predicate: Some(pred), .. } => {
+        Expression::QuantifierExpr {
+            kind,
+            list,
+            predicate: Some(pred),
+            ..
+        } => {
             if matches!(list.as_ref(), Expression::Variable(v) if opaque_vars.contains(v.as_str()))
             {
                 match try_eval_bool_const(pred) {
                     Some(Some(false)) => {
                         return match kind {
-                            QuantifierKind::None => Some(true),   // none(F) = true ∀L
-                            QuantifierKind::Any => Some(false),   // any(F)  = false ∀L
-                            QuantifierKind::Single => Some(false),// single(F) = false ∀L
-                            QuantifierKind::All => None,          // all(F) depends on list being non-empty
+                            QuantifierKind::None => Some(true),    // none(F) = true ∀L
+                            QuantifierKind::Any => Some(false),    // any(F)  = false ∀L
+                            QuantifierKind::Single => Some(false), // single(F) = false ∀L
+                            QuantifierKind::All => None, // all(F) depends on list being non-empty
                         };
                     }
                     Some(Some(true)) => {
@@ -382,12 +418,13 @@ fn cypher_compare(
         (Expression::Literal(Literal::Float(x)), Expression::Literal(Literal::Float(y))) => {
             x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
         }
-        (Expression::Literal(Literal::Integer(x)), Expression::Literal(Literal::Float(y))) => {
-            (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
-        }
-        (Expression::Literal(Literal::Float(x)), Expression::Literal(Literal::Integer(y))) => {
-            x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal)
-        }
+        (Expression::Literal(Literal::Integer(x)), Expression::Literal(Literal::Float(y))) => (*x
+            as f64)
+            .partial_cmp(y)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Expression::Literal(Literal::Float(x)), Expression::Literal(Literal::Integer(y))) => x
+            .partial_cmp(&(*y as f64))
+            .unwrap_or(std::cmp::Ordering::Equal),
         (Expression::Literal(Literal::String(x)), Expression::Literal(Literal::String(y))) => {
             x.cmp(y)
         }
@@ -754,7 +791,6 @@ fn is_ambiguous_aggregation<'a>(item: &'a Expression, non_agg_items: &[&'a Expre
         free_terms.iter().any(|ft| !non_agg_items.contains(ft))
     }
 }
-
 
 include!("semantics.rs");
 
@@ -1501,8 +1537,7 @@ impl TranslationState {
         use crate::result_mapping::schema::{ColumnKind, ProjectedColumn};
 
         // ── Step 1: Build opaque list variable set ────────────────────────────
-        let mut opaque_vars: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut opaque_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
         for clause in clauses {
             if let Clause::With(w) = clause {
                 let items = match &w.items {
@@ -1525,13 +1560,21 @@ impl TranslationState {
 
         // ── Step 2: Find final With and Return clauses ────────────────────────
         let return_clause = clauses.iter().rev().find_map(|c| {
-            if let Clause::Return(r) = c { Some(r) } else { None }
+            if let Clause::Return(r) = c {
+                Some(r)
+            } else {
+                None
+            }
         })?;
 
         // The final WITH (immediately before RETURN) must contain the aggregation
         // pattern: `WITH <tautology> AS result, count(*) AS cnt`
         let last_with = clauses.iter().rev().find_map(|c| {
-            if let Clause::With(w) = c { Some(w) } else { None }
+            if let Clause::With(w) = c {
+                Some(w)
+            } else {
+                None
+            }
         })?;
 
         // ── Step 3: Evaluate non-aggregate items in the final WITH ─────────────
@@ -1597,7 +1640,9 @@ impl TranslationState {
             ));
             schema_cols.push(ProjectedColumn {
                 name: alias.to_string(),
-                kind: ColumnKind::Scalar { var: alias.to_string() },
+                kind: ColumnKind::Scalar {
+                    var: alias.to_string(),
+                },
             });
             result_vars.push(var);
             result_binding.push(Some(gt));
@@ -1615,9 +1660,9 @@ impl TranslationState {
                 Expression::Variable(v) if opaque_vars.contains(v.as_str())),
             Clause::With(w) => {
                 if let ReturnItems::Explicit(items) = &w.items {
-                    items.iter().any(|it| {
-                        matches!(&it.expression, Expression::List(lst) if !lst.is_empty())
-                    })
+                    items.iter().any(
+                        |it| matches!(&it.expression, Expression::List(lst) if !lst.is_empty()),
+                    )
                 } else {
                     false
                 }
@@ -1683,7 +1728,6 @@ impl TranslationState {
             Ok(pattern)
         }
     }
-
 }
 
 include!("clauses.rs");
@@ -1693,8 +1737,6 @@ include!("patterns.rs");
 include!("return_proj.rs");
 
 impl TranslationState {
-
-
     // ── Expression translation ────────────────────────────────────────────────
 
     /// Translate a Cypher [`Expression`] to a spargebra [`SparExpr`].
@@ -1771,6 +1813,30 @@ impl TranslationState {
                     } else {
                         // Key not found → null
                         return Ok(SparExpr::Variable(self.fresh_var("null")));
+                    }
+                }
+                // Handle startNode(r).prop and endNode(r).prop by rewriting to the
+                // underlying node variable's property access.
+                if let Expression::FunctionCall { name: fn_name, args: fn_args, .. } =
+                    base_expr.as_ref()
+                {
+                    let fn_lc = fn_name.to_ascii_lowercase();
+                    if (fn_lc == "startnode" || fn_lc == "endnode") && fn_args.len() == 1 {
+                        if let Some(Expression::Variable(rel_var)) = fn_args.first() {
+                            if let Some(edge) = self.edge_map.get(rel_var.as_str()).cloned() {
+                                let node_term =
+                                    if fn_lc == "startnode" { &edge.src } else { &edge.dst };
+                                if let TermPattern::Variable(node_var) = node_term {
+                                    let rewritten = Expression::Property(
+                                        Box::new(Expression::Variable(
+                                            node_var.as_str().to_string(),
+                                        )),
+                                        key.clone(),
+                                    );
+                                    return self.translate_expr(&rewritten, extra);
+                                }
+                            }
+                        }
                     }
                 }
                 // If base is a list subscript expression that resolves to a known variable
@@ -2356,10 +2422,8 @@ impl TranslationState {
                         let xsd_str_expr = SparExpr::NamedNode(xsd_string_nn);
                         // Helper: build the is-plain-string guard for one operand.
                         let make_str_guard = |x: SparExpr, dt: SparExpr| {
-                            let bracket =
-                                SparExpr::Literal(SparLit::new_simple_literal("["));
-                            let brace =
-                                SparExpr::Literal(SparLit::new_simple_literal("{"));
+                            let bracket = SparExpr::Literal(SparLit::new_simple_literal("["));
+                            let brace = SparExpr::Literal(SparLit::new_simple_literal("{"));
                             let not_list = SparExpr::Not(Box::new(SparExpr::FunctionCall(
                                 spargebra::algebra::Function::StrStarts,
                                 vec![x.clone(), bracket],
@@ -2382,10 +2446,7 @@ impl TranslationState {
                                 )),
                             );
                             SparExpr::And(
-                                Box::new(SparExpr::And(
-                                    Box::new(is_xsd_str),
-                                    Box::new(not_list),
-                                )),
+                                Box::new(SparExpr::And(Box::new(is_xsd_str), Box::new(not_list))),
                                 Box::new(not_map),
                             )
                         };
@@ -3346,8 +3407,6 @@ impl TranslationState {
         );
         Ok(list_expr)
     }
-
-
 }
 
 include!("functions.rs");
@@ -3409,12 +3468,11 @@ fn sort_key_for_expr(e: &crate::ast::cypher::Expression) -> String {
             key
         }
         Expression::Map(_) => "0".to_string(), // maps sort lowest
-        _ => "3".to_string(), // unknown/compound → list-range slot
+        _ => "3".to_string(),                  // unknown/compound → list-range slot
     }
 }
 
 impl TranslationState {
-
     fn translate_aggregate_expr(
         &mut self,
         agg: &AggregateExpr,
@@ -3545,12 +3603,12 @@ impl TranslationState {
                     .map(|e| match e {
                         Expression::Literal(Literal::Null) => Ok(vec![None]),
                         Expression::List(_) | Expression::Map(_) => {
-                        // Nested list or map literal: encode as serialized string.
-                        let encoded = serialize_list_element(e);
-                        Ok(vec![Some(GroundTerm::Literal(
-                            SparLit::new_simple_literal(encoded),
-                        ))])
-                    }
+                            // Nested list or map literal: encode as serialized string.
+                            let encoded = serialize_list_element(e);
+                            Ok(vec![Some(GroundTerm::Literal(
+                                SparLit::new_simple_literal(encoded),
+                            ))])
+                        }
                         _ => {
                             let ground = self.expr_to_ground_term(e)?;
                             let gt = term_pattern_to_ground(ground)?;
@@ -4173,9 +4231,13 @@ impl TranslationState {
                                 get_int(pairs, "day"),
                             ) {
                                 let s = format!("{y:04}-{m:02}-{d:02}");
-                                return Ok(SparLit::new_typed_literal(s,
-                                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#date")
-                                ).into());
+                                return Ok(SparLit::new_typed_literal(
+                                    s,
+                                    NamedNode::new_unchecked(
+                                        "http://www.w3.org/2001/XMLSchema#date",
+                                    ),
+                                )
+                                .into());
                             }
                         }
                         Err(PolygraphError::UnsupportedFeature {
@@ -4200,9 +4262,13 @@ impl TranslationState {
                                         format!("{h:02}:{min:02}:{sec:02}.{ns:09}")
                                     }
                                 };
-                                return Ok(SparLit::new_typed_literal(s,
-                                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#time")
-                                ).into());
+                                return Ok(SparLit::new_typed_literal(
+                                    s,
+                                    NamedNode::new_unchecked(
+                                        "http://www.w3.org/2001/XMLSchema#time",
+                                    ),
+                                )
+                                .into());
                             }
                         }
                         Err(PolygraphError::UnsupportedFeature {
@@ -4235,9 +4301,13 @@ impl TranslationState {
                                         )
                                     }
                                 };
-                                return Ok(SparLit::new_typed_literal(s,
-                                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime")
-                                ).into());
+                                return Ok(SparLit::new_typed_literal(
+                                    s,
+                                    NamedNode::new_unchecked(
+                                        "http://www.w3.org/2001/XMLSchema#dateTime",
+                                    ),
+                                )
+                                .into());
                             }
                         }
                         Err(PolygraphError::UnsupportedFeature {
@@ -4891,7 +4961,6 @@ impl TranslationState {
         None
     }
 }
-
 
 include!("rewrite.rs");
 include!("temporal.rs");

@@ -324,6 +324,50 @@ impl TranslationState {
                             }
                             if let Some(ref mut pvars) = project_vars {
                                 pvars.push(var);
+                                // When there's no aggregation, also project any node/edge
+                                // variables embedded in the list so they remain in scope
+                                // after the WITH boundary for downstream use (e.g.
+                                // `labels(list[0])` when `list = [a, 1]`,
+                                // `type(list[0])` when `list = [r, 1]`).
+                                if aggregates.is_empty() {
+                                    if let Expression::List(elems) = &li.expression {
+                                        for elem in elems {
+                                            if let Expression::Variable(v) = elem {
+                                                let vv = Variable::new_unchecked(v.clone());
+                                                if !pvars.contains(&vv) {
+                                                    pvars.push(vv);
+                                                }
+                                                // For edge variables, also project pred_var,
+                                                // eid_var, src and dst so type(r), r.prop etc.
+                                                // continue to work after the WITH boundary.
+                                                if let Some(edge) =
+                                                    self.edge_map.get(v.as_str()).cloned()
+                                                {
+                                                    if let TermPattern::Variable(sv) = &edge.src {
+                                                        if !pvars.contains(sv) {
+                                                            pvars.push(sv.clone());
+                                                        }
+                                                    }
+                                                    if let TermPattern::Variable(dv) = &edge.dst {
+                                                        if !pvars.contains(dv) {
+                                                            pvars.push(dv.clone());
+                                                        }
+                                                    }
+                                                    if let Some(pv) = &edge.pred_var {
+                                                        if !pvars.contains(pv) {
+                                                            pvars.push(pv.clone());
+                                                        }
+                                                    }
+                                                    if let Some(ev) = &edge.eid_var {
+                                                        if !pvars.contains(ev) {
+                                                            pvars.push(ev.clone());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -1708,11 +1752,37 @@ impl TranslationState {
                                 }
                             });
                             if has_rel_var {
+                                // Augment node patterns with known CREATE properties so the
+                                // undirected UNION only matches in the direction the edge was
+                                // created (not both traversal directions for the same edge).
+                                let mut augmented_elements = m.pattern.elements.clone();
+                                for elem in &mut augmented_elements {
+                                    if let PatternElement::Node(n) = elem {
+                                        if let Some(v) = &n.variable {
+                                            if let Some(prop_map) = self
+                                                .node_props_from_create
+                                                .get(v.as_str())
+                                                .cloned()
+                                            {
+                                                let existing =
+                                                    n.properties.get_or_insert_with(Vec::new);
+                                                for (k, vv) in prop_map {
+                                                    if !existing.iter().any(|(ek, _)| ek == &k) {
+                                                        existing.push((k, vv));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 let match_clause = MatchClause {
                                     optional: false,
-                                    pattern: crate::ast::cypher::PatternList(vec![m
-                                        .pattern
-                                        .clone()]),
+                                    pattern: crate::ast::cypher::PatternList(vec![
+                                        crate::ast::cypher::Pattern {
+                                            variable: m.pattern.variable.clone(),
+                                            elements: augmented_elements,
+                                        },
+                                    ]),
                                     where_: None,
                                 };
                                 // Try to translate as MATCH; fall back to silently skip on error

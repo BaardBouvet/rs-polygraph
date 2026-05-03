@@ -937,6 +937,97 @@ fn emit_create_pattern_with_bindings(
     }
 }
 
+/// Check whether a non-DETACH DELETE would violate the "delete connected node" constraint.
+///
+/// Parses the query, collects MATCH node constraints, then for each non-detach DELETE
+/// variable runs a SPARQL ASK to see if that node has any connected relationships.
+/// Returns `Some("ConstraintVerificationFailed")` if so, `None` otherwise.
+fn check_nondetach_delete_connected(
+    cypher: &str,
+    store: &oxigraph::store::Store,
+) -> Option<String> {
+    use oxigraph::sparql::QueryResults;
+    use polygraph::ast::cypher::{Clause, Expression, PatternElement};
+
+    let query = parse_cypher(cypher).ok()?;
+
+    // Build match_node_triples from MATCH clauses (mirrors write_clauses_to_updates logic).
+    let mut match_node_triples: HashMap<String, Vec<String>> = HashMap::new();
+    let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    for clause in &query.clauses {
+        if let Clause::Match(mc) = clause {
+            for pattern in &mc.pattern.0 {
+                for elem in &pattern.elements {
+                    if let PatternElement::Node(node) = elem {
+                        if let Some(var) = &node.variable {
+                            let mut triples =
+                                vec![format!("?{var} <{BASE}__node> <{BASE}__node>")];
+                            for label in &node.labels {
+                                triples.push(format!("?{var} <{rdf_type}> <{BASE}{label}>"));
+                            }
+                            if let Some(props) = &node.properties {
+                                for (key, val) in props {
+                                    if let Some(lit) = expr_to_sparql_lit(val) {
+                                        triples.push(format!("?{var} <{BASE}{key}> {lit}"));
+                                    }
+                                }
+                            }
+                            match_node_triples.insert(var.clone(), triples);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check each non-DETACH DELETE variable.
+    for clause in &query.clauses {
+        if let Clause::Delete(d) = clause {
+            if d.detach {
+                continue; // DETACH DELETE is always allowed
+            }
+            // Collect all deleted variable names in this DELETE clause.
+            let deleted_vars: Vec<&str> = d
+                .expressions
+                .iter()
+                .filter_map(|e| {
+                    if let Expression::Variable(v) = e {
+                        Some(v.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            // Only check connectivity if ALL deleted variables are known node variables
+            // (i.e., appear in match_node_triples). If any variable is a relationship
+            // variable or otherwise unrecognized, skip — deleting rels along with nodes
+            // is allowed and complex to statically verify.
+            if !deleted_vars
+                .iter()
+                .all(|v| match_node_triples.contains_key(*v))
+            {
+                continue;
+            }
+            for var in &deleted_vars {
+                let node_conds = match_node_triples.get(*var).unwrap();
+                let conds_str = node_conds
+                    .iter()
+                    .map(|t| format!("{t} ."))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                // ASK: does this node have any connected relationships (outgoing or incoming)?
+                let ask = format!(
+                    "ASK {{ {conds_str} {{ ?{var} ?__ck_p ?__ck_dst . ?__ck_dst <{BASE}__node> <{BASE}__node> . }} UNION {{ ?__ck_src ?__ck_p ?{var} . ?__ck_src <{BASE}__node> <{BASE}__node> . }} }}"
+                );
+                if let Ok(QueryResults::Boolean(true)) = store.query(ask.as_str()) {
+                    return Some("ConstraintVerificationFailed".into());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Generate SPARQL UPDATE statements for write clauses (SET, REMOVE, CREATE in a query).
 /// Returns a list of UPDATE strings.
 /// The SELECT query (for the RETURN part) should be generated separately using
@@ -1297,6 +1388,31 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                     }
                     if !triples.is_empty() {
                         updates.push(format!("INSERT DATA {{\n  {}\n}}", triples.join("\n  ")));
+                    }
+                }
+                // After CREATE: populate match_node_triples for new node variables so
+                // that subsequent MERGE relationship clauses can target the specific
+                // created nodes (rather than matching all nodes in the graph).
+                for pattern in &c.pattern.0 {
+                    for elem in &pattern.elements {
+                        if let PatternElement::Node(node) = elem {
+                            if let Some(var) = &node.variable {
+                                if !match_node_triples.contains_key(var.as_str()) {
+                                    let mut triples =
+                                        vec![format!("?{var} <{BASE}__node> <{BASE}__node>")];
+                                    if let Some(props) = &node.properties {
+                                        for (key, val) in props {
+                                            if let Some(lit) = expr_to_sparql_lit(val) {
+                                                triples.push(format!(
+                                                    "?{var} <{BASE}{key}> {lit}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    match_node_triples.insert(var.clone(), triples);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2036,6 +2152,11 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
             let store = world
                 .store
                 .get_or_insert_with(|| OxStore(Store::new().unwrap()));
+            // Check for non-DETACH DELETE of connected nodes (ConstraintVerificationFailed).
+            if let Some(err) = check_nondetach_delete_connected(cypher, &store.0) {
+                world.query_error = Some(err);
+                return;
+            }
             for upd in &updates {
                 if let Err(e) = store.0.update(upd.as_str()) {
                     eprintln!("[TCK write] UPDATE failed: {e}\nQuery: {upd}");

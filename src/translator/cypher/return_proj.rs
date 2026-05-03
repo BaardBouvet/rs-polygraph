@@ -212,6 +212,37 @@ impl TranslationState {
                         }
                     }
                 }
+                // Handle startNode(r).prop and endNode(r).prop by rewriting to the
+                // underlying node variable's property access.
+                if let Expression::FunctionCall { name: fn_name, args: fn_args, .. } =
+                    base_expr.as_ref()
+                {
+                    let fn_lc = fn_name.to_ascii_lowercase();
+                    if (fn_lc == "startnode" || fn_lc == "endnode") && fn_args.len() == 1 {
+                        if let Some(Expression::Variable(rel_var)) = fn_args.first() {
+                            if let Some(edge) = self.edge_map.get(rel_var.as_str()).cloned() {
+                                let node_term =
+                                    if fn_lc == "startnode" { &edge.src } else { &edge.dst };
+                                if let TermPattern::Variable(node_var) = node_term {
+                                    let rewritten_item = ReturnItem {
+                                        expression: Expression::Property(
+                                            Box::new(Expression::Variable(
+                                                node_var.as_str().to_string(),
+                                            )),
+                                            key.clone(),
+                                        ),
+                                        alias: item.alias.clone(),
+                                    };
+                                    return self.translate_return_item(
+                                        &rewritten_item,
+                                        triples,
+                                        extra,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 let base_var = self.extract_variable(base_expr)?;
                 let var_name = base_var.as_str().to_string();
                 // Check if base is a virtual map alias from head(collect({...})).

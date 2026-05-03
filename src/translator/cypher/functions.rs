@@ -733,6 +733,26 @@ impl TranslationState {
                     feature: "keys() on non-literal map".to_string(),
                 })
             }
+            "startnode" | "endnode" => {
+                // startNode(r) → the start (subject) node variable of relationship r.
+                // endNode(r)   → the end   (object)  node variable of relationship r.
+                if let Some(Expression::Variable(rel_var)) = args.first() {
+                    if let Some(edge) = self.edge_map.get(rel_var.as_str()).cloned() {
+                        let node_term =
+                            if name_lower == "startnode" { &edge.src } else { &edge.dst };
+                        if let TermPattern::Variable(node_var) = node_term {
+                            return Ok(SparExpr::Variable(node_var.clone()));
+                        }
+                    }
+                }
+                // startNode(null) = null
+                if let Some(Expression::Literal(Literal::Null)) = args.first() {
+                    return Ok(SparExpr::Variable(self.fresh_var("null")));
+                }
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: format!("{name}() on non-edge-variable argument"),
+                })
+            }
             "labels" | "relationships" => {
                 // For null literal or statically-null/nullable variables, return null.
                 // For real node/path variables we can't enumerate labels/relationships at
