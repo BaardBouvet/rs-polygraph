@@ -1438,6 +1438,17 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             };
 
                             // INSERT template: create a fresh blank node with labels+props.
+                            // Check if any MERGE property references an outer-scope variable
+                            // that can't be resolved as a literal. In that case, skip the
+                            // INSERT (the write can't be done statically without MATCH context).
+                            let has_unresolved_prop = node.properties.as_ref().map_or(false, |props| {
+                                props.iter().any(|(_, val)| resolve_val(val, &bindings_map).is_none()
+                                    && !matches!(val, Expression::Literal(_)))
+                            });
+                            if has_unresolved_prop {
+                                // Skip INSERT — properties reference MATCH-derived variables.
+                                continue;
+                            }
                             let bnode = format!("_:n{iter}");
                             let mut insert_triples: Vec<String> = Vec::new();
                             insert_triples.push(format!("{bnode} <{BASE}__node> <{BASE}__node>"));

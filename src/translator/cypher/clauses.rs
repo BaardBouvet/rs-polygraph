@@ -1615,7 +1615,26 @@ impl TranslationState {
                         };
                         let (match_pattern, opt_filter2, where_extra) =
                             self.translate_match_clause(&match_clause, &mut extra_triples)?;
-                        current = join_patterns(current, match_pattern);
+                        // If the MERGE node has no variable (anonymous), it doesn't bind
+                        // any result variable — use LEFT JOIN so it doesn't filter rows
+                        // when the node hasn't been created yet (or has properties derived
+                        // from outer MATCH variables that won't match at SELECT time).
+                        let merge_node_has_var = if let PatternElement::Node(node) =
+                            &m.pattern.elements[0]
+                        {
+                            node.variable.is_some()
+                        } else {
+                            false
+                        };
+                        if merge_node_has_var {
+                            current = join_patterns(current, match_pattern);
+                        } else {
+                            current = GraphPattern::LeftJoin {
+                                left: Box::new(current),
+                                right: Box::new(match_pattern),
+                                expression: None,
+                            };
+                        }
                         for tp in where_extra {
                             current = GraphPattern::LeftJoin {
                                 left: Box::new(current),
