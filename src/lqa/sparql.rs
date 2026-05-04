@@ -141,6 +141,17 @@ struct Compiler {
     /// Variables introduced by Scan / Expand ops ("node" and "edge" variables),
     /// tracked so that BIND in projections can detect collisions and use fresh names.
     scan_vars: HashSet<String>,
+    /// Variables produced by UNWIND of a list that contained at least one null.
+    /// For these variables, aggregate GROUP BY patterns add FILTER(BOUND(?var))
+    /// to work around Oxigraph's non-spec behaviour where MAX/MIN over VALUES
+    /// with UNDEF returns null instead of the non-null values.
+    unwind_null_vars: HashSet<String>,
+    /// Pending BIND expressions: `(fresh_var, sparql_expr)` pairs that need to be
+    /// emitted as `GraphPattern::Extend` nodes before they are referenced.
+    /// Used by `IsNull`/`IsNotNull` lowering when the inner expression is complex
+    /// (not a simple variable): the expression must be evaluated and bound so that
+    /// `BOUND(?probe)` reliably detects null/error propagation.
+    pending_binds: Vec<(Variable, SparExpr)>,
     /// Anonymous edge hops in the current MATCH pattern, tracked for relationship-uniqueness
     /// filtering.  Each entry is (from_var_name, predicate_info, to_var_name) for one hop.
     anon_edge_info: Vec<(String, EdgePred, String)>,
@@ -162,6 +173,8 @@ impl Compiler {
             pending_optional_groups: Vec::new(),
             pending_optional_patterns: Vec::new(),
             scan_vars: HashSet::new(),
+            unwind_null_vars: HashSet::new(),
+            pending_binds: Vec::new(),
             anon_edge_info: Vec::new(),
         }
     }
@@ -221,6 +234,7 @@ impl Compiler {
         let opt_triples = std::mem::take(&mut self.pending_optional_triples);
         let opt_groups = std::mem::take(&mut self.pending_optional_groups);
         let opt_patterns = std::mem::take(&mut self.pending_optional_patterns);
+        let binds = std::mem::take(&mut self.pending_binds);
         let mut result = if triples.is_empty() {
             pat
         } else {
@@ -250,6 +264,15 @@ impl Compiler {
                 left: Box::new(result),
                 right: Box::new(opt_pat),
                 expression: None,
+            };
+        }
+        // Pending BINDs: emit as Extend nodes after the inner pattern so that
+        // IS NULL probe variables are bound before being referenced.
+        for (var, expr) in binds {
+            result = GraphPattern::Extend {
+                inner: Box::new(result),
+                variable: var,
+                expression: expr,
             };
         }
         result
@@ -712,6 +735,28 @@ impl Compiler {
                     variable: var,
                     expression: expr,
                 };
+            }
+
+            // Add FILTER(BOUND(?var)) for variables that came from UNWIND lists
+            // containing null. Without this, Oxigraph's MAX/MIN/SUM over a VALUES
+            // block that has UNDEF rows may return null instead of the correct
+            // aggregate of non-null values (non-conformant with SPARQL 1.1 §18.5.1).
+            for null_var_name in &self.unwind_null_vars {
+                // Only filter if this variable actually appears in the aggregation.
+                let var_appears_in_agg = agg_items.iter().any(|ai| {
+                    if let Expr::Aggregate { arg: Some(a), .. } = &ai.expr {
+                        matches!(a.as_ref(), Expr::Variable { name, .. } if name == null_var_name)
+                    } else {
+                        false
+                    }
+                });
+                if var_appears_in_agg {
+                    let bound_filter = SparExpr::Bound(Self::var(null_var_name));
+                    group_inner = GraphPattern::Filter {
+                        expr: bound_filter,
+                        inner: Box::new(group_inner),
+                    };
+                }
             }
 
             let group_pattern = GraphPattern::Group {
@@ -1601,10 +1646,18 @@ impl Compiler {
                 if let Expr::List(items) = list {
                     let inner_pat = self.lower_op(inner)?;
                     let var = Self::var(variable);
+                    let has_null = items.iter().any(|i| matches!(i, Expr::Literal(crate::lqa::expr::Literal::Null)));
                     let bindings = items
                         .iter()
                         .map(|item| literal_to_ground(item).map(|g| vec![g]))
                         .collect::<Result<Vec<_>, _>>()?;
+                    // Track variables produced by UNWIND lists that contain nulls.
+                    // Aggregates using these variables need FILTER(BOUND(?var)) to work
+                    // around Oxigraph returning null instead of the non-null values
+                    // (Oxigraph's aggregate UNDEF handling does not fully match SPARQL 1.1).
+                    if has_null {
+                        self.unwind_null_vars.insert(variable.clone());
+                    }
                     let values = GraphPattern::Values {
                         variables: vec![var],
                         bindings,
@@ -2635,9 +2688,13 @@ impl Compiler {
                 if let SparExpr::Variable(v) = &inner {
                     Ok(SparExpr::Not(Box::new(SparExpr::Bound(v.clone()))))
                 } else {
-                    Ok(SparExpr::Not(Box::new(SparExpr::Bound(
-                        self.fresh("isnull_probe"),
-                    ))))
+                    // Complex expression: bind it to a fresh probe variable so that
+                    // BOUND(?probe) correctly detects null/error propagation.
+                    // When the expression errors (e.g. due to an UNDEF operand),
+                    // BIND leaves the probe unbound, making !BOUND = true (IS NULL).
+                    let probe = self.fresh("isnull_probe");
+                    self.pending_binds.push((probe.clone(), inner));
+                    Ok(SparExpr::Not(Box::new(SparExpr::Bound(probe))))
                 }
             }
             Expr::IsNotNull(e) => {
@@ -2660,7 +2717,11 @@ impl Compiler {
                 if let SparExpr::Variable(v) = &inner {
                     Ok(SparExpr::Bound(v.clone()))
                 } else {
-                    Ok(SparExpr::Bound(self.fresh("isnotnull_probe")))
+                    // Complex expression: bind it to a fresh probe variable so that
+                    // BOUND(?probe) correctly detects null/error propagation.
+                    let probe = self.fresh("isnotnull_probe");
+                    self.pending_binds.push((probe.clone(), inner));
+                    Ok(SparExpr::Bound(probe))
                 }
             }
 

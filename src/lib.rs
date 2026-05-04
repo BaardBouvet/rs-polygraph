@@ -334,14 +334,15 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
         }
     }
 
-    // Route MATCH…RETURN (or MATCH…WITH…RETURN) and UNWIND-first…RETURN shapes through LQA.
+    // Route MATCH…RETURN and UNWIND-first…RETURN shapes through LQA.
     // WITH-first and bare-RETURN queries may have SyntaxError semantics or scoping
     // issues that LQA doesn't yet handle, so they stay on the legacy path.
-    // Only route MATCH…RETURN (or MATCH…WITH…RETURN) shapes through LQA.
-    // UNWIND-first queries require additional fixes (float/string aggregate type
-    // handling, XOR null semantics) before being safely expanded here.
-    if clause_kinds.first() != Some(&"match") || clause_kinds.last() != Some(&"return") {
-        return Some("clause_shape");
+    {
+        let first = clause_kinds.first().copied();
+        let last = clause_kinds.last().copied();
+        if last != Some("return") || (first != Some("match") && first != Some("unwind")) {
+            return Some("clause_shape");
+        }
     }
 
     let mut bound_vars: HashSet<&str> = HashSet::new();
