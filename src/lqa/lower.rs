@@ -512,9 +512,17 @@ impl AstLowerer {
             ast::ReturnItems::Explicit(list) => {
                 for item in list {
                     let alias = item.alias.clone().unwrap_or_else(|| {
-                        let a = format!("_gen_{gen_counter}");
-                        gen_counter += 1;
-                        a
+                        // If the expression is a bare variable reference, use its name as the
+                        // implicit alias (e.g. `WITH i` or `RETURN x` → alias = "i"/"x"),
+                        // matching openCypher semantics. Only generate a fresh name for
+                        // computed expressions that have no natural identifier.
+                        if let ast::Expression::Variable(v) = &item.expression {
+                            v.clone()
+                        } else {
+                            let a = format!("_gen_{gen_counter}");
+                            gen_counter += 1;
+                            a
+                        }
                     });
                     let expr = self.lower_expr(&item.expression)?;
                     // Check if this expression is/wraps an aggregate.

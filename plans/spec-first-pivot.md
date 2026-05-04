@@ -1,7 +1,7 @@
 # Spec-First Pivot — From TCK-Driven Patches to Semantics-Driven Translation
 
 **Status**: in progress
-**Updated**: 2026-05-28 (Phase 5 COMPLETE: LQA allow-list expanded; TCK 3757/3828; difftest 204/204)
+**Updated**: 2026-06-01 (Phase 6 in progress: WITH/UNION routed through LQA; TCK 3757/3828; difftest 204/204)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,
@@ -521,7 +521,47 @@ exposed by the wider routing.
 - ✅ ORDER BY, OPTIONAL MATCH routed through LQA where safe
 - ✅ Property null-propagation semantics correct
 
-### Phase 6 — Public API Hardening
+### Phase 6 — WITH/UNION LQA Routing + Legacy Path Shrinkage  (🚧 in progress)
+
+**Goal:** route `WITH` and `UNION` queries through the LQA path with correct
+semantics, fix the SPARQL-scoping bugs exposed by the wider routing, and route
+GQL through the shared LQA path. No legacy translation should be needed for
+well-formed read queries covered by the current TCK.
+
+**Baseline before this phase:** difftest 204/204; TCK 3757/3828.
+
+**Bugs fixed:**
+
+| Bug | Root cause | Fix location |
+|-----|-----------|-------------|
+| `WITH x` (no alias) generates `_gen_0` | `lower_return_items` always assigned `_gen_N` for items without explicit `AS` alias | `lower_return_items`: check for `Expression::Variable`, use variable name as implicit alias |
+| Mid-pipeline `WITH` doesn't flush `pending_optional_triples` | `lower_op(Op::Projection)` only called `mem::take(&mut pending_triples)`, not `flush_pending()` | `lower_op(Op::Projection)`: call `self.flush_pending(gp)` before emitting `Extend` |
+| Property access on scalar `WITH`-alias (e.g. `WITH v.date AS d RETURN d.year`) | LQA tried `OPTIONAL { ?d :year ?_year }` where `?d` is an RDF literal — impossible as triple subject | Added `scalar_vars: HashSet<String>` to `Compiler`; Extend in mid-pipeline Projection marks alias as scalar; `lower_expr(Property)` checks scalar_vars → `Err(Unsupported)` → legacy fallback |
+| `MATCH (a:A) WITH a.x AS x MATCH (b:B) WHERE x = b.x` — FILTER inside nested `{ }` hides `?x` | `CartesianProduct { left: Projection, right: Selection }` serialises as `left_bgp { right_bgp FILTER }` — SPARQL `{ }` creates a new scope where outer BIND variables are invisible | `lower_op(CartesianProduct)`: if right is `GraphPattern::Filter`, lift it above the join: `Filter { expr, inner: join(lp, right_inner) }` |
+| `WITH a, b / WITH a ORDER BY c` — LQA doesn't detect out-of-scope ORDER BY var | `is_lqa_safe()` allowed all WITH clauses unconditionally; Oxigraph generates results instead of erroring | Added `clause_scope` tracking in `is_lqa_safe()`; `sort_expr_in_scope()` validates ORDER BY vars after each WITH — returns `false` if any sort var is not in the projected scope, routing to legacy which raises `SyntaxError: UndefinedVariable` |
+
+**Widened `is_lqa_safe()` allow-list:**
+
+| Construct | Before (Phase 5) | After (Phase 6) |
+|-----------|-----------------|----------------|
+| `WITH` clauses | ✗ (legacy) | ✓ with scalar-property fallback to legacy |
+| `UNION` / `UNION ALL` | ✗ (legacy) | ✓ |
+| GQL `gql_to_sparql` | direct legacy | LQA first, legacy fallback |
+| ORDER BY in 2nd+ WITH (scope validation) | ✗ validated | ✓ scope-checked; out-of-scope vars fall back to legacy |
+
+**Results:**
+- TCK: **3757/3828** (baseline maintained; WITH/UNION routing introduced 14 regressions that were all fixed)
+- GQL integration: `filter_eq_string` now passing via LQA path (-1 failure vs Phase 5)
+- No difftest regressions (204/204)
+
+**Remaining work to complete legacy elimination:**
+- Named relationship variables (routes to legacy via `is_lqa_safe()` rel-var check)
+- Variable-length paths (routes to legacy)
+- `cypher_to_sparql_skip_writes` still calls legacy directly (complex: needs stripped-AST LQA routing)
+- Write clauses are handled externally by TCK runner
+- Full legacy deletion deferred until all read-query pass cases covered by LQA
+
+### Phase 6b — Public API Hardening  (planned)
 
 **Goal:** make the library safe to depend on for non-TCK users.
 

@@ -83,6 +83,10 @@ struct Compiler {
     /// Projected column schema collected from the topmost Projection op.
     projected_columns: Vec<ProjectedColumn>,
     return_distinct: bool,
+    /// Variables bound by BIND/Extend (not by Scan/Expand) that hold scalar RDF values
+    /// (literals, dates, etc.) rather than node IRIs.  Property access on these variables
+    /// cannot be lowered to a triple pattern and must fall back to the legacy translator.
+    scalar_vars: HashSet<String>,
 }
 
 impl Compiler {
@@ -96,6 +100,7 @@ impl Compiler {
             edge_types: HashMap::new(),
             projected_columns: Vec::new(),
             return_distinct: false,
+            scalar_vars: HashSet::new(),
         }
     }
 
@@ -755,15 +760,16 @@ impl Compiler {
                         _ => {
                             // Emit Extend to bind the alias variable.
                             let e = self.lower_expr(&pi.expr)?;
-                            let flush = std::mem::take(&mut self.pending_triples);
-                            if !flush.is_empty() {
-                                gp = join(gp, GraphPattern::Bgp { patterns: flush });
-                            }
+                            // Flush both required and optional pending triples BEFORE the BIND
+                            // so the OPTIONAL { } blocks that define helper variables appear
+                            // in SPARQL order before the BIND that uses them.
+                            gp = self.flush_pending(gp);
                             gp = GraphPattern::Extend {
                                 inner: Box::new(gp),
                                 variable: Self::var(&pi.alias),
                                 expression: e,
                             };
+                            self.scalar_vars.insert(pi.alias.clone());
                         }
                     }
                 }
@@ -870,7 +876,18 @@ impl Compiler {
             Op::CartesianProduct { left, right } => {
                 let lp = self.lower_op(left)?;
                 let rp = self.lower_op(right)?;
-                Ok(join(lp, rp))
+                // If the right pattern is a Filter (i.e. the right side came from a
+                // MATCH…WHERE clause), lift the FILTER above the join so that variables
+                // bound by BIND in the left side remain visible.  Without this, spargebra
+                // wraps the right side in a nested `{ }` group that hides outer BIND
+                // variables from the FILTER condition.
+                match rp {
+                    GraphPattern::Filter { expr, inner } => Ok(GraphPattern::Filter {
+                        expr,
+                        inner: Box::new(join(lp, *inner)),
+                    }),
+                    other => Ok(join(lp, other)),
+                }
             }
 
             Op::LeftOuterJoin {
@@ -1030,6 +1047,21 @@ impl Compiler {
             },
 
             Expr::Property(base, key) => {
+                // If the base is a scalar variable (bound via BIND/Extend, not Scan),
+                // it holds an RDF literal and cannot be the subject of a triple.
+                // Fall back to the legacy translator for these cases.
+                if let Expr::Variable { name, .. } = base.as_ref() {
+                    if self.scalar_vars.contains(name) {
+                        return Err(PolygraphError::Unsupported {
+                            construct: "property access on scalar variable".into(),
+                            spec_ref: "openCypher 9 §6.1".into(),
+                            reason: format!(
+                                "Variable `{name}` is bound to a scalar value (not a node); \
+                                 triple-based property access is not applicable"
+                            ),
+                        });
+                    }
+                }
                 let base_expr = self.lower_expr(base)?;
                 let base_var = match &base_expr {
                     SparExpr::Variable(v) => v.clone(),
