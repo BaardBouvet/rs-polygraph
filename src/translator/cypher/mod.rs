@@ -82,6 +82,13 @@ pub fn translate_skip_writes(
     translate_impl(query, base_iri, rdf_star, true)
 }
 
+/// Run only the semantic validation pass (VariableTypeConflict, VariableAlreadyBound,
+/// etc.) without performing full translation. Used by `try_lqa_path` to ensure
+/// semantic errors are raised even when the LQA path handles the query.
+pub fn check_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
+    validate_semantics(query)
+}
+
 // ── Q1: Quantifier tautology folding helpers ─────────────────────────────────
 
 /// Returns true if `expr` contains a call to `rand()` anywhere.

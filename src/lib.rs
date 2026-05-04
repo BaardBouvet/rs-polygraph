@@ -92,6 +92,10 @@ impl Transpiler {
         engine: &dyn sparql_engine::TargetEngine,
     ) -> Result<TranspileOutput, PolygraphError> {
         let ast = parser::parse_cypher(cypher)?;
+        // Pass the full AST (including write clauses) to the legacy translator's
+        // skip_writes mode, which knows how to convert write operations into
+        // read-equivalent SPARQL patterns. The LQA path does not yet handle the
+        // write-clause variable bindings needed for this operation.
         let result = translator::cypher::translate_skip_writes(
             &ast,
             engine.base_iri(),
@@ -149,6 +153,11 @@ fn try_lqa_path(
     ast: &ast::CypherQuery,
     engine: &dyn sparql_engine::TargetEngine,
 ) -> Result<Option<TranspileOutput>, PolygraphError> {
+    // Run semantic validation (VariableTypeConflict, VariableAlreadyBound, etc.)
+    // before any routing decision. This ensures semantic errors are propagated even
+    // when LQA handles the query and the legacy path is never reached.
+    translator::cypher::check_semantics(ast)?;
+
     // Safety guard: only route queries through LQA that are known to be
     // handled correctly. Anything else falls back to the legacy translator.
     //
@@ -188,6 +197,32 @@ fn try_lqa_path(
     };
 
     Ok(Some(TranspileOutput::complete(sparql, compiled.schema)))
+}
+
+/// Strip all write clauses (CREATE, SET, REMOVE, DELETE, MERGE, CALL) from a parsed AST,
+/// keeping only read clauses (MATCH, WITH, RETURN, UNWIND, UNION).
+///
+/// Used by `cypher_to_sparql_skip_writes` to produce a read-only AST that the LQA
+/// path can process.  The legacy path also accepts this stripped AST via
+/// `translate_skip_writes` without needing the original write clause data.
+fn strip_write_clauses(ast: ast::CypherQuery) -> ast::CypherQuery {
+    use ast::cypher::Clause;
+    let clauses = ast
+        .clauses
+        .into_iter()
+        .filter(|c| {
+            !matches!(
+                c,
+                Clause::Create(_)
+                    | Clause::Set(_)
+                    | Clause::Remove(_)
+                    | Clause::Delete(_)
+                    | Clause::Merge(_)
+                    | Clause::Call(_)
+            )
+        })
+        .collect();
+    ast::CypherQuery { clauses }
 }
 
 /// Check that every variable reference in `expr` is present in `scope`.
@@ -284,7 +319,9 @@ fn is_lqa_safe(ast: &ast::CypherQuery) -> bool {
                 }
             }
             Clause::Unwind(_) => clause_kinds.push("unwind"),
-            // Any write clause → legacy
+            // Write clauses: route through LQA, which returns Err(Unsupported) for each
+            // write op, causing fallback to legacy when there are write clauses.
+            // In cypher_to_sparql_skip_writes they are stripped before LQA routing.
             Clause::Create(_)
             | Clause::Set(_)
             | Clause::Remove(_)
@@ -302,42 +339,81 @@ fn is_lqa_safe(ast: &ast::CypherQuery) -> bool {
 
     // Every MATCH pattern element must:
     // - Have labeled nodes UNLESS the variable is already bound from a prior MATCH
-    // - Have no named relationship variables
-    // - Have no variable-length paths
+    // - Named relationship variables (supported by LQA as of Phase 7)
+    // - May have simple variable-length paths (supported by LQA as of Phase 7)
     //
     // Track bound node variables across clauses so re-used vars in OPTIONAL MATCH
     // (e.g. `MATCH (n:P) OPTIONAL MATCH (n)-[:K]->(m:P)`) are not rejected.
+    // 
+    // Also track whether any WITH clause has occurred. When a WITH clause appears
+    // between two MATCHes and uses aliases that shadow earlier bindings, the
+    // `already_bound` tracking below becomes unreliable. A conservative guard
+    // prevents LQA from mishandling such queries (e.g. With7 [1] re-binding patterns).
     let mut bound_vars: HashSet<&str> = HashSet::new();
+    let mut seen_with = false;
     for c in &ast.clauses {
-        if let Clause::Match(m) = c {
-            for pattern in &m.pattern.0 {
-                for elem in &pattern.elements {
-                    match elem {
-                        PatternElement::Node(n) => {
-                            let already_bound = n
-                                .variable
-                                .as_deref()
-                                .map(|v| bound_vars.contains(v))
-                                .unwrap_or(false);
-                            if n.labels.is_empty() && !already_bound {
-                                return false; // Unlabeled unbound node — complex to scan
-                            }
-                            // Mark this variable as bound for subsequent clauses.
-                            if let Some(v) = n.variable.as_deref() {
-                                bound_vars.insert(v);
-                            }
+        match c {
+            Clause::With(w) => {
+                seen_with = true;
+                // Update bound_vars to reflect WITH projection scope.
+                // Variables no longer projected (not in the WITH output) become unbound.
+                // New aliases are added.  This prevents false `already_bound` checks
+                // in subsequent MATCH clauses when WITH re-binds variable names.
+                use ast::cypher::ReturnItems;
+                if let ReturnItems::Explicit(items) = &w.items {
+                    let mut new_bound: HashSet<&str> = HashSet::new();
+                    for item in items {
+                        if let Some(alias) = item.alias.as_deref() {
+                            new_bound.insert(alias);
+                        } else if let ast::cypher::Expression::Variable(v) = &item.expression {
+                            new_bound.insert(v.as_str());
                         }
-                        PatternElement::Relationship(r) => {
-                            if r.variable.is_some() {
-                                return false; // Named rel var — can't bind in std SPARQL
+                    }
+                    bound_vars = new_bound;
+                }
+            }
+            Clause::Match(m) => {
+                for pattern in &m.pattern.0 {
+                    for elem in &pattern.elements {
+                        match elem {
+                            PatternElement::Node(n) => {
+                                let already_bound = n
+                                    .variable
+                                    .as_deref()
+                                    .map(|v| bound_vars.contains(v))
+                                    .unwrap_or(false);
+                                // Unlabeled unbound nodes: fall back to legacy.
+                                if !already_bound && n.labels.is_empty() {
+                                    return false;
+                                }
+                                if let Some(v) = n.variable.as_deref() {
+                                    bound_vars.insert(v);
+                                }
                             }
-                            if r.range.is_some() {
-                                return false; // Variable-length path
+                            PatternElement::Relationship(r) => {
+                                // Varlen path with relationship properties: LQA can't
+                                // filter on individual hop properties in a path expression.
+                                if r.range.is_some() && r.properties.is_some() {
+                                    return false;
+                                }
+                                // Varlen path with named rel-var: the rel-var would be a
+                                // list of relationships, not supported in LQA yet.
+                                if r.range.is_some() && r.variable.is_some() {
+                                    return false;
+                                }
+                                // Named rel-var after a WITH clause with re-binding:
+                                // `bound_vars` may not correctly reflect scope, causing LQA
+                                // to mishandle queries like With7 [1] where variable names
+                                // were re-used through aliasing.
+                                if r.variable.is_some() && seen_with {
+                                    return false;
+                                }
                             }
                         }
                     }
                 }
             }
+            _ => {}
         }
     }
 

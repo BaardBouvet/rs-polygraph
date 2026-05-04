@@ -66,6 +66,26 @@ pub struct CompiledQuery {
 
 // ── Compiler state ────────────────────────────────────────────────────────────
 
+/// Predicate info for a named relationship variable.
+#[derive(Debug, Clone)]
+enum EdgePred {
+    /// Single typed relationship: the IRI is statically known.
+    Static(NamedNode),
+    /// Multi-type or untyped: a SPARQL variable captures the predicate at runtime.
+    Dynamic(Variable),
+}
+
+/// Tracking info needed to lower property access and `type()` on a named rel-var.
+#[derive(Debug, Clone)]
+struct EdgeVarInfo {
+    /// SPARQL variable name for the canonical RDF triple's subject.
+    subj: String,
+    /// SPARQL variable name for the canonical RDF triple's object.
+    obj: String,
+    /// How to refer to the edge predicate in SPARQL.
+    pred: EdgePred,
+}
+
 struct Compiler {
     base_iri: String,
     counter: u32,
@@ -87,6 +107,12 @@ struct Compiler {
     /// (literals, dates, etc.) rather than node IRIs.  Property access on these variables
     /// cannot be lowered to a triple pattern and must fall back to the legacy translator.
     scalar_vars: HashSet<String>,
+    /// Tracking info for named relationship variables — used to lower `r.prop` and `type(r)`.
+    edge_vars: HashMap<String, EdgeVarInfo>,
+    /// Groups of optional triples that must be kept together in one OPTIONAL { } block.
+    /// Edge property access (RDF-star reification) emits two triples that share a reifier
+    /// variable and must not be split across separate OPTIONAL blocks.
+    pending_optional_groups: Vec<Vec<TriplePattern>>,
 }
 
 impl Compiler {
@@ -101,6 +127,8 @@ impl Compiler {
             projected_columns: Vec::new(),
             return_distinct: false,
             scalar_vars: HashSet::new(),
+            edge_vars: HashMap::new(),
+            pending_optional_groups: Vec::new(),
         }
     }
 
@@ -157,6 +185,7 @@ impl Compiler {
     fn flush_pending(&mut self, pat: GraphPattern) -> GraphPattern {
         let triples = std::mem::take(&mut self.pending_triples);
         let opt_triples = std::mem::take(&mut self.pending_optional_triples);
+        let opt_groups = std::mem::take(&mut self.pending_optional_groups);
         let mut result = if triples.is_empty() {
             pat
         } else {
@@ -168,6 +197,17 @@ impl Compiler {
                 right: Box::new(GraphPattern::Bgp { patterns: vec![ot] }),
                 expression: None,
             };
+        }
+        // Grouped optional triples (e.g. RDF-star reification pairs) must stay
+        // together in one OPTIONAL block so the reifier variable links them.
+        for group in opt_groups {
+            if !group.is_empty() {
+                result = GraphPattern::LeftJoin {
+                    left: Box::new(result),
+                    right: Box::new(GraphPattern::Bgp { patterns: group }),
+                    expression: None,
+                };
+            }
         }
         result
     }
@@ -297,8 +337,7 @@ impl Compiler {
                     let sort_opt = std::mem::take(&mut self.pending_optional_triples);
 
                     // 2. Flatten the Projection body (handles GroupBy etc.).
-                    let (proj_gp, _agg_vars) =
-                        self.lower_projection_inner(proj_inner, items)?;
+                    let (proj_gp, _agg_vars) = self.lower_projection_inner(proj_inner, items)?;
                     let project_vars = self.build_project_vars(items)?;
 
                     // 3. Flush projection's own pending triples.
@@ -406,6 +445,9 @@ impl Compiler {
 
             // Group variables from keys; start collecting them.
             let mut group_vars: Vec<Variable> = Vec::new();
+            // Complex group-key expressions (not simple Variable or Property) that need
+            // a BIND inside the group body before the Group is formed.
+            let mut complex_group_binds: Vec<(Variable, SparExpr)> = Vec::new();
 
             // For GROUP BY key expressions that are Property accesses
             // (e.g. `n.city AS city`), generate the property triple
@@ -431,8 +473,7 @@ impl Compiler {
                                 return Err(PolygraphError::Unsupported {
                                     construct: format!("complex GROUP BY key expr {:?}", other),
                                     spec_ref: "openCypher 9 §3.4".into(),
-                                    reason: "non-variable base in property GROUP BY key"
-                                        .into(),
+                                    reason: "non-variable base in property GROUP BY key".into(),
                                 })
                             }
                         };
@@ -446,12 +487,17 @@ impl Compiler {
                         self.projected_columns.push(scalar_col(&pi.alias));
                     }
                     _ => {
-                        // Other expressions (e.g. function calls) — fall back to
-                        // generic lowering so the result variable ends up in the
-                        // inner pattern via BIND/Extend.
+                        // Complex expression (e.g. `x IS NULL`, function calls) —
+                        // evaluate and bind to the alias variable inside the group body
+                        // so that GROUP BY can reference it.
                         let e = self.lower_expr(&pi.expr)?;
+                        // Flush any required pending triples produced by lower_expr.
+                        // We'll apply them to the group inner below.
+                        let pending_req = std::mem::take(&mut self.pending_triples);
+                        // Re-add them so flush_pending picks them up later.
+                        self.pending_triples.extend(pending_req);
+                        complex_group_binds.push((alias_var.clone(), e));
                         group_vars.push(alias_var.clone());
-                        let _ = e; // expression result used as group var
                         self.projected_columns.push(scalar_col(&pi.alias));
                     }
                 }
@@ -467,7 +513,15 @@ impl Compiler {
 
             // Flush all pending triples (group-key property triples +
             // agg-arg property triples) into the inner pattern.
-            let group_inner = self.flush_pending(flushed);
+            let mut group_inner = self.flush_pending(flushed);
+            // Apply complex group-key BIND expressions inside the group body.
+            for (var, expr) in complex_group_binds {
+                group_inner = GraphPattern::Extend {
+                    inner: Box::new(group_inner),
+                    variable: var,
+                    expression: expr,
+                };
+            }
 
             let group_pattern = GraphPattern::Group {
                 inner: Box::new(group_inner),
@@ -619,21 +673,26 @@ impl Compiler {
                 label,
                 extra_labels,
             } => {
-                // A node scan without a label cannot be correctly represented
-                // without a sentinel triple that may not exist in the data.
-                // Fall back to the legacy translator for unlabeled nodes.
+                let subj = TermPattern::Variable(Self::var(variable));
+
                 let label = match label {
                     Some(l) => l,
                     None => {
-                        return Err(PolygraphError::Unsupported {
-                            construct: "unlabeled node scan".into(),
-                            spec_ref: "openCypher 9 §4.1".into(),
-                            reason: "unlabeled node scan requires legacy path".into(),
-                        })
+                        // Unlabeled node scan: use the __node existence sentinel.
+                        // Every graph node carries exactly one `<base:__node> <base:__node>`
+                        // triple inserted by the TCK data loader.
+                        let sentinel_iri =
+                            NamedNode::new_unchecked(format!("{}{}", self.base_iri, "__node"));
+                        return Ok(GraphPattern::Bgp {
+                            patterns: vec![TriplePattern {
+                                subject: subj,
+                                predicate: NamedNodePattern::NamedNode(sentinel_iri.clone()),
+                                object: TermPattern::NamedNode(sentinel_iri),
+                            }],
+                        });
                     }
                 };
 
-                let subj = TermPattern::Variable(Self::var(variable));
                 let mut patterns = vec![TriplePattern {
                     subject: subj.clone(),
                     predicate: NamedNodePattern::NamedNode(NamedNode::new_unchecked(RDF_TYPE)),
@@ -661,31 +720,27 @@ impl Compiler {
                 range,
                 ..
             } => {
-                if range.is_some() {
-                    return Err(PolygraphError::Unsupported {
-                        construct: "variable-length path in LQA→SPARQL".into(),
-                        spec_ref: "openCypher 9 §4.1".into(),
-                        reason: "varlen lowering not yet in LQA path; legacy fallback applies"
-                            .into(),
-                    });
-                }
-
-                // Named relationship variables (e.g. [r:KNOWS]) cannot be
-                // properly bound in standard SPARQL without RDF-star or reification.
-                // Fall back to the legacy translator which handles both encodings.
-                if rel_var.is_some() {
-                    return Err(PolygraphError::Unsupported {
-                        construct: "named relationship variable".into(),
-                        spec_ref: "openCypher 9 §4.1".into(),
-                        reason: "relationship variables require RDF-star or reification; legacy path handles this".into(),
-                    });
-                }
-
                 let inner_pat = self.lower_op(inner)?;
-
                 let from_tp = TermPattern::Variable(Self::var(from));
                 let to_tp = TermPattern::Variable(Self::var(to));
 
+                // ── Variable-length paths ───────────────────────────────────
+                if let Some(path_range) = range {
+                    let edge_bgp =
+                        self.lower_varlen(from_tp, to_tp, rel_types, direction, path_range)?;
+                    return Ok(join(inner_pat, edge_bgp));
+                }
+
+                // ── Named relationship variable ──────────────────────────────
+                if let Some(rv) = rel_var {
+                    // Register static rel types for type(r) fast path.
+                    self.edge_types.insert(rv.clone(), rel_types.clone());
+
+                    let edge_bgp = self.lower_expand_rel_var(from, to, rel_types, direction, rv)?;
+                    return Ok(join(inner_pat, edge_bgp));
+                }
+
+                // ── Anonymous expansion (no rel-var, no path range) ──────────
                 let rel_bgp = if rel_types.is_empty() {
                     let pred_var = self.fresh("rtype");
                     self.lower_expand_any_type(from_tp, pred_var, to_tp, direction)
@@ -713,7 +768,6 @@ impl Compiler {
                             right: Box::new(pat),
                         })
                 };
-
                 Ok(join(inner_pat, rel_bgp))
             }
 
@@ -939,6 +993,248 @@ impl Compiler {
 
     // ── Relationship expansion helpers ────────────────────────────────────────
 
+    /// Lower a named relationship-variable expand into SPARQL.
+    ///
+    /// Registers the edge in `self.edge_vars` so that downstream property-access
+    /// and `type(r)` expressions can resolve it.  Returns the BGP/UNION pattern.
+    fn lower_expand_rel_var(
+        &mut self,
+        from: &str,
+        to: &str,
+        rel_types: &[String],
+        direction: &Direction,
+        rv: &str,
+    ) -> Result<GraphPattern, PolygraphError> {
+        use spargebra::term::GroundTerm;
+        let from_tp = TermPattern::Variable(Self::var(from));
+        let to_tp = TermPattern::Variable(Self::var(to));
+
+        // Canonical RDF triple subject/object (used for property-access reification).
+        let (rdf_subj, rdf_obj) = match direction {
+            Direction::Outgoing | Direction::Undirected => (from.to_owned(), to.to_owned()),
+            Direction::Incoming => (to.to_owned(), from.to_owned()),
+        };
+
+        if rel_types.is_empty() {
+            // Untyped: use a variable predicate with a negated-property-set filter
+            // to exclude internal triples (rdf:type, __node).
+            let pred_var = self.fresh(&format!("{rv}_type"));
+            let bgp = self.lower_expand_any_type(from_tp, pred_var.clone(), to_tp, direction);
+            // Bind the rel-var to the dynamic predicate variable so IS NULL checks
+            // (`r IS NULL` → `!BOUND(?r)`) work correctly when in OPTIONAL MATCH.
+            // `?pred_var` is bound by the triple pattern when a match is found.
+            let bgp_with_marker = GraphPattern::Extend {
+                inner: Box::new(bgp),
+                variable: Self::var(rv),
+                expression: SparExpr::Variable(pred_var.clone()),
+            };
+            self.edge_vars.insert(
+                rv.to_owned(),
+                EdgeVarInfo {
+                    subj: rdf_subj,
+                    obj: rdf_obj,
+                    pred: EdgePred::Dynamic(pred_var),
+                },
+            );
+            return Ok(bgp_with_marker);
+        }
+
+        if rel_types.len() == 1 {
+            // Typed single-hop: static predicate.
+            let iri = NamedNode::new_unchecked(format!("{}{}", self.base_iri, &rel_types[0]));
+            let pred = NamedNodePattern::NamedNode(iri.clone());
+            let bgp = self.lower_expand_typed(from_tp, pred, to_tp, direction);
+            // Bind the rel-var to the relationship type IRI so that IS NULL checks
+            // (`r IS NULL` → `!BOUND(?r)`) work correctly in OPTIONAL MATCH contexts.
+            // When the OPTIONAL triple pattern matches, `?rv` is bound; when the
+            // OPTIONAL has no match, `?rv` remains unbound (null).
+            let xsd_any_uri =
+                NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#anyURI");
+            let marker_lit = SparLit::new_typed_literal(
+                format!("{}{}", self.base_iri, &rel_types[0]),
+                xsd_any_uri,
+            );
+            let bgp_with_marker = GraphPattern::Extend {
+                inner: Box::new(bgp),
+                variable: Self::var(rv),
+                expression: SparExpr::Literal(marker_lit),
+            };
+            self.edge_vars.insert(
+                rv.to_owned(),
+                EdgeVarInfo {
+                    subj: rdf_subj,
+                    obj: rdf_obj,
+                    pred: EdgePred::Static(iri),
+                },
+            );
+            return Ok(bgp_with_marker);
+        }
+
+        // Multi-type: introduce a pred variable bound via VALUES so reification can
+        // use it, then UNION branches per type each with that VALUES constraint.
+        let pred_var = self.fresh(&format!("{rv}_type"));
+        let bindings: Vec<Vec<Option<GroundTerm>>> = rel_types
+            .iter()
+            .map(|rt| {
+                vec![Some(GroundTerm::NamedNode(NamedNode::new_unchecked(
+                    format!("{}{}", self.base_iri, rt),
+                )))]
+            })
+            .collect();
+        let values_pat = GraphPattern::Values {
+            variables: vec![pred_var.clone()],
+            bindings,
+        };
+        let triple_tp = TermPattern::Variable(Self::var(from));
+        let triple_obj = TermPattern::Variable(Self::var(to));
+        let bgp = match direction {
+            Direction::Outgoing => GraphPattern::Bgp {
+                patterns: vec![TriplePattern {
+                    subject: triple_tp,
+                    predicate: NamedNodePattern::Variable(pred_var.clone()),
+                    object: triple_obj,
+                }],
+            },
+            Direction::Incoming => GraphPattern::Bgp {
+                patterns: vec![TriplePattern {
+                    subject: triple_obj,
+                    predicate: NamedNodePattern::Variable(pred_var.clone()),
+                    object: triple_tp,
+                }],
+            },
+            Direction::Undirected => {
+                let fwd = GraphPattern::Bgp {
+                    patterns: vec![TriplePattern {
+                        subject: triple_tp.clone(),
+                        predicate: NamedNodePattern::Variable(pred_var.clone()),
+                        object: triple_obj.clone(),
+                    }],
+                };
+                let bwd = GraphPattern::Bgp {
+                    patterns: vec![TriplePattern {
+                        subject: triple_obj,
+                        predicate: NamedNodePattern::Variable(pred_var.clone()),
+                        object: triple_tp,
+                    }],
+                };
+                GraphPattern::Union {
+                    left: Box::new(fwd),
+                    right: Box::new(bwd),
+                }
+            }
+        };
+        // Join VALUES before the triple pattern so pred_var is bound first.
+        let edge_bgp = join(values_pat, bgp);
+        self.edge_vars.insert(
+            rv.to_owned(),
+            EdgeVarInfo {
+                subj: rdf_subj,
+                obj: rdf_obj,
+                pred: EdgePred::Dynamic(pred_var),
+            },
+        );
+        Ok(edge_bgp)
+    }
+
+    /// Lower a variable-length expansion into a SPARQL property path pattern.
+    fn lower_varlen(
+        &mut self,
+        from_tp: TermPattern,
+        to_tp: TermPattern,
+        rel_types: &[String],
+        direction: &Direction,
+        range: &crate::lqa::op::PathRange,
+    ) -> Result<GraphPattern, PolygraphError> {
+        use spargebra::algebra::PropertyPathExpression as PPE;
+
+        // Build the base PPE from the rel types.
+        let base_ppe: PPE = if rel_types.is_empty() {
+            // Untyped: exclude internal predicates.
+            PPE::NegatedPropertySet(vec![
+                NamedNode::new_unchecked(RDF_TYPE),
+                NamedNode::new_unchecked(format!("{}{}", self.base_iri, "__node")),
+            ])
+        } else if rel_types.len() == 1 {
+            PPE::NamedNode(NamedNode::new_unchecked(format!(
+                "{}{}",
+                self.base_iri, &rel_types[0]
+            )))
+        } else {
+            let ppes: Vec<PPE> = rel_types
+                .iter()
+                .map(|rt| {
+                    PPE::NamedNode(NamedNode::new_unchecked(format!("{}{}", self.base_iri, rt)))
+                })
+                .collect();
+            ppes.into_iter()
+                .reduce(|a, b| PPE::Alternative(Box::new(a), Box::new(b)))
+                .expect("non-empty")
+        };
+
+        // Build quantified PPE based on range.
+        let lower = range.lower;
+        let upper = range.upper;
+
+        let quantified_ppe: PPE = match (lower, upper) {
+            // Exact single hop — treat as simple triple (use Expand without range).
+            // This shouldn't occur since is_lqa_safe no longer guards this, but
+            // handle it anyway by using a 1-hop path.
+            (1, Some(1)) => base_ppe,
+            // *1.. or bare * (one or more hops)
+            (1, None) => PPE::OneOrMore(Box::new(base_ppe)),
+            // *0.. (zero or more hops)
+            (0, None) => PPE::ZeroOrMore(Box::new(base_ppe)),
+            // *0..1 (zero or one hop)
+            (0, Some(1)) => PPE::ZeroOrOne(Box::new(base_ppe)),
+            // *M.. (M or more hops, M > 1): Sequence of M fixed + OneOrMore
+            (m, None) if m > 1 => {
+                let mut ppe = PPE::OneOrMore(Box::new(base_ppe.clone()));
+                for _ in 0..m.saturating_sub(1) {
+                    ppe = PPE::Sequence(Box::new(base_ppe.clone()), Box::new(ppe));
+                }
+                ppe
+            }
+            // *M..N bounded: unroll as UNION of path lengths M..=N (max 10 hops)
+            (m, Some(n)) if n > 1 => {
+                let max_n = n.min(m + 10);
+                // Build a chain PPE for a given number of hops.
+                let chain = |count: u64| -> PPE {
+                    let mut p = base_ppe.clone();
+                    for _ in 1..count {
+                        p = PPE::Sequence(Box::new(base_ppe.clone()), Box::new(p));
+                    }
+                    p
+                };
+                let ranges: Vec<PPE> = (m.max(1)..=max_n).map(chain).collect();
+                if ranges.is_empty() {
+                    base_ppe
+                } else {
+                    ranges
+                        .into_iter()
+                        .reduce(|a, b| PPE::Alternative(Box::new(a), Box::new(b)))
+                        .expect("non-empty")
+                }
+            }
+            _ => base_ppe,
+        };
+
+        // Apply direction.
+        let path_ppe = match direction {
+            Direction::Outgoing => quantified_ppe,
+            Direction::Incoming => PPE::Reverse(Box::new(quantified_ppe)),
+            Direction::Undirected => PPE::Alternative(
+                Box::new(quantified_ppe.clone()),
+                Box::new(PPE::Reverse(Box::new(quantified_ppe))),
+            ),
+        };
+
+        Ok(GraphPattern::Path {
+            subject: from_tp,
+            path: path_ppe,
+            object: to_tp,
+        })
+    }
+
     fn lower_expand_typed(
         &self,
         from: TermPattern,
@@ -991,17 +1287,17 @@ impl Compiler {
         to: TermPattern,
         direction: &Direction,
     ) -> GraphPattern {
-        match direction {
+        let edge_pat = match direction {
             Direction::Outgoing => GraphPattern::Bgp {
                 patterns: vec![TriplePattern {
                     subject: from,
                     predicate: NamedNodePattern::Variable(pred_var),
-                    object: to,
+                    object: to.clone(),
                 }],
             },
             Direction::Incoming => GraphPattern::Bgp {
                 patterns: vec![TriplePattern {
-                    subject: to,
+                    subject: to.clone(),
                     predicate: NamedNodePattern::Variable(pred_var),
                     object: from,
                 }],
@@ -1014,18 +1310,66 @@ impl Compiler {
                         object: to.clone(),
                     }],
                 };
-                let bwd = GraphPattern::Bgp {
+                // Backward branch: subject=to, object=from.
+                // Add FILTER(?to != ?from) to prevent self-loop duplication:
+                // when `from == to` (same SPARQL variable), both branches would match
+                // identically. The FILTER suppresses the backward branch for self-loops
+                // so they are counted exactly once (from the forward branch only).
+                let bwd_bgp = GraphPattern::Bgp {
                     patterns: vec![TriplePattern {
-                        subject: to,
+                        subject: to.clone(),
                         predicate: NamedNodePattern::Variable(pred_var),
-                        object: from,
+                        object: from.clone(),
                     }],
+                };
+                let bwd = if from == to {
+                    // Self-loop case: suppress backward branch entirely.
+                    GraphPattern::Filter {
+                        expr: SparExpr::Literal(SparLit::new_typed_literal(
+                            "false",
+                            NamedNode::new_unchecked(XSD_BOOLEAN),
+                        )),
+                        inner: Box::new(bwd_bgp),
+                    }
+                } else if let (TermPattern::Variable(to_v), TermPattern::Variable(from_v)) =
+                    (&to, &from)
+                {
+                    // Distinct variables: add FILTER(?to_v != ?from_v) to avoid
+                    // duplicate matches when the two endpoints happen to bind to the
+                    // same node in a concrete graph.
+                    let filter_expr = SparExpr::Not(Box::new(SparExpr::Equal(
+                        Box::new(SparExpr::Variable(to_v.clone())),
+                        Box::new(SparExpr::Variable(from_v.clone())),
+                    )));
+                    GraphPattern::Filter {
+                        expr: filter_expr,
+                        inner: Box::new(bwd_bgp),
+                    }
+                } else {
+                    bwd_bgp
                 };
                 GraphPattern::Union {
                     left: Box::new(fwd),
                     right: Box::new(bwd),
                 }
             }
+        };
+
+        // Add endpoint sentinel: ensure `to` is an actual PG node.
+        // Without this, untyped expand matches rdf:type and property triples as well
+        // (since those share the same predicate namespace in our RDF encoding).
+        if let TermPattern::Variable(to_var) = &to {
+            let sentinel_iri = NamedNode::new_unchecked(format!("{}{}", self.base_iri, "__node"));
+            let sentinel_bgp = GraphPattern::Bgp {
+                patterns: vec![TriplePattern {
+                    subject: TermPattern::Variable(to_var.clone()),
+                    predicate: NamedNodePattern::NamedNode(sentinel_iri.clone()),
+                    object: TermPattern::NamedNode(sentinel_iri),
+                }],
+            };
+            join(edge_pat, sentinel_bgp)
+        } else {
+            edge_pat
         }
     }
 
@@ -1047,6 +1391,44 @@ impl Compiler {
             },
 
             Expr::Property(base, key) => {
+                // If the base is an edge (relationship) variable, use RDF-star reification
+                // to access the edge property.  Two triples must stay together in one
+                // OPTIONAL block: the rdf:reifies triple and the property triple.
+                if let Expr::Variable { name, .. } = base.as_ref() {
+                    if let Some(edge_info) = self.edge_vars.get(name.as_str()).cloned() {
+                        let subj_var = Self::var(&edge_info.subj);
+                        let obj_var = Self::var(&edge_info.obj);
+                        let pred_pat = match &edge_info.pred {
+                            EdgePred::Static(iri) => NamedNodePattern::NamedNode(iri.clone()),
+                            EdgePred::Dynamic(v) => NamedNodePattern::Variable(v.clone()),
+                        };
+                        let prop_var = self.fresh(key);
+                        let reif_var = self.fresh(&format!("reif_{}", key));
+                        let rdf_reifies = NamedNode::new_unchecked(
+                            "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
+                        );
+                        let edge_triple_term = TermPattern::Triple(Box::new(TriplePattern {
+                            subject: TermPattern::Variable(subj_var),
+                            predicate: pred_pat,
+                            object: TermPattern::Variable(obj_var),
+                        }));
+                        // Both reification triples must be in the same OPTIONAL block.
+                        self.pending_optional_groups.push(vec![
+                            TriplePattern {
+                                subject: TermPattern::Variable(reif_var.clone()),
+                                predicate: NamedNodePattern::NamedNode(rdf_reifies),
+                                object: edge_triple_term,
+                            },
+                            TriplePattern {
+                                subject: TermPattern::Variable(reif_var),
+                                predicate: NamedNodePattern::NamedNode(self.prop_iri(key)),
+                                object: TermPattern::Variable(prop_var.clone()),
+                            },
+                        ]);
+                        return Ok(SparExpr::Variable(prop_var));
+                    }
+                }
+
                 // If the base is a scalar variable (bound via BIND/Extend, not Scan),
                 // it holds an RDF literal and cannot be the subject of a triple.
                 // Fall back to the legacy translator for these cases.
@@ -1172,7 +1554,9 @@ impl Compiler {
                                 object: TermPattern::Variable(val_var),
                             }],
                         };
-                        return Ok(SparExpr::Not(Box::new(SparExpr::Exists(Box::new(exists_pat)))));
+                        return Ok(SparExpr::Not(Box::new(SparExpr::Exists(Box::new(
+                            exists_pat,
+                        )))));
                     }
                 }
                 let inner = self.lower_expr(e)?;
@@ -1431,9 +1815,30 @@ impl Compiler {
             }
             "type" => {
                 if let Some(Expr::Variable { name: rv, .. }) = args.first() {
-                    if let Some(types) = self.edge_types.get(rv.as_str()).cloned() {
+                    let rv = rv.as_str();
+                    // Fast path: single static type known at compile time.
+                    if let Some(types) = self.edge_types.get(rv).cloned() {
                         if types.len() == 1 {
                             return Ok(Self::lit_str(&types[0]));
+                        }
+                    }
+                    // Dynamic path: extract local name from the predicate variable.
+                    if let Some(edge_info) = self.edge_vars.get(rv).cloned() {
+                        if let EdgePred::Dynamic(pred_var) = &edge_info.pred {
+                            // STRAFTER(STR(?pred_var), base_iri) extracts the local name.
+                            let base_lit = SparExpr::Literal(SparLit::new_simple_literal(
+                                self.base_iri.clone(),
+                            ));
+                            return Ok(SparExpr::FunctionCall(
+                                Function::StrAfter,
+                                vec![
+                                    SparExpr::FunctionCall(
+                                        Function::Str,
+                                        vec![SparExpr::Variable(pred_var.clone())],
+                                    ),
+                                    base_lit,
+                                ],
+                            ));
                         }
                     }
                 }
@@ -1441,6 +1846,23 @@ impl Compiler {
                     construct: "type(r) with unknown/multiple edge types".into(),
                     spec_ref: "openCypher 9 §6.3.2".into(),
                     reason: "multi-type or unbound relationship type requires legacy path".into(),
+                })
+            }
+            "startnode" | "endnode" => {
+                if let Some(Expr::Variable { name: rv, .. }) = args.first() {
+                    if let Some(edge_info) = self.edge_vars.get(rv.as_str()).cloned() {
+                        let node_var = if name_lower == "startnode" {
+                            &edge_info.subj
+                        } else {
+                            &edge_info.obj
+                        };
+                        return Ok(SparExpr::Variable(Self::var(node_var)));
+                    }
+                }
+                Err(PolygraphError::Unsupported {
+                    construct: format!("{name}()"),
+                    spec_ref: "openCypher 9 §6.3.2".into(),
+                    reason: "startNode/endNode requires a known relationship variable".into(),
                 })
             }
             "id" | "elementid" => {

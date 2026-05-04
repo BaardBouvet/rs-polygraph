@@ -113,14 +113,18 @@ impl AstLowerer {
         match clause {
             Clause::Match(m) => {
                 let match_op = self.lower_match_pattern(m)?;
-                if matches!(current, Op::Unit) {
-                    Ok(match_op)
-                } else if m.optional {
+                if m.optional {
+                    // OPTIONAL MATCH wraps the current scope in a LeftOuterJoin so that
+                    // if the pattern has no matches, the result row has null bindings.
+                    // This is correct even when `current == Op::Unit` (i.e. the very
+                    // first clause is OPTIONAL MATCH), producing one null row on empty graphs.
                     Ok(Op::LeftOuterJoin {
                         left: Box::new(current),
                         right: Box::new(match_op),
                         condition: None,
                     })
+                } else if matches!(current, Op::Unit) {
+                    Ok(match_op)
                 } else {
                     // Join: two independent MATCH clauses share variables via natural join.
                     // Use CartesianProduct here; the SPARQL lowerer joins via shared vars.
