@@ -267,10 +267,45 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
             }
             Clause::Return(r) => {
                 clause_kinds.push("return");
-                let _ = r;
+                // Check for duplicate column aliases (ColumnNameConflict → legacy raises SyntaxError).
+                if let ReturnItems::Explicit(items) = &r.items {
+                    let mut seen_aliases: HashSet<&str> = HashSet::new();
+                    for item in items {
+                        let alias = item.alias.as_deref().or_else(|| {
+                            if let Expression::Variable(v) = &item.expression {
+                                Some(v.as_str())
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(alias) = alias {
+                            if !seen_aliases.insert(alias) {
+                                return Some("duplicate_alias");
+                            }
+                        }
+                    }
+                }
             }
             Clause::With(w) => {
                 clause_kinds.push("with");
+                // Check for duplicate aliases in WITH (ColumnNameConflict → legacy raises SyntaxError).
+                if let ReturnItems::Explicit(items) = &w.items {
+                    let mut seen_aliases: HashSet<&str> = HashSet::new();
+                    for item in items {
+                        let alias = item.alias.as_deref().or_else(|| {
+                            if let Expression::Variable(v) = &item.expression {
+                                Some(v.as_str())
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(alias) = alias {
+                            if !seen_aliases.insert(alias) {
+                                return Some("duplicate_alias");
+                            }
+                        }
+                    }
+                }
                 if let Some(ref scope) = clause_scope {
                     // Note: with_orderby_out_of_scope guard removed. In LQA's flat WHERE
                     // clause, pre-WITH variables remain in SPARQL scope, so ORDER BY
@@ -332,16 +367,17 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
         }
     }
 
-    // Route queries through LQA for these clause shapes:
-    //   - MATCH…RETURN
-    //   - UNWIND…RETURN
-    // WITH-first, bare-RETURN, and RETURN-UNION-RETURN shapes stay on the legacy
-    // path because they require error semantics or column naming that LQA doesn't
-    // yet replicate (e.g. arithmetic column headers, type-error tests).
+    // Route queries through LQA for any shape ending in "return", unless it is a
+    // bare-RETURN UNION shape (RETURN…UNION…RETURN) whose column semantics require
+    // the legacy path.  Previously this guard also excluded WITH-first and bare
+    // RETURN shapes; those are now handled by LQA after fixing integer division and
+    // boolean type-error detection.
     {
-        let first = clause_kinds.first().copied();
         let last = clause_kinds.last().copied();
-        if last != Some("return") || (first != Some("match") && first != Some("unwind")) {
+        // Detect "RETURN … UNION … RETURN" (first clause is already "return").
+        let has_bare_return_union = clause_kinds.first() == Some(&"return")
+            && clause_kinds.contains(&"union");
+        if last != Some("return") || has_bare_return_union {
             return Some("clause_shape");
         }
     }

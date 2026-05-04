@@ -2596,26 +2596,62 @@ impl Compiler {
                         Box::new(numeric_add),
                     ))
                 } else {
+                    if let Some(folded) = fold_numeric_binop('+', &la, &lb) {
+                        return Ok(folded);
+                    }
                     Ok(SparExpr::Add(Box::new(la), Box::new(lb)))
                 }
             }
-            Expr::Sub(a, b) => Ok(SparExpr::Subtract(
-                Box::new(self.lower_expr(a)?),
-                Box::new(self.lower_expr(b)?),
-            )),
-            Expr::Mul(a, b) => Ok(SparExpr::Multiply(
-                Box::new(self.lower_expr(a)?),
-                Box::new(self.lower_expr(b)?),
-            )),
-            Expr::Div(a, b) => Ok(SparExpr::Divide(
-                Box::new(self.lower_expr(a)?),
-                Box::new(self.lower_expr(b)?),
-            )),
-            Expr::Mod(a, b) => {
-                // a % b = a - FLOOR(a / b) * b
-                // Matches the formula used by the legacy translator.
+            Expr::Sub(a, b) => {
                 let la = self.lower_expr(a)?;
                 let rb = self.lower_expr(b)?;
+                if let Some(folded) = fold_numeric_binop('-', &la, &rb) {
+                    return Ok(folded);
+                }
+                Ok(SparExpr::Subtract(Box::new(la), Box::new(rb)))
+            }
+            Expr::Mul(a, b) => {
+                let la = self.lower_expr(a)?;
+                let rb = self.lower_expr(b)?;
+                if let Some(folded) = fold_numeric_binop('*', &la, &rb) {
+                    return Ok(folded);
+                }
+                Ok(SparExpr::Multiply(Box::new(la), Box::new(rb)))
+            }
+            Expr::Div(a, b) => {
+                // Constant-fold when both operands are numeric literals.  This
+                // avoids the SPARQL integer/integer → decimal problem: `12 / 4`
+                // folds to `3^^xsd:integer` at compile time rather than emitting
+                // SPARQL arithmetic that returns `3.0^^xsd:decimal`.
+                let la = self.lower_expr(a)?;
+                let rb = self.lower_expr(b)?;
+                if let Some(folded) = fold_numeric_binop('/', &la, &rb) {
+                    return Ok(folded);
+                }
+                // Non-constant division: apply FLOOR when the RHS is a literal
+                // integer to keep Cypher truncation semantics at runtime too.
+                let rb_is_int_lit = matches!(
+                    &rb,
+                    SparExpr::Literal(l) if l.datatype().as_str() == XSD_INTEGER
+                );
+                let div = SparExpr::Divide(Box::new(la), Box::new(rb));
+                if rb_is_int_lit {
+                    Ok(SparExpr::FunctionCall(
+                        spargebra::algebra::Function::Floor,
+                        vec![div],
+                    ))
+                } else {
+                    Ok(div)
+                }
+            }
+            Expr::Mod(a, b) => {
+                let la = self.lower_expr(a)?;
+                let rb = self.lower_expr(b)?;
+                if let Some(folded) = fold_numeric_binop('%', &la, &rb) {
+                    return Ok(folded);
+                }
+                // a % b = a - FLOOR(a / b) * b
+                // Matches the formula used by the legacy translator.
                 let div = SparExpr::Divide(Box::new(la.clone()), Box::new(rb.clone()));
                 let floor_div =
                     SparExpr::FunctionCall(spargebra::algebra::Function::Floor, vec![div]);
@@ -2637,7 +2673,24 @@ impl Compiler {
                     reason: "SPARQL has no POW; legacy path handles this".into(),
                 })
             }
-            Expr::Unary(UnaryOp::Neg, e) => Ok(SparExpr::UnaryMinus(Box::new(self.lower_expr(e)?))),
+            Expr::Unary(UnaryOp::Neg, e) => {
+                let inner = self.lower_expr(e)?;
+                // Constant-fold unary minus on numeric literals.
+                if let SparExpr::Literal(ref l) = inner {
+                    if l.datatype().as_str() == XSD_INTEGER {
+                        if let Ok(n) = l.value().parse::<i64>() {
+                            if let Some(neg) = n.checked_neg() {
+                                return Ok(Self::lit_integer(neg));
+                            }
+                        }
+                    } else if l.datatype().as_str() == XSD_DOUBLE {
+                        if let Ok(f) = l.value().parse::<f64>() {
+                            return Ok(Self::lit_double(-f));
+                        }
+                    }
+                }
+                Ok(SparExpr::UnaryMinus(Box::new(inner)))
+            }
             Expr::Unary(UnaryOp::Not, e) => Ok(SparExpr::Not(Box::new(self.lower_expr(e)?))),
             Expr::Unary(UnaryOp::Pos, e) => self.lower_expr(e),
 
@@ -2649,10 +2702,27 @@ impl Compiler {
                     CmpOp::Ne => {
                         SparExpr::Not(Box::new(SparExpr::Equal(Box::new(la), Box::new(lb))))
                     }
-                    CmpOp::Lt => SparExpr::Less(Box::new(la), Box::new(lb)),
-                    CmpOp::Le => SparExpr::LessOrEqual(Box::new(la), Box::new(lb)),
-                    CmpOp::Gt => SparExpr::Greater(Box::new(la), Box::new(lb)),
-                    CmpOp::Ge => SparExpr::GreaterOrEqual(Box::new(la), Box::new(lb)),
+                    // For ordered comparisons (<, <=, >, >=), wrap each operand in
+                    // bool_to_int_for_order so that boolean values (false=0, true=1)
+                    // compare correctly even when one side is a NOT-expression.
+                    // Without this, SPARQL serializes `!x >= y` without parens and the
+                    // parser re-interprets it as `!(x >= y)` due to operator precedence.
+                    CmpOp::Lt => SparExpr::Less(
+                        Box::new(bool_to_int_for_order(la)),
+                        Box::new(bool_to_int_for_order(lb)),
+                    ),
+                    CmpOp::Le => SparExpr::LessOrEqual(
+                        Box::new(bool_to_int_for_order(la)),
+                        Box::new(bool_to_int_for_order(lb)),
+                    ),
+                    CmpOp::Gt => SparExpr::Greater(
+                        Box::new(bool_to_int_for_order(la)),
+                        Box::new(bool_to_int_for_order(lb)),
+                    ),
+                    CmpOp::Ge => SparExpr::GreaterOrEqual(
+                        Box::new(bool_to_int_for_order(la)),
+                        Box::new(bool_to_int_for_order(lb)),
+                    ),
                     CmpOp::In => SparExpr::In(Box::new(la), vec![lb]),
                     CmpOp::StartsWith | CmpOp::EndsWith | CmpOp::Contains | CmpOp::RegexMatch => {
                         return Err(PolygraphError::Unsupported {
@@ -3399,6 +3469,130 @@ pub fn compile(op: &Op, base_iri: Option<&str>) -> Result<CompiledQuery, Polygra
     let base = base_iri.unwrap_or(DEFAULT_BASE).to_string();
     let mut c = Compiler::new(base.clone());
     c.compile_inner(op, &base)
+}
+
+/// Wrap a SPARQL expression so that `xsd:boolean` values (false=0, true=1) sort
+/// correctly with ordered comparison operators (`<`, `<=`, `>`, `>=`).
+///
+/// Without this wrapper, serializing `(!false) >= false` produces the SPARQL text
+/// `! "false"^^<bool> >= "false"^^<bool>`, which SPARQL parsers interpret as
+/// `! ("false"^^<bool> >= "false"^^<bool>)` due to operator precedence — the
+/// opposite of the intended semantics.  The `IF` wrapper forces the entire
+/// operand into a primary-expression context, adding implicit parens:
+///
+///   IF(isLiteral(e) && datatype(e) = xsd:boolean,
+///      xsd:integer(e),          -- false→0, true→1
+///      e)
+///
+/// This is the same technique used by the legacy translator.
+fn bool_to_int_for_order(e: SparExpr) -> SparExpr {
+    let cond = SparExpr::And(
+        Box::new(SparExpr::FunctionCall(
+            spargebra::algebra::Function::IsLiteral,
+            vec![e.clone()],
+        )),
+        Box::new(SparExpr::Equal(
+            Box::new(SparExpr::FunctionCall(
+                spargebra::algebra::Function::Datatype,
+                vec![e.clone()],
+            )),
+            Box::new(SparExpr::NamedNode(NamedNode::new_unchecked(XSD_BOOLEAN))),
+        )),
+    );
+    let cast_to_int = SparExpr::FunctionCall(
+        spargebra::algebra::Function::Custom(NamedNode::new_unchecked(XSD_INTEGER)),
+        vec![e.clone()],
+    );
+    SparExpr::If(Box::new(cond), Box::new(cast_to_int), Box::new(e))
+}
+
+/// Attempt to constant-fold a binary numeric operation when both operands are
+/// SPARQL numeric literals.  Returns `Some(folded)` on success, `None` when
+/// the operands are not both numeric literals or when the result is undefined
+/// (e.g. division by zero).
+///
+/// * Integer + integer  → integer (using Rust's overflow-safe arithmetic)
+/// * Integer / integer  → integer with truncation toward zero (Cypher semantics),
+///   avoids the SPARQL `xsd:decimal` result for integer division
+/// * Mixed int/double   → double
+/// * `op` is one of `'+'`, `'-'`, `'*'`, `'/'`, `'%'`
+fn fold_numeric_binop(op: char, la: &SparExpr, rb: &SparExpr) -> Option<SparExpr> {
+    let la_lit = if let SparExpr::Literal(l) = la { l } else { return None };
+    let rb_lit = if let SparExpr::Literal(l) = rb { l } else { return None };
+
+    let la_dt = la_lit.datatype().as_str();
+    let rb_dt = rb_lit.datatype().as_str();
+
+    // Both integer literals → integer result (avoid xsd:decimal drift).
+    if la_dt == XSD_INTEGER && rb_dt == XSD_INTEGER {
+        let lv: i64 = la_lit.value().parse().ok()?;
+        let rv: i64 = rb_lit.value().parse().ok()?;
+        let result = match op {
+            '+' => lv.checked_add(rv)?,
+            '-' => lv.checked_sub(rv)?,
+            '*' => lv.checked_mul(rv)?,
+            '/' => {
+                if rv == 0 {
+                    return None; // division by zero → propagate as SPARQL undef
+                }
+                // Rust integer division truncates toward zero, matching Cypher semantics.
+                lv / rv
+            }
+            '%' => {
+                if rv == 0 {
+                    return None;
+                }
+                lv % rv
+            }
+            _ => return None,
+        };
+        return Some(SparExpr::Literal(SparLit::new_typed_literal(
+            result.to_string(),
+            NamedNode::new_unchecked(XSD_INTEGER),
+        )));
+    }
+
+    // Mixed or double literals → double result.
+    let parse_num = |l: &SparLit| -> Option<f64> {
+        let dt = l.datatype().as_str();
+        if dt == XSD_INTEGER
+            || dt == XSD_DOUBLE
+            || dt == "http://www.w3.org/2001/XMLSchema#decimal"
+        {
+            l.value().parse().ok()
+        } else {
+            None
+        }
+    };
+
+    let lv = parse_num(la_lit)?;
+    let rv = parse_num(rb_lit)?;
+    let result = match op {
+        '+' => lv + rv,
+        '-' => lv - rv,
+        '*' => lv * rv,
+        '/' => {
+            if rv == 0.0 {
+                return None;
+            }
+            lv / rv
+        }
+        '%' => {
+            if rv == 0.0 {
+                return None;
+            }
+            lv % rv
+        }
+        _ => return None,
+    };
+    if result.is_finite() {
+        Some(SparExpr::Literal(SparLit::new_typed_literal(
+            format!("{result:?}"),
+            NamedNode::new_unchecked(XSD_DOUBLE),
+        )))
+    } else {
+        None
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

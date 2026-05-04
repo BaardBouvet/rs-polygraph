@@ -652,18 +652,52 @@ impl AstLowerer {
                 Box::new(self.lower_expr(b)?),
             )),
             AE::Negate(a) => Ok(Expr::Unary(UnaryOp::Neg, Box::new(self.lower_expr(a)?))),
-            AE::Not(a) => Ok(Expr::Not(Box::new(self.lower_expr(a)?))),
+            AE::Not(a) => {
+                if is_definitely_non_boolean(a) {
+                    return Err(PolygraphError::Unsupported {
+                        construct: "NOT with non-boolean literal operand".into(),
+                        spec_ref: "openCypher 9 §6.2.3".into(),
+                        reason: "type error: NOT requires a boolean operand; fall back to legacy for SyntaxError".into(),
+                    });
+                }
+                Ok(Expr::Not(Box::new(self.lower_expr(a)?)))
+            }
             AE::IsNull(a) => Ok(Expr::IsNull(Box::new(self.lower_expr(a)?))),
             AE::IsNotNull(a) => Ok(Expr::IsNotNull(Box::new(self.lower_expr(a)?))),
-            AE::Or(a, b) => Ok(Expr::Or(
-                Box::new(self.lower_expr(a)?),
-                Box::new(self.lower_expr(b)?),
-            )),
-            AE::And(a, b) => Ok(Expr::And(
-                Box::new(self.lower_expr(a)?),
-                Box::new(self.lower_expr(b)?),
-            )),
+            AE::Or(a, b) => {
+                if is_definitely_non_boolean(a) || is_definitely_non_boolean(b) {
+                    return Err(PolygraphError::Unsupported {
+                        construct: "OR with non-boolean literal operand".into(),
+                        spec_ref: "openCypher 9 §6.2.3".into(),
+                        reason: "type error: OR requires boolean operands; fall back to legacy for SyntaxError".into(),
+                    });
+                }
+                Ok(Expr::Or(
+                    Box::new(self.lower_expr(a)?),
+                    Box::new(self.lower_expr(b)?),
+                ))
+            }
+            AE::And(a, b) => {
+                if is_definitely_non_boolean(a) || is_definitely_non_boolean(b) {
+                    return Err(PolygraphError::Unsupported {
+                        construct: "AND with non-boolean literal operand".into(),
+                        spec_ref: "openCypher 9 §6.2.3".into(),
+                        reason: "type error: AND requires boolean operands; fall back to legacy for SyntaxError".into(),
+                    });
+                }
+                Ok(Expr::And(
+                    Box::new(self.lower_expr(a)?),
+                    Box::new(self.lower_expr(b)?),
+                ))
+            }
             AE::Xor(a, b) => {
+                if is_definitely_non_boolean(a) || is_definitely_non_boolean(b) {
+                    return Err(PolygraphError::Unsupported {
+                        construct: "XOR with non-boolean literal operand".into(),
+                        spec_ref: "openCypher 9 §6.2.3".into(),
+                        reason: "type error: XOR requires boolean operands; fall back to legacy for SyntaxError".into(),
+                    });
+                }
                 // Xor(a, b) = (a OR b) AND NOT (a AND b)
                 let la = self.lower_expr(a)?;
                 let lb = self.lower_expr(b)?;
@@ -673,6 +707,15 @@ impl AstLowerer {
                 ))
             }
             AE::Comparison(a, op, b) => {
+                // Type-check `IN` before lowering: if the RHS is definitely not a list,
+                // fall back to legacy which raises the proper SyntaxError.
+                if matches!(op, CompOp::In) && is_definitely_non_list(b) {
+                    return Err(PolygraphError::Unsupported {
+                        construct: "IN with non-list literal RHS".into(),
+                        spec_ref: "openCypher 9 §6.3.4".into(),
+                        reason: "type error: IN requires a list on the RHS; fall back to legacy for SyntaxError".into(),
+                    });
+                }
                 let la = self.lower_expr(a)?;
                 let lb = self.lower_expr(b)?;
                 match op {
@@ -1108,6 +1151,38 @@ fn proj_cols_keys(items: &[ProjItem], agg_aliases: &[String]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Returns `true` when `expr` is definitely not a boolean value (e.g. an
+/// integer literal, a string, a list).  Used to detect static type errors for
+/// AND / OR / XOR / NOT operands so that LQA can fall back to the legacy
+/// translator, which surfaces the proper `SyntaxError`.
+fn is_definitely_non_boolean(expr: &ast::Expression) -> bool {
+    use ast::{Expression as E, Literal};
+    matches!(
+        expr,
+        E::Literal(Literal::Integer(_))
+            | E::Literal(Literal::Float(_))
+            | E::Literal(Literal::String(_))
+            | E::List(_)
+            | E::Map(_)
+            | E::Negate(_)
+    )
+}
+
+/// Returns `true` when `expr` is definitely not a list value (e.g. a boolean,
+/// integer, float, string, or map literal).  Used to detect static type errors
+/// for `IN` expressions.
+fn is_definitely_non_list(expr: &ast::Expression) -> bool {
+    use ast::{Expression as E, Literal};
+    matches!(
+        expr,
+        E::Literal(Literal::Boolean(_))
+            | E::Literal(Literal::Integer(_))
+            | E::Literal(Literal::Float(_))
+            | E::Literal(Literal::String(_))
+            | E::Map(_)
+    )
 }
 
 /// Derive the "natural" implicit Cypher alias for a return expression.
