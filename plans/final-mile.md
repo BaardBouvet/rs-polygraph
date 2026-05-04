@@ -1,7 +1,7 @@
 # Final Mile — Closing the Last 85 TCK Gaps
 
 **Status**: in progress
-**Updated**: 2026-05-13
+**Updated**: 2026-05-28
 
 This plan supersedes the failure inventory in [remaining-work.md](remaining-work.md)
 now that Tier A (harness plumbing) has landed (3558 → 3704 passes), and Tier FGH
