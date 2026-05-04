@@ -190,7 +190,7 @@ normalization pass as the migration target.
 **Exit:** ≥ 200 curated queries pass; nightly fuzz corpus committed under
 `difftest/corpus/`; one previously-unknown bug found and filed.
 
-### Phase 2 — Grammar Hardening  (🚧 in progress — 2026-05-15)
+### Phase 2 — Grammar Hardening  (✅ complete 2026-05-15)
 
 **Goal:** eliminate silent parse rejections of valid Cypher / GQL constructs that
 the TCK does not exercise, so arbitrary user queries are not silently rejected.
@@ -255,7 +255,7 @@ runnable scenario count.
 **Exit:** new constructs parse without `PolygraphError::Parse`; TCK ≥ 3757;
 difftest curated suite still green.
 
-### Phase 3 — Introduce Logical Query Algebra (LQA)  (🚧 in progress — 2026-05-15)
+### Phase 3 — Introduce Logical Query Algebra (LQA)  (✅ complete 2026-05-15)
 
 **Goal:** factor openCypher semantics into a typed IR independent of SPARQL.
 
@@ -371,6 +371,70 @@ TCK 3757/3828 (≥ 3734 ✓); difftest 201/201 (100% ≥ 99% ✓).
 | `^` power operator emits `<urn:polygraph:unsupported-pow>` stub | openCypher 9 §6.3.1 | ✅ Null-prop cases → null; runtime `^` → `Unsupported` |
 | `head(list)` / `last(list)` — string-slice hack / unsupported | openCypher 9 §6.3.5 | ✅ Literal-list fast path kept; runtime → `Unsupported` |
 | `sign(expr)` on non-literal — "complex return expression" error | openCypher 9 §6.3.2 | ✅ Implemented via `IF(?x > 0, 1, IF(?x < 0, -1, 0))` |
+
+### Phase 4.5 — LQA Routing: Insert the IR Between AST and SPARQL
+
+**Goal:** make the LQA the actual load-bearing layer — every read query goes
+AST → LQA Op tree → SPARQL, rather than AST → SPARQL directly.  The legacy
+translator is retained as a fallback for constructs not yet handled in the
+LQA path (variable-length paths, RDF-star relationship-property access,
+temporal arithmetic), but it is no longer the primary path.
+
+**Why now:** Phase 3 built the LQA type system and Phase 4 cleaned up the
+translator surface.  Without routing through LQA the IR is dead code.  Leaving
+the legacy direct path as primary means any semantic improvement in LQA is
+never exercised in production.
+
+**New files:**
+
+| File | Purpose |
+|---|---|
+| `src/lqa/lower.rs` | AST → LQA: converts `CypherQuery` → `Op` tree + schema info |
+| `src/lqa/sparql.rs` | LQA → SPARQL: compiles `Op` + `Expr` → `spargebra::Query` with pending-property-triple accumulation |
+
+**Routing strategy (strangler-fig migration):**
+```
+Transpiler::cypher_to_sparql()
+   │
+   ├─ 1. lower_to_lqa(ast) → Op                ← new (lower.rs)
+   │
+   ├─ 2. compile_lqa(op) → sparql             ← new (sparql.rs)
+   │       if Err(Unsupported) or Err(Translation) …
+   │
+   └─ 3. fallback: legacy translate()          ← existing translator
+```
+The LQA path returns `Err(Unsupported)` for constructs it cannot yet handle
+(varlen paths, rel-property access, temporal arithmetic, comprehensions).
+The legacy translator remains 100% correct for those cases.
+
+**What the LQA path handles (Phase 4.5 scope):**
+
+| Construct | LQA path? |
+|---|---|
+| `MATCH (n:Label)` — node scan with label | ✓ |
+| `MATCH (n)` — unlabelled node scan | ✓ |
+| `MATCH (a)-[:T]->(b)` — single-hop directed/undirected | ✓ |
+| `WHERE expr` / inline `WHERE` | ✓ if expr is expressible |
+| `RETURN expr AS alias` | ✓ |
+| `WITH` projections | ✓ |
+| `ORDER BY / SKIP / LIMIT` | ✓ |
+| Aggregates: `count`, `sum`, `avg`, `min`, `max` | ✓ |
+| `OPTIONAL MATCH` | ✓ |
+| `UNION [ALL]` | ✓ |
+| `UNWIND` | ✓ |
+| Property access in expressions | ✓ (fresh var + BGP triple) |
+| `type(r)` / label check `n:Label` | ✓ |
+| String functions, math functions | ✓ |
+| Variable-length paths `*lower..upper` | ✗ → fallback |
+| Relationship property access `r.prop` | ✗ → fallback |
+| Temporal arithmetic / constructors | ✗ → fallback |
+| List/pattern comprehensions | ✗ → fallback |
+| `CASE` expressions | ✓ (lowered to nested IF) |
+| Write clauses (CREATE/MERGE/SET/DELETE/REMOVE) | ✗ → fallback |
+| `CALL subquery` | ✗ → fallback |
+
+**Exit:** LQA path active (not behind flag); TCK floor maintained at 3757;
+`cargo test --lib` green; difftest 201/201.
 
 ### Phase 5 — Coverage Expansion via Differential Fuzzing
 

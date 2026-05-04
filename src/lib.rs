@@ -75,6 +75,10 @@ impl Transpiler {
         engine: &dyn sparql_engine::TargetEngine,
     ) -> Result<TranspileOutput, PolygraphError> {
         let ast = parser::parse_cypher(cypher)?;
+        // Phase 4.5: try the LQA path first; fall back to legacy on Unsupported.
+        if let Some(output) = try_lqa_path(&ast, engine)? {
+            return Ok(output);
+        }
         let result =
             translator::cypher::translate(&ast, engine.base_iri(), engine.supports_rdf_star())?;
         let sparql = engine.finalize(result.sparql)?;
@@ -128,4 +132,135 @@ impl Transpiler {
         let sparql = engine.finalize(result.sparql)?;
         Ok(TranspileOutput::complete(sparql, result.schema))
     }
+}
+
+/// Attempt to transpile `ast` via the LQA IR path.
+///
+/// Returns `Ok(Some(output))` on success, `Ok(None)` when the query contains
+/// constructs not yet handled by the LQA path (triggering legacy fallback),
+/// and `Err(e)` for unexpected errors (parse failures, etc.).
+fn try_lqa_path(
+    ast: &ast::CypherQuery,
+    engine: &dyn sparql_engine::TargetEngine,
+) -> Result<Option<TranspileOutput>, PolygraphError> {
+    // Safety guard: only route queries through LQA that are known to be
+    // handled correctly. Anything else falls back to the legacy translator.
+    //
+    // Current safe subset: read-only queries with a single MATCH+RETURN,
+    // all nodes labeled, no named relationship variables, no varlen paths,
+    // no OPTIONAL MATCH, no WITH clauses. Subsequent phases will extend this.
+    if !is_lqa_safe(ast) {
+        return Ok(None);
+    }
+
+    let mut lowerer = lqa::lower::AstLowerer::new();
+    let op = match lowerer.lower_query(ast) {
+        Ok(op) => op,
+        Err(PolygraphError::Unsupported { .. })
+        | Err(PolygraphError::UnsupportedFeature { .. }) => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+
+    let compiled = match lqa::sparql::compile(&op, engine.base_iri().as_deref()) {
+        Ok(c) => c,
+        Err(PolygraphError::Unsupported { .. })
+        | Err(PolygraphError::UnsupportedFeature { .. }) => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+
+    let sparql = match engine.finalize(compiled.sparql) {
+        Ok(s) => s,
+        Err(PolygraphError::Unsupported { .. })
+        | Err(PolygraphError::UnsupportedFeature { .. }) => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+
+    Ok(Some(TranspileOutput::complete(sparql, compiled.schema)))
+}
+
+/// Return `true` only if the query can be safely transpiled through the LQA
+/// path without risk of producing semantically wrong SPARQL.
+///
+/// This is a conservative allow-list: queries NOT matching all criteria are
+/// routed to the legacy translator.  The allow-list is expanded as the LQA
+/// path matures.
+fn is_lqa_safe(ast: &ast::CypherQuery) -> bool {
+    use ast::cypher::{Clause, PatternElement};
+
+    // Require exactly one MATCH clause followed by exactly one RETURN clause.
+    let mut clause_kinds: Vec<&str> = Vec::new();
+    for c in &ast.clauses {
+        match c {
+            Clause::Match(m) => {
+                if m.optional {
+                    return false; // No OPTIONAL MATCH yet
+                }
+                clause_kinds.push("match");
+            }
+            Clause::Return(r) => {
+                // ORDER BY expressions can generate pending property-access
+                // triples that get joined OUTSIDE the SELECT scope, causing
+                // wrong results. Fall back to legacy for any RETURN with ORDER BY.
+                if r.order_by.is_some() {
+                    return false;
+                }
+                clause_kinds.push("return");
+            }
+            Clause::With(_w) => {
+                // WITH generates mid-pipeline Projection ops that can create
+                // variable scoping issues in SPARQL. Defer to legacy for now.
+                return false;
+            }
+            Clause::Unwind(_) => clause_kinds.push("unwind"),
+            // Any write clause → legacy
+            Clause::Create(_)
+            | Clause::Set(_)
+            | Clause::Remove(_)
+            | Clause::Delete(_)
+            | Clause::Merge(_)
+            | Clause::Call(_) => return false,
+            Clause::Union { .. } => return false,
+        }
+    }
+
+    // Must start with a MATCH and end with RETURN.
+    if clause_kinds.first() != Some(&"match") || clause_kinds.last() != Some(&"return") {
+        return false;
+    }
+
+    // Every MATCH pattern element must:
+    // - Have labeled nodes (all nodes in a MATCH must have ≥1 label)
+    // - Have no named relationship variables
+    // - Have no variable-length paths
+    for c in &ast.clauses {
+        if let Clause::Match(m) = c {
+            for pattern in &m.pattern.0 {
+                for elem in &pattern.elements {
+                    match elem {
+                        PatternElement::Node(n) => {
+                            if n.labels.is_empty() {
+                                return false; // Unlabeled node — complex to scan
+                            }
+                        }
+                        PatternElement::Relationship(r) => {
+                            if r.variable.is_some() {
+                                return false; // Named rel var — can't bind in std SPARQL
+                            }
+                            if r.range.is_some() {
+                                return false; // Variable-length path
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    true
 }
