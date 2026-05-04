@@ -272,13 +272,11 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
             Clause::With(w) => {
                 clause_kinds.push("with");
                 if let Some(ref scope) = clause_scope {
-                    if let Some(ref order_by) = w.order_by {
-                        for sort_item in &order_by.items {
-                            if !sort_expr_in_scope(&sort_item.expression, scope) {
-                                return Some("with_orderby_out_of_scope");
-                            }
-                        }
-                    }
+                    // Note: with_orderby_out_of_scope guard removed. In LQA's flat WHERE
+                    // clause, pre-WITH variables remain in SPARQL scope, so ORDER BY
+                    // expressions that reference them still work correctly even if they
+                    // wouldn't be in scope in legacy's sub-SELECT model.
+                    //
                     // Block LQA when ORDER BY is present AND a non-passthrough alias
                     // shadows a variable from the previous scope.  LQA flattens WITH
                     // clauses into a single SPARQL WHERE block, so re-binding an
