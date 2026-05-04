@@ -560,7 +560,11 @@ impl AstLowerer {
                             display_name: display_name.clone(),
                         });
                     } else {
-                        proj.push(ProjItem { expr, alias, display_name });
+                        proj.push(ProjItem {
+                            expr,
+                            alias,
+                            display_name,
+                        });
                     }
                 }
             }
@@ -753,6 +757,43 @@ impl AstLowerer {
                 distinct,
                 args,
             } => {
+                // range(start, end [, step]) with constant integer arguments:
+                // Pre-evaluate to Expr::List so the UNWIND handler and IN operator
+                // can use it as a literal list without falling back to legacy.
+                if name.eq_ignore_ascii_case("range") && (args.len() == 2 || args.len() == 3) {
+                    let start = if let AE::Literal(ast::Literal::Integer(n)) = &args[0] {
+                        Some(*n)
+                    } else {
+                        None
+                    };
+                    let end_val = if let AE::Literal(ast::Literal::Integer(n)) = &args[1] {
+                        Some(*n)
+                    } else {
+                        None
+                    };
+                    let step = if let Some(step_arg) = args.get(2) {
+                        if let AE::Literal(ast::Literal::Integer(n)) = step_arg {
+                            if *n == 0 {
+                                None // step=0 is a runtime error; leave to legacy
+                            } else {
+                                Some(*n)
+                            }
+                        } else {
+                            None // non-literal step; fall through to FunctionCall
+                        }
+                    } else {
+                        Some(1i64)
+                    };
+                    if let (Some(s), Some(e), Some(st)) = (start, end_val, step) {
+                        let mut items = Vec::new();
+                        let mut i = s;
+                        while (st > 0 && i <= e) || (st < 0 && i >= e) {
+                            items.push(Expr::Literal(crate::lqa::expr::Literal::Integer(i)));
+                            i += st;
+                        }
+                        return Ok(Expr::List(items));
+                    }
+                }
                 let largs = args
                     .iter()
                     .map(|a| self.lower_expr(a))
@@ -1134,8 +1175,7 @@ fn lower_literal(l: &ast::Literal) -> Literal {
 /// Those proj-list entries must NOT become GROUP BY keys — the alias is the
 /// aggregate output, not an input column.
 fn proj_cols_keys(items: &[ProjItem], agg_aliases: &[String]) -> Vec<String> {
-    let agg_set: std::collections::HashSet<&str> =
-        agg_aliases.iter().map(|s| s.as_str()).collect();
+    let agg_set: std::collections::HashSet<&str> = agg_aliases.iter().map(|s| s.as_str()).collect();
     items
         .iter()
         .filter_map(|pi| {

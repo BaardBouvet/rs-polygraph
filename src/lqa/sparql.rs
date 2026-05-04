@@ -2695,6 +2695,17 @@ impl Compiler {
             Expr::Unary(UnaryOp::Pos, e) => self.lower_expr(e),
 
             Expr::Comparison(op, a, b) => {
+                // Special case: `CmpOp::In` with a list literal RHS.
+                // Expand to SparExpr::In(lhs, [item1, item2, ...]) before lowering
+                // the RHS to avoid hitting the Unsupported path for Expr::List.
+                if let (CmpOp::In, Expr::List(items)) = (op, b.as_ref()) {
+                    let la = self.lower_expr(a)?;
+                    let sparql_items = items
+                        .iter()
+                        .map(|item| self.lower_expr(item))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return Ok(SparExpr::In(Box::new(la), sparql_items));
+                }
                 let la = self.lower_expr(a)?;
                 let lb = self.lower_expr(b)?;
                 Ok(match op {

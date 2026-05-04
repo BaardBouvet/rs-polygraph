@@ -375,8 +375,8 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
     {
         let last = clause_kinds.last().copied();
         // Detect "RETURN … UNION … RETURN" (first clause is already "return").
-        let has_bare_return_union = clause_kinds.first() == Some(&"return")
-            && clause_kinds.contains(&"union");
+        let has_bare_return_union =
+            clause_kinds.first() == Some(&"return") && clause_kinds.contains(&"union");
         if last != Some("return") || has_bare_return_union {
             return Some("clause_shape");
         }

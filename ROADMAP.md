@@ -1,186 +1,49 @@
-# Roadmap
+# rs-polygraph Roadmap
 
-This roadmap tracks the phased delivery of `rs-polygraph`. Each phase produces a usable artifact and ends with a clear milestone. See [plans/implementation-plan.md](plans/implementation-plan.md) for design details.
+**Audience**: Product managers, stakeholders, and technically curious readers who want to understand what each release delivers and why — without needing to read Rust code or SPARQL specifications.
 
----
+**Purpose**: `rs-polygraph` transpiles openCypher and ISO GQL property graph queries into SPARQL 1.1 (and SPARQL-star) algebra. The output targets any SPARQL-compliant engine without modifying those engines. This roadmap tracks the phased delivery as a series of 0.x releases.
 
-## Phase 1 — Foundation & openCypher Parser
-
-**Goal**: Parse a useful subset of openCypher into a typed AST.
-
-- [x] Initialize Cargo workspace with module structure (`ast`, `parser`, `translator`, `target`, `rdf_mapping`, `error`)
-- [x] Define `PolygraphError` with `thiserror`
-- [x] Write `grammars/cypher.pest` covering core clauses: `MATCH`, `WHERE`, `RETURN`, `WITH`
-- [x] Implement `pest`-based parser producing `CypherQuery` AST
-- [x] Unit tests for all core AST node types
-- [x] Parser round-trip tests for the covered subset
-
-**Milestone**: `polygraph::parser::cypher::parse(query)` returns a typed AST for basic `MATCH … RETURN` queries. ✅
+See [plans/implementation-plan.md](plans/implementation-plan.md) for design details, [plans/final-mile.md](plans/final-mile.md) for the final 84 remaining scenarios across Tiers F–K, and [AGENTS.md](AGENTS.md) for project governance and skill areas.
 
 ---
 
-## Phase 2 — openCypher → SPARQL Algebra Translator
+## Versions
 
-**Goal**: Translate Phase 1's AST into valid SPARQL 1.1 algebra via `spargebra`.
+### Foundation & Core Algebra (v0.1.x – v0.2.x)
 
-- [x] Define `AstVisitor` trait in `translator/visitor.rs`
-- [x] Implement node/label/property → RDF triple pattern mappings
-- [x] Implement directed and undirected relationship → triple pattern mappings
-- [x] Map `WHERE` predicates to `FILTER` expressions
-- [x] Map `RETURN` projections to `SELECT` variables
-- [x] Map `OPTIONAL MATCH` to `OPTIONAL { }` graph pattern
-- [x] Map `WITH` to sub-select or `BIND`
-- [x] Integration tests: given a Cypher string, assert the serialized SPARQL output
+| Version | Release | Accomplishment | Size | Plan |
+|---------|---------|-----------------|------|------|
+| **v0.1.0** | ✅ Released | **Foundation**: Initialize Cargo workspace with module structure (`ast`, `parser`, `translator`, `target`, `rdf_mapping`, `error`). Write `grammars/cypher.pest` covering core clauses (`MATCH`, `WHERE`, `RETURN`, `WITH` in openCypher syntax). Implement `pest`-based parser producing typed `CypherQuery` AST. Unit tests for all core AST node types. Parser round-trip tests. First milestone: `polygraph::parser::cypher::parse(query)` returns a typed AST for basic `MATCH … RETURN` queries. | Large | [implementation-plan.md](plans/implementation-plan.md) |
+| **v0.2.0** | ✅ Released | **Core Translator**: Define `AstVisitor` trait in `translator/visitor.rs`. Implement node/label/property → RDF triple pattern mappings. Map relationships (directed and undirected) → triple patterns. Translate `WHERE` predicates to `FILTER` expressions, `RETURN` projections to `SELECT` variables, `OPTIONAL MATCH` to `OPTIONAL { }` graph patterns, and `WITH` to sub-select or `BIND`. Full integration tests asserting SPARQL output. Milestone: `Transpiler::cypher_to_sparql(q, engine)` works for single-hop queries. | Large | [implementation-plan.md](plans/implementation-plan.md) |
 
-**Milestone**: `Transpiler::cypher_to_sparql(q, engine)` works for single-hop queries. Output validates against the SPARQL 1.1 grammar. ✅
 
----
+### Graph Features & Multi-Source Queries (v0.3.x – v0.4.x)
 
-## Phase 3 — RDF-star & Reification Edge Properties
+| Version | Release | Accomplishment | Size | Plan |
+|---------|---------|-----------------|------|------|
+| **v0.3.0** | ✅ Released | **RDF Mapping**: Implement `rdf_mapping::rdf_star` encoder for edge property triples in RDF-star syntax. Implement `rdf_mapping::reification` fallback for standard RDF. Define `TargetEngine` trait with `supports_rdf_star()` capability flag, allowing adapters to declare engine constraints. Implement `target::rdf_star::RdfStar` and `target::GenericSparql11` adapters. Full test coverage for both encoding modes. Milestone: Relationship properties transpile correctly for both RDF-star and legacy SPARQL 1.1 engines. | Medium | [implementation-plan.md](plans/implementation-plan.md) |
+| **v0.4.0** | ✅ Released | **Feature Completeness**: Add variable-length path patterns (`-[:REL*]->`, `-[:REL*1..]->`, `-[:REL*0..1]->`) mapped to SPARQL property path cardinality. Multi-type relationship union (`-[:A\|B]->`) via Alternative property paths. `UNWIND [literal list] AS var` → SPARQL `VALUES`. Aggregation functions (`count`, `sum`, `avg`, `min`, `max`, `collect`) → SPARQL aggregate + `GROUP BY`. `ORDER BY` (multi-field, ASC/DESC), `SKIP`/`LIMIT` → SPARQL `OrderBy` and `Slice`. `IN [a, b, c]` expressions. `CALL` procedure stubs (parsed, UnsupportedFeature returned). Write clauses (`MERGE`, `CREATE`, `SET`, `DELETE`, `REMOVE`) parsed and validated. Expand grammar to 150+ constructs. 45 regression tests. Milestone: Handles the majority of real-world read Cypher queries; publicly announce alpha. | Large | [implementation-plan.md](plans/implementation-plan.md) |
 
-**Goal**: Support edge properties with both RDF-star and standard reification modes.
 
-- [x] Implement `rdf_mapping::rdf_star` encoder for edge property triples
-- [x] Implement `rdf_mapping::reification` fallback
-- [x] Implement `TargetEngine` trait with `supports_rdf_star()` capability flag
-- [x] Implement `target::rdf_star::RdfStar` generic adapter (RDF-star enabled; engine-agnostic)
-- [x] Implement `target::GenericSparql11` adapter (reification fallback)
-- [x] Tests for both encoding modes on edge properties
 
-**Milestone**: Relationship properties transpile correctly for both RDF-star and legacy engines. ✅
+### TCK Compliance Suite (v0.5.x)
 
----
+| Version | Release | Accomplishment | Size | Plan |
+|---------|---------|----------------|------|------|
+| **v0.5.0** | ✅ Released | **TCK Foundation**: Integrate the `cucumber` Gherkin test runner against an in-process Oxigraph SPARQL engine. Vendorize 463 openCypher TCK feature files across 4 categories. Implement step definitions for all «Given»/«When»/«Then» patterns. Ship baseline TCK report: **461/463 passing (99.6%)** on the 4-category subset. The 2 failures are documented fundamental static-transpiler limits (runtime path constraints, RDF multigraph representation). | Large | [implementation-plan.md](plans/implementation-plan.md) |
+| **v0.5.1** | ✅ Released | **Full Suite Compliance**: Vendorize all 37 TCK categories (3828 scenarios). Phases B–D: expand grammar to cover graph/pattern/quantifier, write-clause, and full temporal constructs. Fix temporal type construction and arithmetic (ISO date/time/datetime/duration, week/ordinal/quarter components, xsd typed literals). Add write-clause semantic validation for CREATE/MERGE/SET/REMOVE/DELETE. Implement EXISTS subquery support. Implement quantifier tautology folding (Quantifier9–12 +54 passes), compile-time min/max fold over literal lists, mixed-type ORDER BY sort-key encoding with Cypher type-rank. Split the monolithic translator into 8 focused files (−1,038 dead lines). Expand TCK runner with write-clause + temporal + graph/path/quantifier shards. Fix duration semantic comparison in the harness (ISO 8601 global-negative and per-component signs). **End state: 3756/3828 passing (98.1%).** | Large | [plans/remaining-work.md](plans/remaining-work.md) |
 
-## Phase 4 — Extended openCypher Coverage
 
-**Goal**: Reach broad openCypher feature parity beyond basic `MATCH … RETURN`.
+### Spec-First Pivot (v0.6.x)
 
-- [x] Variable-length path patterns (`-[:REL*]->`, `-[:REL*1..]->`, `-[:REL*0..1]->`) → SPARQL ZeroOrMore / OneOrMore / ZeroOrOne property paths
-- [x] Multi-type relationship union (`-[:A|B]->`) → SPARQL Alternative property path
-- [x] `MERGE`, `CREATE`, `SET`, `DELETE`, `REMOVE` write clauses → parsed, return UnsupportedFeature (SPARQL Update deferred to engine integration)
-- [x] `UNWIND [literal list] AS var` → SPARQL `VALUES`
-- [x] Aggregation functions `count(*)`, `count(expr)`, `sum`, `avg`, `min`, `max`, `collect` → SPARQL aggregate expressions + `GROUP BY`
-- [x] `ORDER BY` (ASC/DESC, multi-field) → SPARQL `OrderBy`
-- [x] `SKIP` / `LIMIT` → SPARQL `Slice`
-- [x] List literals in `IN [a, b, c]` → SPARQL `IN()` expression with multiple members
-- [x] `CALL` procedure stubs → parsed, return UnsupportedFeature with procedure name
-- [x] Expand grammar (`cypher.pest`) and parser for all new constructs
-- [x] Regression tests for each new feature (45 new tests: 10 AST unit + 35 integration)
+| Version | Release | Accomplishment | Size | Plan |
+|---------|---------|----------------|------|------|
+| **v0.6.0** | 🚧 In progress | **Logical Query Algebra**: Replace the TCK-driven patch methodology with a spec-anchored architecture. Freeze a regression baseline and introduce the `polygraph-difftest` differential testing harness (204 curated queries covering the full expression surface, all passing). Harden the grammar: `CALL { }` subquery, GQL label expressions (`\|`/`&`/`!`), inline `WHERE` in node patterns. Introduce the Logical Query Algebra (`src/lqa/`) — `Expr` IR with `Type` lattice, `Op` operator enum covering all Cypher operators, `Bag<T>` multiset, and a `normalize` pass (CASE desugaring, alias lifting). Run a spec-driven audit of the translator: delete `rewrite.rs`, reclassify `SCENARIO-PATCH` tags as spec-derivable normalizations or structured `Unsupported { spec_ref }` errors. Route queries through the LQA as the primary path; the legacy translator is retained as a fallback for variable-length paths, temporal arithmetic, and write clauses. Fix bugs exposed by wider LQA routing (aggregate GROUP BY scoping, ORDER BY alias expansion, OPTIONAL property null semantics, WITH scoping, UNION). **End state: 3757/3828 passing (98.1%); 204/204 difftest queries passing; MATCH/WITH/UNION/ORDER BY/OPTIONAL MATCH/aggregates all route through LQA.** | Large | [plans/spec-first-pivot.md](plans/spec-first-pivot.md) |
 
-**Milestone**: Handles the majority of real-world read Cypher queries. Publicly announce alpha. ✅
 
----
+### Public API & Legacy Elimination (v0.7.x)
 
-## Phase 5 — ISO GQL Parser & Translator ✅
-
-**Goal**: Add ISO GQL (ISO/IEC 39075:2024) as a supported input language.
-
-- [x] Write `grammars/gql.pest` for core GQL constructs (MATCH, FILTER/WHERE, RETURN, NEXT, IS labels, multi-labels, ORDER BY, SKIP, LIMIT, aggregation, write clauses)
-- [x] Define `GqlQuery` AST types in `ast/gql.rs` (wraps `Vec<Clause>` for zero-duplication design)
-- [x] Implement GQL parser in `parser/gql.rs` with IS→`:Label` lowering, FILTER→WITH WHERE, NEXT→WITH *, IS edge types (19 unit tests)
-- [x] Implement `translator/gql.rs` delegating to Cypher translator via shared clause types
-- [x] `Transpiler::gql_to_sparql(q, engine)` public API wired up in `lib.rs`
-- [x] 34 integration tests in `tests/integration/gql_to_sparql.rs` covering IS labels, multi-labels, FILTER, WHERE, NEXT, rel IS TYPE, OPTIONAL MATCH, ORDER BY/SKIP/LIMIT, aggregation, RDF-star
-
-**Milestone**: Basic GQL `MATCH … RETURN` queries transpile to valid SPARQL. ✅ 199 tests passing.
-
----
-
-## Phase 6 — openCypher TCK Compliance
-
-**Goal**: Systematically verify semantic correctness against the official test suite.
-
-- [x] Integrate the `cucumber` crate for Gherkin-driven tests
-- [x] Download and vendorize TCK feature files from [opencypher/openCypher](https://github.com/opencypher/openCypher/tree/master/tck)
-- [x] Spin up an embedded Oxigraph instance in tests for SPARQL execution
-- [x] Implement step definitions for TCK `Given`/`When`/`Then` patterns
-- [x] Track and document skipped/failing scenarios with issue references
-- [x] Achieve ≥ 80% TCK pass rate
-- [x] Achieve ≥ 90% TCK pass rate
-- [x] Achieve ≥ 95% TCK pass rate (currently 99.6%)
-
-**TCK compliance tracker** (updated each release):
-
-| Release | Pass | Fail | Total | % |
-|---------|------|------|-------|---|
-| 0.1.0   | 362  | 101  | 463   | 78.2% |
-| dev     | 461  | 2    | 463   | 99.6% |
-
-**Remaining 2 failures** — fundamental static-transpiler limitations:
-- Match4[8]: `[rs*]` runtime list as path constraint (requires multi-phase execution, see plans/fundamental-limitations.md §1a)
-- Match6[14]: undirected *3..3 with parallel edges (RDF collapses duplicate triples; multigraph not representable in RDF)
-
-**Milestone**: Published compliance report. ≥ 80% pass rate.
-
----
-
-## Phase 7 — Full openCypher TCK Suite Expansion
-
-**Goal**: Expand TCK coverage from 463 scenarios (4 clause categories) to ≥ 80% pass rate across all 3,650 scenarios in the complete suite. See [plans/tck-full-plan.md](plans/tck-full-plan.md) for the detailed phased breakdown and translator mapping tables.
-
-**Current coverage**: 461/463 (99.6%) across the 4-category subset; 12.7% of the full suite.
-
-- [ ] **Phase A** — Vendorize low-effort categories (return-orderby, with, union, literals, boolean); fix grammar edge-cases; 572 new scenarios; target ≥ 90%
-- [ ] **Phase B** — Expression engine: string/numeric/type-conversion functions, `CASE WHEN`, list comprehensions, map literals; 558 new scenarios; target ≥ 75%
-- [ ] **Phase C** — Advanced features: graph functions (`type(r)`, `labels(n)`), `EXISTS` / `NOT EXISTS`, quantifiers (compile-time lists), procedure stubs; 670 new scenarios; target ≥ 40%
-- [ ] **Phase D** — Write operations (`CREATE/DELETE/SET/MERGE` → SPARQL Update) and temporal types; 1,370 new scenarios; target ≥ 40%
-- [x] **Phase F** — Code-health refactor: split `src/translator/cypher.rs` (16,209 lines) into 8 focused subfiles under `src/translator/cypher/` using `include!` macro technique; pre-refactor dead-code removal (−1,038 lines); zero TCK regression
-
-**Full-TCK compliance tracker** (updated each release):
-
-| Release | Pass | Fail | Total | % | Notes |
-|---------|------|------|-------|---|-------|
-| dev     | 461  | 2    | 463   | 99.6% | 4-category subset |
-| dev     | 1632 | 116  | 1748  | 93.4% | full suite, grammar expanded |
-| dev     | 2179 | 224  | 2505  | 87.0% | Phase C vendored: graph/pattern/quantifier |
-| dev     | 2199 | 204  | 2505  | 87.8% | Phase C: SyntaxError checks, 3VL single() |
-| dev     | 2228 | 175  | 2505  | 88.9% | date/time functions, WITH list propagation fixes |
-| dev     | 2248 | 155  | 2505  | 89.7% | null_vars tracking, subscript property access, temporal constructors in translate_function_call, const_int_vars for range(), path nullable tracking |
-| dev     | 2548 | 1241 | 3789  | 67.2% | Phase D vendored (create/delete/merge/remove/set/temporal); comprehensive temporal constructors (ISO week/ordinal/quarter/duration) |
-| dev     | 2595 | 999  | 3789  | 68.5% | Write clause support: REMOVE/SET via SPARQL Update, CREATE/DELETE semantic validation (VariableAlreadyBound, NoSingleRelationshipType, etc.) |
-| dev     | 2627 | 967  | 3789  | 69.3% | MERGE validation (+NoSingleRelType, +VariableAlreadyBound, +path var), MERGE INSERT/MATCH in skip_writes, SetLabel support, SET/MERGE RHS undefined var checks |
-| dev     | 3430 | 164  | 3789  | 90.5% | All Temporal5 scenarios fixed: JDN pos/neg split (Oxigraph right-associative subtraction bug), d.quarters/d.weeks added to TEMPORAL_PROPS; date/time component extraction working for all temporal types |
-| dev     | 3431 | 163  | 3789  | 90.6% | Phase F: translator split into 8 focused files (mod.rs 4059L, clauses.rs 1753L, temporal.rs 3343L, patterns.rs 1549L, functions.rs 1528L, semantics.rs 1554L, rewrite.rs 826L, return_proj.rs 593L); −1,038 dead lines |
-| dev     | 3433 | 161  | 3789  | 90.7% | fix(temporal): xsd:time literals missing :00 seconds — time({hour:10,timezone:'+01:00'}) UNDEF for comparison; +2 passes |
-| dev     | 3435 | 156  | 3739  | 95.7% | TCK runner expanded: 1415→3739 scenarios via new write-clause + temporal + graph/path/quantifier shards; stack overflow fixes (larger thread stack, Call-proc skip step); list null encoding fix |
-| dev     | 3437 | 154  | 3739  | 95.8% | fix(translator): SPARQL BIND target conflict in WITH variable rename — detect in-scope conflicts, use shadow vars; edge src/dst renamed_away guard; With7 [1,2] now pass |
-| dev     | 3488 | 153  | 3789  | 92.1% | fix: String8/9/10 StartsWith/Contains/EndsWith guard for list/map; datetime.fromepoch/fromepochmillis compile-time; Set1[6,7] self-referential list concat in SET; temporal typed literals (date/localtime/localdatetime→xsd types); TCK expanded from 3739→3789 scenarios |
-| dev     | 3491 | 150  | 3789  | 92.1% | feat(O1): list sort-key encoding for ORDER BY on list-of-lists UNWIND — parallel `?__sk_<var>` column; Cypher type-rank encoding `map(0)…list(3)…string(5)…bool(6/7)…int(8)…null(Z)`; fixed for both RETURN ORDER BY and WITH…ORDER BY |
-| dev     | 3494 | 147  | 3789  | 92.2% | feat(A1): compile-time min/max fold for `UNWIND [lits] AS x RETURN min/max(x)` over lists or mixed types; `cypher_compare` uses proper cross-type Cypher semantics; Aggregation2[9,11,12] pass |
-| dev     | 3548 | 93   | 3789  | 93.6% | feat(Q1): quantifier tautology folding for Quantifier9–12 (+54); detects opaque list vars via `rand()`/`reverse()`/CASE preambles; canonical-key identity check covers `none=!any`, `none=all(!P)`, `all=none(!P)`, `any=!none`, `size([P])=0/1/size(list)/> 0`; constant-pred fold for `none(F)=T`, `any(F)=F`, `all(T)=T`, `single(F)=F` |
-| dev     | 3555 | 86   | 3789  | 93.8% | feat(T1): xsd:duration typed literals + temporal-minus-duration via split-subtract (yearMonthDuration + dayTimeDuration parts via REPLACE regex + COALESCE); STRBEFORE for xs:date subtraction to strip time; Temporal8 scenarios 1-5 example 1 pass |
-| dev     | 3558 | 83   | 3789  | 93.9% | feat(T1b): tck_eval_duration cascade + normalize — fractional years→months (0.5Y→6M), hours≥24→extra days (33H→1D+9H); Temporal8 scenarios 1,4,5 example 3 pass |
-| dev     | 3704 | 84   | 3789  | 97.8% | feat(Tier-A): harness plumbing — TypeError/ProcedureError/ParameterMissing steps; result_should_be_empty + write-only empty-return; binary-tree-1/2 fixtures; executing control query skip; write-only DELETE silent skip; +146 passes, -147 skips |
-| dev     | 3734 | 94   | 3828  | 97.5% | feat(Tier-FGH): in-order list-aware step; SyntaxError for pattern-comprehension on SET RHS; vendor correct ExistentialSubquery1/2/3 (+39 scenarios); Match5 patches; EXISTS-subquery support (parser + ExistsSubquery AST + translator); having_executed routes through write_clauses_to_updates for MATCH/MERGE/SET/REMOVE/DELETE; nested UNWIND in setup CREATE via Cartesian product; coalesce consecutive CREATEs to share bnode mappings; CREATE property exprs (Property/Add/Mul/Concat) with OPTIONAL+BIND; var-length empty interval *2..1 → FILTER(false); bidir <-[r]-> grammar |
-| dev     | 3752 | 76   | 3828  | 98.0% | Merge5[11] CREATE→MERGE bound-var; Graph3[6]/Graph4[5] WITH list-var projection; Delete1[7] ConstraintVerificationFailed guard; edge vars in WITH list; undirected varlen path (pred|^pred)+ FILTER(n!=m); MERGE skip_writes anonymous as LEFT JOIN; PatternPredicate in SET RHS SyntaxError; temporal arith zero-hop, Negate, mixed-sign |
-| dev     | 3756 | 72   | 3828  | 98.1% | fix(TCK harness): duration semantic comparison — parse ISO 8601 duration strings into (total_months, total_ns) tuples; handles global-negative (-P6M) and per-component (P-6M) signs; fixes Temporal8 hours≥24-normalization mismatch (e.g. PT32H vs P1DT8H) |
-| target  | —    | —    | 3,650 | ≥ 80% | all 37 categories |
-
-**Milestone**: ≥ 80% pass rate across the full 3,650-scenario suite.
-
----
-
-## Phase 8 — Performance & Production Hardening
-
-**Goal**: Ready for embedding in production database kernels.
-
-- [ ] Add `criterion` benchmarks for translation throughput (queries/sec)
-- [ ] Profile and optimize hot paths in the translator visitor
-- [ ] Enforce `#![forbid(unsafe_code)]` crate-wide
-- [ ] `#![deny(clippy::all, clippy::pedantic)]` with justified exceptions
-- [ ] Fuzz the parser with `cargo-fuzz` / `arbitrary`
-- [ ] Audit all `unwrap`/`expect` calls — replace with proper error propagation
-- [ ] Verify `no_std` compatibility (or document the requirement for `std`)
-- [ ] Publish `0.1.0` to crates.io
-
-**Milestone**: `0.1.0` stable release on crates.io.
-
----
-
-## Future Considerations
-
-- **SPARQL-star federation** (`SERVICE` keyword pass-through)
-- **GQL write operations** (`INSERT`, `SET`, `DELETE` graph modifications)
-- **Query planning hints** for specific engines (e.g., Jena TDB2 optimizations)
-- **WASM target** for use in browser or edge environments
-- **Python/JS bindings** via PyO3 / wasm-bindgen
+| Version | Release | Accomplishment | Size | Plan |
+|---------|---------|----------------|------|------|
+| **v0.7.0** | 🔜 Planned | **Stable Public API**: Stabilize the public surface — `transpile_cypher`, `transpile_gql`, `TranspileOptions`, `TranspileOutput`, `TargetEngine`, `PolygraphError` — with semver guarantees. Publish the `Unsupported` construct catalog so callers can distinguish transpiler bugs from semantically infeasible SPARQL patterns. Delete the legacy translator once `is_lqa_safe()` returns `true` for ≥ 99 % of the TCK corpus. Ship an integration example against a second SPARQL engine (Apache Jena or Stardog via `TargetEngine`). Clean docs build, CHANGELOG entry. | Medium | [plans/spec-first-pivot.md](plans/spec-first-pivot.md) |
