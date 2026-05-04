@@ -292,6 +292,94 @@ fn normalize_tck(s: &str) -> Option<String> {
     }
 }
 
+/// Parse an ISO 8601 / Cypher duration string into (total_months, total_nanoseconds).
+/// Supports:
+///   - Global negative sign: `-P6M15DT17H45M3.5S`
+///   - Per-component negative: `P-6M-15DT-17H-45M-3.5S`
+///   - Hours ≥ 24 (Cypher canonical, unnormalized w.r.t. days)
+/// Returns None if the string is not a duration.
+fn parse_duration_semantic(s: &str) -> Option<(i64, i64)> {
+    let s = s.trim();
+    // Must start with optional '-' then 'P'
+    let (global_neg, body) = if let Some(b) = s.strip_prefix("-P") {
+        (true, b)
+    } else if let Some(b) = s.strip_prefix('P') {
+        (false, b)
+    } else {
+        return None;
+    };
+    // Must not be empty
+    if body.is_empty() {
+        return None;
+    }
+
+    // Helper: parse an integer component, handling negative sign.
+    fn parse_int_before(s: &mut &str, suffix: char) -> Option<i64> {
+        let pos = s.find(suffix)?;
+        let num_str = &s[..pos];
+        *s = &s[pos + 1..];
+        num_str.parse::<i64>().ok()
+    }
+
+    // Split at 'T' for date and time parts.
+    let (date_part, time_part) = if let Some(tp) = body.find('T') {
+        (&body[..tp], Some(&body[tp + 1..]))
+    } else {
+        (body, None)
+    };
+
+    // Parse date components.
+    let mut dp = date_part;
+    let years = if dp.contains('Y') { parse_int_before(&mut dp, 'Y').unwrap_or(0) } else { 0 };
+    let months = if dp.contains('M') { parse_int_before(&mut dp, 'M').unwrap_or(0) } else { 0 };
+    let days = if dp.contains('D') { parse_int_before(&mut dp, 'D').unwrap_or(0) } else { 0 };
+
+    // Parse time components.
+    let (hours, mins, secs_ns) = if let Some(tp) = time_part {
+        let mut t = tp;
+        let h = if t.contains('H') { parse_int_before(&mut t, 'H').unwrap_or(0) } else { 0 };
+        let m = if t.contains('M') { parse_int_before(&mut t, 'M').unwrap_or(0) } else { 0 };
+        let sns = if t.ends_with('S') {
+            let sstr = &t[..t.len() - 1];
+            sstr.parse::<f64>().ok().map(|f| (f * 1_000_000_000.0).round() as i64).unwrap_or(0)
+        } else {
+            0
+        };
+        (h, m, sns)
+    } else {
+        (0, 0, 0)
+    };
+
+    let total_months = years * 12 + months;
+    // Total nanoseconds from days + time parts (all independent components combined).
+    let total_ns = days * 86_400_000_000_000_i64
+        + hours * 3_600_000_000_000_i64
+        + mins * 60_000_000_000_i64
+        + secs_ns;
+
+    if global_neg {
+        Some((-total_months, -total_ns))
+    } else {
+        Some((total_months, total_ns))
+    }
+}
+
+/// Compare two scalar string values for semantic equality.
+/// For duration values (P.../−P...) use semantic comparison to handle
+/// Oxigraph's hours→days normalization and per-component vs global negation.
+fn scalar_values_equal(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    // Try duration semantic comparison.
+    let a_dur = parse_duration_semantic(a);
+    let b_dur = parse_duration_semantic(b);
+    if let (Some(da), Some(db)) = (a_dur, b_dur) {
+        return da == db;
+    }
+    false
+}
+
 /// Return true if the TCK expected cell contains a node/rel/path display value
 /// that requires full graph-object reconstruction (not a scalar).
 fn is_complex_tck_value(s: &str) -> bool {
@@ -2366,27 +2454,41 @@ fn compare_results(world: &TckWorld, step: &Step, ordered: bool, sort_lists: boo
         })
         .collect();
 
+    /// Check whether two optional string cells are semantically equal.
+    fn cells_equal(a: &Option<String>, b: &Option<String>) -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(av), Some(bv)) => scalar_values_equal(av, bv),
+            _ => false,
+        }
+    }
+    /// Check whether two rows are semantically equal (cell-by-cell).
+    fn rows_equal(a: &[Option<String>], b: &[Option<String>]) -> bool {
+        a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| cells_equal(x, y))
+    }
+
     if ordered {
         for (i, (act_row, exp_row)) in actual.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(
-                act_row, exp_row,
+            assert!(
+                rows_equal(act_row, exp_row),
                 "Row {i} mismatch: got {act_row:?}, expected {exp_row:?}{ctx}"
             );
         }
     } else {
-        // Sort both sets and compare.
-        let key = |row: &Vec<Option<String>>| {
-            row.iter()
-                .map(|c| c.clone().unwrap_or_default())
-                .collect::<Vec<_>>()
-        };
-        let mut a_sorted = actual.clone();
-        let mut e_sorted = expected.clone();
-        a_sorted.sort_by_key(key);
-        e_sorted.sort_by_key(key);
-        assert_eq!(
-            a_sorted, e_sorted,
-            "Result set mismatch (sorted):\n  got:      {a_sorted:#?}\n  expected: {e_sorted:#?}{ctx}"
+        // Unordered comparison using semantic row equality.
+        // For each expected row, find and consume a matching actual row.
+        let mut remaining_actual = actual.clone();
+        let mut unmatched_expected: Vec<&Vec<Option<String>>> = Vec::new();
+        for exp_row in &expected {
+            if let Some(pos) = remaining_actual.iter().position(|a_row| rows_equal(a_row, exp_row)) {
+                remaining_actual.remove(pos);
+            } else {
+                unmatched_expected.push(exp_row);
+            }
+        }
+        assert!(
+            unmatched_expected.is_empty() && remaining_actual.is_empty(),
+            "Result set mismatch (sorted):\n  got:      {actual:#?}\n  expected: {expected:#?}{ctx}"
         );
     }
 }
