@@ -1,7 +1,7 @@
 # Spec-First Pivot — From TCK-Driven Patches to Semantics-Driven Translation
 
 **Status**: in progress
-**Updated**: 2026-05-24 (Phase 4 COMPLETE: zero SCENARIO-PATCH tags; rewrite.rs deleted → util.rs; sign() implemented; head/last/pow upgraded with structured Unsupported; TCK 3757/3828)
+**Updated**: 2026-05-04 (Phase 4.5 COMPLETE: LQA routing active; TCK 3757/3828)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,
@@ -372,7 +372,7 @@ TCK 3757/3828 (≥ 3734 ✓); difftest 201/201 (100% ≥ 99% ✓).
 | `head(list)` / `last(list)` — string-slice hack / unsupported | openCypher 9 §6.3.5 | ✅ Literal-list fast path kept; runtime → `Unsupported` |
 | `sign(expr)` on non-literal — "complex return expression" error | openCypher 9 §6.3.2 | ✅ Implemented via `IF(?x > 0, 1, IF(?x < 0, -1, 0))` |
 
-### Phase 4.5 — LQA Routing: Insert the IR Between AST and SPARQL
+### Phase 4.5 — LQA Routing: Insert the IR Between AST and SPARQL  (✅ complete 2026-05-04)
 
 **Goal:** make the LQA the actual load-bearing layer — every read query goes
 AST → LQA Op tree → SPARQL, rather than AST → SPARQL directly.  The legacy
@@ -435,6 +435,32 @@ The legacy translator remains 100% correct for those cases.
 
 **Exit:** LQA path active (not behind flag); TCK floor maintained at 3757;
 `cargo test --lib` green; difftest 201/201.
+
+**Landed:**
+
+- ✅ `src/lqa/lower.rs` — `AstLowerer`: `CypherQuery` → `Op` tree.  Tracks
+  `seen_vars` across MATCH clauses so re-used node variables are not double-scanned;
+  `to`-node of a relationship pattern uses `Selection(LabelCheck)` rather than a
+  fresh `Op::Scan` (avoids incorrect sentinel triples).
+- ✅ `src/lqa/sparql.rs` — `Compiler`: `Op` tree → `spargebra::GraphPattern`.
+  Key correctness decisions: unlabelled node Scan → `Err(Unsupported)` (legacy
+  fallback); named relationship variable → `Err(Unsupported)`; variable-length
+  path → `Err(Unsupported)`; write operators → `Err(Unsupported)`.
+  `n.prop IS NULL` uses `NOT EXISTS { ?n <prop> ?val }` (absent-property aware).
+  Mid-pipeline Projection (WITH) uses flat `BIND`/`Extend` chains rather than a
+  nested sub-SELECT (avoid SPARQL variable-scoping breakage).
+- ✅ `src/lqa/mod.rs` updated — `pub mod lower; pub mod sparql;` registered.
+- ✅ `src/lib.rs` — `try_lqa_path()` + conservative `is_lqa_safe()` allow-list:
+  labeled nodes, no rel-vars, no varlen, no OPTIONAL MATCH, no WITH, no ORDER BY.
+  Falls back transparently to legacy on any `Err(Unsupported)`.
+- ✅ TCK: **3757 / 3828** (baseline maintained); lib unit tests: **191 / 191**.
+- ✅ Committed as `5b027fc`.
+
+**Legacy translator (`src/translator/`) status:** intentionally kept.  The LQA
+allow-list is still narrow; deleting the legacy path would immediately drop TCK
+below 3000.  Phase 5 widens the allow-list query-class by query-class.  The
+legacy translator is deleted only when `is_lqa_safe` returns `true` for ≥ 99 %
+of the TCK corpus and the fallback code path is never exercised.
 
 ### Phase 5 — Coverage Expansion via Differential Fuzzing
 
