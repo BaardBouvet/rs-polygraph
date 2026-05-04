@@ -1,0 +1,23 @@
+name = "gql_label_and_operator"
+description = "GQL-style & operator between labels is treated as logical AND, identical to classic :A:B stacking."
+spec_ref = "GQL ISO 39075 §16.6 label expressions — intersection"
+
+cypher = """
+MATCH (n:Person&Employee)
+RETURN n.name AS name
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person", "Employee"], properties = { name = "Alice" } },
+    { id = "b", labels = ["Person"],             properties = { name = "Bob"   } },
+    { id = "c", labels = ["Employee"],           properties = { name = "Carol" } },
+    { id = "d", labels = ["Person", "Employee"], properties = { name = "Dave"  } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [["Alice"], ["Dave"]]
+order = "bag"

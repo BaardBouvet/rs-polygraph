@@ -45,6 +45,7 @@ clause = { match_clause
           | set_clause
           | delete_clause
           | remove_clause
+          | call_subquery
           | call_clause
           | foreach_clause }
 
@@ -221,6 +222,10 @@ detach_marker   = { kw_DETACH }
 remove_clause   = { kw_REMOVE ~ remove_item ~ ("," ~ remove_item)* }
 remove_item     = { prop_access_expr | variable ~ node_labels }
 
+// CALL { statement } — subquery clause (Neo4j 5.x / GQL)
+// Parsed here; builder emits UnsupportedFeature until Phase 3 implements it.
+call_subquery   = { kw_CALL ~ "{" ~ statement ~ "}" }
+
 // CALL proc [(args)] [YIELD (* | items [WHERE expr])]
 call_clause     = { kw_CALL ~ proc_name ~ ("(" ~ call_args? ~ ")")? ~ yield_clause? }
 call_args       = { expression ~ ("," ~ expression)* }
@@ -243,9 +248,15 @@ pattern_element        = { node_pattern ~ pattern_element_chain* | "(" ~ pattern
 pattern_element_chain  = { rel_pattern ~ node_pattern }
 
 // Node pattern: (var:Label1:Label2 {key: val})
-node_pattern  = { "(" ~ variable? ~ node_labels? ~ properties? ~ ")" }
-node_labels   = { node_label+ }
-node_label    = { ":" ~ schema_name }
+// Extended to support GQL inline WHERE predicate: (n:Person WHERE n.age > 18)
+node_pattern  = { "(" ~ variable? ~ node_labels? ~ properties? ~ where_clause? ~ ")" }
+
+// Label expression: :A, :A:B (AND stacking), :A|B (OR), :A&B (AND), :!A (NOT)
+// Flat combinators only; fully recursive label expressions are Phase 3.
+node_labels    = { node_label ~ gql_label_more* }
+node_label     = { ":" ~ "!"? ~ schema_name }
+// Additional label atoms after the first, using : (stack), | (OR), or & (AND)
+gql_label_more = { (":" | "|" | "&") ~ "!"? ~ schema_name }
 
 // Relationship patterns (left, right, undirected, bidir stub)
 rel_pattern   = { full_arrow

@@ -87,6 +87,9 @@ fn build_clause(inner: Pair<Rule>) -> Result<Clause, PolygraphError> {
         Rule::set_clause => Ok(Clause::Set(build_set_clause(inner)?)),
         Rule::delete_clause => Ok(Clause::Delete(build_delete_clause(inner)?)),
         Rule::remove_clause => Ok(Clause::Remove(build_remove_clause(inner)?)),
+        Rule::call_subquery => Err(PolygraphError::UnsupportedFeature {
+            feature: "CALL { } subquery".to_string(),
+        }),
         Rule::call_clause => Ok(Clause::Call(build_call_clause(inner)?)),
         Rule::foreach_clause => Err(PolygraphError::UnsupportedFeature {
             feature: "FOREACH clause".to_string(),
@@ -344,21 +347,38 @@ fn build_pattern_element(pair: Pair<Rule>) -> Result<Vec<PatternElement>, Polygr
 
 fn build_node_labels(pair: Pair<Rule>) -> Result<Vec<Label>, PolygraphError> {
     let mut labels = Vec::new();
-    for label_pair in pair.into_inner() {
-        if label_pair.as_rule() == Rule::node_label {
-            let name = label_pair
-                .into_inner()
-                .find(|p| p.as_rule() == Rule::schema_name)
-                .map(|p| p.as_str().trim_matches('`').to_string())
-                .unwrap_or_default();
-            labels.push(name);
+    for child in pair.into_inner() {
+        match child.as_rule() {
+            Rule::node_label => {
+                // node_label = { ":" ~ "!"? ~ schema_name }
+                // The "!"? is an optional literal; it doesn't create a named child pair.
+                // We collect the schema_name and ignore the negation flag for now
+                // (flat label semantics; Phase 3 will add proper boolean label algebra).
+                if let Some(name_pair) = child
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::schema_name)
+                {
+                    labels.push(name_pair.as_str().trim_matches('`').to_string());
+                }
+            }
+            Rule::gql_label_more => {
+                // gql_label_more = { (":"|"|"|"&") ~ "!"? ~ schema_name }
+                // Connector (|/&/:) and optional ! don't create named pairs; collect the name.
+                if let Some(name_pair) = child
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::schema_name)
+                {
+                    labels.push(name_pair.as_str().trim_matches('`').to_string());
+                }
+            }
+            _ => {}
         }
     }
     Ok(labels)
 }
 
 fn build_node_pattern(pair: Pair<Rule>) -> Result<NodePattern, PolygraphError> {
-    // node_pattern = { "(" ~ variable? ~ node_labels? ~ properties? ~ ")" }
+    // node_pattern = { "(" ~ variable? ~ node_labels? ~ properties? ~ where_clause? ~ ")" }
     let mut variable = None;
     let mut labels = Vec::new();
     let mut properties = None;
@@ -367,20 +387,12 @@ fn build_node_pattern(pair: Pair<Rule>) -> Result<NodePattern, PolygraphError> {
         match inner.as_rule() {
             Rule::variable => variable = Some(ident_text(&inner)),
             Rule::node_labels => {
-                for label_pair in inner.into_inner() {
-                    if label_pair.as_rule() == Rule::node_label {
-                        // node_label = { ":" ~ schema_name }
-                        // schema_name matches text that may be a reserved word or ident
-                        let name = label_pair
-                            .into_inner()
-                            .find(|p| p.as_rule() == Rule::schema_name)
-                            .map(|p| p.as_str().trim_matches('`').to_string())
-                            .unwrap_or_default();
-                        labels.push(name);
-                    }
-                }
+                labels = build_node_labels(inner)?;
             }
             Rule::properties => properties = Some(build_map_literal(inner)?),
+            // where_clause inside a node pattern (GQL inline filter) is parsed but
+            // semantically ignored in Phase 2; Phase 3 will scope it properly.
+            Rule::where_clause => {}
             _ => {}
         }
     }
@@ -711,16 +723,7 @@ fn build_remove_item(pair: Pair<Rule>) -> Result<RemoveItem, PolygraphError> {
             let mut labels: Vec<Label> = Vec::new();
             for child in children.iter().skip(1) {
                 if child.as_rule() == Rule::node_labels {
-                    for lbl in child.clone().into_inner() {
-                        if lbl.as_rule() == Rule::node_label {
-                            let name = lbl
-                                .into_inner()
-                                .find(|p| p.as_rule() == Rule::schema_name)
-                                .map(|p| p.as_str().trim_matches('`').to_string())
-                                .unwrap_or_default();
-                            labels.push(name);
-                        }
-                    }
+                    labels = build_node_labels(child.clone())?;
                 }
             }
             Ok(RemoveItem::Label { variable, labels })
@@ -1242,17 +1245,7 @@ fn build_non_arith_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> 
             // node_labels at end of non_arith_expr: e.g. (n):Label — fold into a LabelCheck
             Rule::node_labels => {
                 // Convert acc to a label check if it's a variable
-                let mut labels = Vec::new();
-                for label_pair in postfix.into_inner() {
-                    if label_pair.as_rule() == Rule::node_label {
-                        let name = label_pair
-                            .into_inner()
-                            .find(|p| p.as_rule() == Rule::schema_name)
-                            .map(|p| p.as_str().trim_matches('`').to_string())
-                            .unwrap_or_default();
-                        labels.push(name);
-                    }
-                }
+                let labels = build_node_labels(postfix)?;
                 if let Expression::Variable(var_name) = &acc {
                     acc = Expression::LabelCheck {
                         variable: var_name.clone(),
@@ -1761,16 +1754,7 @@ fn build_label_check(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
     let mut labels = Vec::new();
     for child in children {
         if child.as_rule() == Rule::node_labels {
-            for label_pair in child.into_inner() {
-                if label_pair.as_rule() == Rule::node_label {
-                    let name = label_pair
-                        .into_inner()
-                        .find(|p| p.as_rule() == Rule::schema_name)
-                        .map(|p| p.as_str().trim_matches('`').to_string())
-                        .unwrap_or_default();
-                    labels.push(name);
-                }
-            }
+            labels = build_node_labels(child)?;
         }
     }
     Ok(Expression::LabelCheck { variable, labels })

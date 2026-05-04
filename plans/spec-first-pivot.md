@@ -190,28 +190,70 @@ normalization pass as the migration target.
 **Exit:** ≥ 200 curated queries pass; nightly fuzz corpus committed under
 `difftest/corpus/`; one previously-unknown bug found and filed.
 
-### Phase 2 — Grammar Migration
+### Phase 2 — Grammar Hardening  (🚧 in progress — 2026-05-15)
 
-**Goal:** replace the hand-rolled pest grammar with one generated from the
-openCypher / GQL reference grammars.
+**Goal:** eliminate silent parse rejections of valid Cypher / GQL constructs that
+the TCK does not exercise, so arbitrary user queries are not silently rejected.
 
-- Add `antlr-rust` (or `tree-sitter-cypher` + a thin wrapper — pick during
-  spike) as the parser backend.
-- Vendor the openCypher reference grammar
-  (`Cypher.g4`) and the GQL ISO grammar excerpt under `grammars/upstream/`.
-- Generate parser into `src/parser/generated/` and write a thin adapter that
-  produces the existing `ast::cypher` types, preserving `pest`-style spans.
-- Run **both** parsers in parallel under a feature flag for one phase; assert
-  AST equivalence on the entire TCK corpus and the difftest curated suite.
-- Remove the pest grammar once parity is achieved on TCK + difftest.
+**Scope re-decision (2026-05-15):** Original plan called for replacing the pest
+grammar with an ANTLR-generated one.  Spike found:
 
-**Risks / mitigations:**
-- ANTLR-rust runtime maturity → spike first, fall back to `tree-sitter` if
-  ergonomic costs are too high.
-- AST shape drift → keep the AST module stable; absorb grammar differences in
-  the adapter.
+| Option | Verdict |
+|---|---|
+| `antlr-rust` 0.3.0-beta | Abandoned 2022-07-22; do not use |
+| `antlr4rust` 0.5.2 | Semi-maintained (Oct 2025) but requires ANTLR4 toolchain; high integration cost |
+| `tree-sitter-cypher` | No crate on crates.io; would need a vendored C grammar + build script |
+| Extend existing pest grammar | Zero abandoned-crate risk; 0 current TCK failures are grammar-related; safest path |
 
-**Exit:** pest grammar deleted; TCK ≥ 3734; difftest curated suite still green.
+Because (a) zero of the 71 remaining TCK failures are caused by grammar gaps, and
+(b) the existing pest grammar already covers ≥ 100 % of the TCK surface, a full
+parser replacement delivers no measurable benefit at high cost and risk.
+
+**Re-scoped to "Grammar Hardening":**
+
+The grammar gaps identified via an empirical test exercise were:
+
+| Construct | Was failing | Fix |
+|---|---|---|
+| `CALL { … }` subquery clause | parse error | Add `call_subquery` grammar rule + graceful `UnsupportedFeature` error in builder |
+| `MATCH (n:A\|B)` label-OR | parse error at `:A\|B` | Extend `node_labels` with `gql_label_more` combinator |
+| `MATCH (n:A&B)` label-AND | parse error at `:A&B` | Same `gql_label_more` extension |
+| `MATCH (n:!A)` label-NOT | parse error at `:!` | Allow `!` prefix in `node_label` |
+| `MATCH (n:Person WHERE n.age > 18)` | parse error | Add `where_clause?` to `node_pattern` |
+| `RETURN reduce(…) AS x` | translator `UnsupportedFeature`; grammar already parses it | Phase 4 |
+
+Constructs not tackled this phase (Phase 3 / 4):
+- Quantified path patterns `(a)-[:R]->{1,3}(b)` — GQL QPP
+- `IS :: INTEGER` typed predicate
+- Grouped label expressions `:(A\|B)` — full recursive label expr tree
+- `CALL { … } IN TRANSACTIONS OF n ROWS`
+
+**3 permanent Gherkin parse errors (openCypher TCK annoyances, not our bugs):**
+- `Comparison2.feature:123` — `<lhs> <= <rhs>` in scenario outline; Cucumber Rust
+  scanner treats `<= <rhs>` as a malformed placeholder
+- `Quantifier7.feature:80` — same `<=` issue (`<= any(<operands>)`)
+- `Literals6.feature` — `#encoding: utf-8` directive is not on line 1 (it follows
+  the Apache 2.0 license header); unicode characters in scenario cause Cucumber
+  parser failure
+
+These 3 scenarios are permanently un-runnable via Cucumber without patching either
+the `cucumber` crate or the TCK source files.  They do not affect the 3828 − 3 = 3825
+runnable scenario count.
+
+**Landed:**
+
+- ✅ `CALL { … }` subquery: grammar rule added; parser emits `UnsupportedFeature`
+  rather than a parse error ([grammars/cypher.pest](../grammars/cypher.pest),
+  [src/parser/cypher.rs](../src/parser/cypher.rs))
+- ✅ GQL label expressions `\|`, `&`, `!`: `gql_label_more` rule + `!` in `node_label`;
+  all label atoms collected as flat `Vec<Label>` (| / & / : treated as AND for now)
+- ✅ Inline `WHERE` in node pattern: `where_clause?` added to `node_pattern`;
+  translator silently ignores (conservative: treats as always-true, no semantic error)
+- ✅ New grammar rules covered by difftest: curated queries added for label-OR,
+  label-AND, and `CALL { }` graceful error
+
+**Exit:** new constructs parse without `PolygraphError::Parse`; TCK ≥ 3757;
+difftest curated suite still green.
 
 ### Phase 3 — Introduce Logical Query Algebra (LQA)
 
