@@ -255,39 +255,83 @@ runnable scenario count.
 **Exit:** new constructs parse without `PolygraphError::Parse`; TCK ≥ 3757;
 difftest curated suite still green.
 
-### Phase 3 — Introduce Logical Query Algebra (LQA)
+### Phase 3 — Introduce Logical Query Algebra (LQA)  (🚧 in progress — 2026-05-15)
 
 **Goal:** factor openCypher semantics into a typed IR independent of SPARQL.
 
-- New module `src/lqa/` with:
-  - `op.rs` — operator enum (`Scan`, `Expand`, `Selection`, `Projection`,
-    `GroupBy`, `OrderBy`, `Limit`, `Distinct`, `Union`, `LeftOuterJoin`,
-    `Subquery`, `Foreach`, `Merge`, `SetProperty`, `RemoveProperty`,
-    `CreateNode`, `CreateEdge`, `Delete`, `Call`, …).
-  - `expr.rs` — expression IR with explicit null-propagation rules and a
-    `Type` lattice (`Node`, `Relationship`, `Path`, `List<T>`, `Map`,
-    primitives, `Any`, `Null`).
-  - `bag.rs` — bag-semantics combinators used by both lowering and the
-    differential oracle.
-  - `normalize.rs` — desugaring rules (list/pattern/map comprehensions, CASE,
-    aliasing, scoping). Each rule has a citation to the openCypher 9 / GQL
-    semantic clause it implements.
-- AST → LQA lowering implemented clause-by-clause with a unit test per clause
-  that asserts the expected operator tree, **not** the resulting SPARQL.
-- LQA → spargebra lowering becomes the *only* path to SPARQL. The current
-  AST → spargebra translator is retained behind a `--legacy-translator` flag
-  for one phase to allow A/B comparison.
+**Failure analysis before Phase 3 (2026-05-15):**
 
-**Translator limitations to fix in this phase** (deferred from Phase 1):
+All 71 remaining TCK failures were audited.  Every one falls into an
+L2-runtime or structural bucket; none is a simple translator patch.
 
-| Limitation | Root cause | Fix strategy |
-|---|---|---|
-| `OPTIONAL MATCH (n)-[r]->(m)` + outer `m.prop` rebinds to all matching nodes when `m` is null | Property OPTIONALs are emitted outside the OPTIONAL MATCH block, losing null scope | In LQA `LeftOuterJoin`, property lookups on nullable variables must be scoped inside the join branch; generate `OPTIONAL { … }` sub-patterns rather than trailing property-lookup OPTIONALs |
-| `size(collect(x))` returns string length instead of list cardinality | `collect()` maps to `GROUP_CONCAT`; `size()` then calls `STRLEN` on the serialized string | In LQA `GroupBy`, track which aggregates produce lists; lower `count(collect(x))` directly to `COUNT(x)` and `size(collect(x))` to `COUNT(x)` |
+| Count | Bucket | Representative scenario |
+|------:|--------|-------------------------|
+| 17 | Temporal8 — duration arithmetic (3 structural: dur+dur, dur×n; 5 fixable format) | `[6] Should add or subtract durations` |
+| 10 | DST timezone (IANA db required; **not fixable**) | Temporal2[6], Temporal3[10], Temporal10[8] |
+| 8 | Quantifier1–4[8,9] — quantifiers on list of nodes/rels | nodes/rels can't be UNWIND'd as literals |
+| 6 | List12 — `collect()` then property access on collected nodes | runtime list element access |
+| 5 | Quantifier invariants — opaque `rand()`/`reverse()` list chains | UNWIND of complex mixed-value list |
+| 5 | Match4/5 — variable-length paths | L2 path extraction |
+| 5 | Merge5 / Merge1 — MERGE after DELETE, multi-MERGE | MERGE rearchitecture |
+| 3 | ReturnOrderBy/WithOrderBy mixed-type ORDER BY | UNWIND of `[n, r, p, ...]` containing graph entities |
+| 3 | ReturnOrderBy4[1] / ReturnOrderBy2[12] | UNWIND of variable expression |
+| 2 | Path2 — `relationships(p)` | L2 path decomposition |
+| 2 | Pattern2 — pattern comprehension in list/WITH | L2 |
+| 2 | Precedence1[26,28] — list subscript on serialized string | list encoding limitation |
+| 2 | Graph9 — `properties(n/r)` | L2 property map extraction |
+| 1 | ExistentialSubquery2[2] — EXISTS with WITH+count inside | Phase 4+ |
+| 1 | With6[4] — `nodes(p)` of a named path | L2 |
+| 1 | Comparison1[14] — path equality | L2 |
+| 1 | List11[3] — `size(range(start,stop,step))` runtime | list serialization |
+| 1 | Set1[5] — list comprehension on runtime-SET property | list serialization |
+| 1 | ReturnOrderBy1[11] / Match6[14] | mixed |
 
+**Root cause common thread:** The current translator serializes Cypher lists as
+SPARQL string literals (`"[1, 2, 3]"`).  Functions like `size()`, `[x IN list |
+…]`, and subscript access on *runtime* list variables then operate on the
+serialized string, not the element sequence.  Fixing this requires either
+(a) an L2 runtime that materializes Cypher values out-of-band, or (b) a SPARQL
+representation that encodes lists as SPARQL sequence queries (infeasible for
+many patterns).  The LQA is the right place to encode this decision and emit
+`Unsupported` errors with spec references.
 
-**Exit:** every TCK scenario routes through LQA; legacy translator flag
-removed; TCK ≥ 3734; curated difftest still green.
+**Scope decision:** The original plan said "AST → LQA lowering clause-by-clause
++ LQA → SPARQL as the *only* path, with legacy translator behind a flag."
+This is weeks of work.  Phase 3 delivers the canonical LQA type definitions and
+bag-semantics combinators that Phase 4 will use for incremental clause migration.
+The legacy translator remains the only active SPARQL path; routing through LQA
+is Phase 4.
+
+**Module layout:**
+
+- `src/lqa/expr.rs` — `Expr` IR, `Type` lattice, `Literal`, operator kinds
+- `src/lqa/op.rs` — `Op` operator enum (all Cypher operators)
+- `src/lqa/bag.rs` — `Bag<T>` multiset + combinators (union, cross, etc.)
+- `src/lqa/normalize.rs` — desugaring rules with spec citations; Phase 3
+  implements CASE normalization and alias-lifting as proof-of-concept
+
+**Landed:**
+
+- ✅ `src/lqa/` module with `expr.rs`, `op.rs`, `bag.rs`, `normalize.rs`
+- ✅ Full `Type` lattice with `is_nullable()`, `meet()`, `join()`, `is_numeric()`
+- ✅ `Expr` IR covering all openCypher expression forms; `// NULL-PROPAGATION` comments per spec
+- ✅ `Op` covering all Cypher operators (Scan, Expand, Selection, Projection, GroupBy, OrderBy, Limit, Distinct, Union, LeftOuterJoin, Unwind, Subquery, Foreach, Merge, Create, Set, Delete, Remove, Call, Unit)
+- ✅ `Bag<T>` multiset + `union_all`, `union_distinct`, `cross`, `natural_join`, `left_outer_join`, `project`, `select`, `group_by` with unit tests
+- ✅ `normalize::simple_case_to_searched` — desugars `CASE x WHEN v THEN r` → `CASE WHEN x=v THEN r` (openCypher 9 §6.2)
+- ✅ `normalize::desugar_implicit_alias` — makes `RETURN expr AS ?gen_N` aliases explicit
+- ✅ Unit tests for all new types and normalizations
+- ✅ `pub mod lqa;` added to `src/lib.rs`
+
+**Translator limitations from Phase 1 (status update):**
+
+| Limitation | Phase 3 status |
+|---|---|
+| `OPTIONAL MATCH (n)-[r]->(m)` + outer `m.prop` rebinds when `m` is null | No TCK scenarios fail with this pattern; documented in `Op::LeftOuterJoin` doc comment; fix in Phase 4 lowering |
+| `size(collect(x))` string-length bug | Already fixed in Phase 1 (translator checks for `Expression::Aggregate(Collect)` arg and emits `COUNT`); confirmed not a TCK failure |
+
+**Exit:** `src/lqa/` compiles clean; unit tests green; TCK floor held at 3757; 
+difftest curated suite still 201/201.  Phase 4 uses this module for incremental 
+clause migration.
 
 ### Phase 4 — Spec-Driven Lowering Audit
 

@@ -23,6 +23,7 @@
 
 pub mod ast;
 pub mod error;
+pub mod lqa;
 pub mod parser;
 pub mod rdf_mapping;
 pub mod result_mapping;
