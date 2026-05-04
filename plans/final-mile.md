@@ -1,33 +1,64 @@
-# Final Mile — Closing the Last 85 TCK Gaps
+# Final Mile — Closing the Last TCK Gaps
 
 **Status**: in progress
-**Updated**: 2026-05-28
+**Updated**: 2026-06-02
 
 This plan supersedes the failure inventory in [remaining-work.md](remaining-work.md)
 now that Tier A (harness plumbing) has landed (3558 → 3704 passes), and Tier FGH
 partial work has pushed to 3734 / 3828 (97.5 %).
 
+Phase 9 has since been delivered (UNWIND-first routing, pending_binds for IS NULL,
+FILTER(BOUND) for null UNWIND aggregation), holding steady at 3757 / 3828 (98.2%).
+
 ---
 
-## 1. Current Baseline (post-Tier-FGH)
+## 1. Current Baseline (post-Phase-9)
 
 | Bucket            | Count | % of 3828 |
 |-------------------|------:|----------:|
-| **Passing**       | 3734  | 97.5 %    |
-| Failing           |   94  |  2.5 %    |
-| Skipped           |    0  |  0.0 %    |
-| Parse errors      |    0  |  0.0 %    |
+| **Passing**       | 3757  | 98.2 %    |
+| Failing           |   71  |  1.9 %    |
+| Parse errors      |    3  |  0.1 %    |
 | **Total**         | 3828  | 100 %     |
 
-### What Tier FGH delivered (+30)
+### What Phase 9 delivered (TCK-neutral, expanded LQA coverage)
 
-H.1 "in order (ignoring element order for lists)" step, H.2 SyntaxError on
-SET RHS pattern comprehension, H.5 ExistentialSubquery feature vendor + Match5
-cucumber-rs patch, EXISTS subquery translation (+8), Match5 having_executed
-harness routing (+5), nested-UNWIND Cartesian product, CREATE bnode coalescing,
-expression translation in property values.
+- UNWIND-first clause_shape routing through LQA (first == "unwind" || "match")
+- FILTER(BOUND(?var)) in GroupBy for UNWIND null vars (Aggregation2 [3]-[8] via LQA)
+- pending_binds mechanism: IsNull/IsNotNull of complex exprs via BIND + BOUND check
+  (Boolean5 [6] regression fixed)
+- Removed with_orderby_out_of_scope guard (11 fewer legacy fallbacks)
+- Removed incorrect hours≥24 normalization in tck_eval_duration
 
-### What remains from the original F/G/H plan
+### What remains (71 failures, 3 parse errors)
+
+**Non-L2 total: ~25 · True L2 total: ~46 · Parse errors: 3**
+
+| Family                                          | Count | Tier | L2? |
+|-------------------------------------------------|------:|------|-----|
+| Duration arithmetic (Temporal8 [6,7])           |     2 | F    | No* |
+| DST / IANA timezone (Temporal2/3/10)            |    10 | J    | No  |
+| `relationships(p)` / `nodes(p)` post-projection |    14 | I    | Yes |
+| UNWIND quantifier invariants (Q9-12)            |     8 | I    | Yes |
+| List comprehension (List12)                     |     6 | I    | Yes |
+| Pattern2 (pattern comprehension)                |     2 | I    | Yes |
+| MERGE+WITH semantics (Merge1/5)                 |     7 | G    | No  |
+| var-length misc (Match4/5/6)                    |     5 | G    | No  |
+| collect+precedence (Precedence1, WithOrderBy1)  |     5 | I    | Yes |
+| Mixed-type ORDER BY (ReturnOrderBy1/4)          |     3 | I    | Yes |
+| properties(n) map (Graph9)                      |     2 | I    | Yes |
+| path equality (Comparison1)                     |     1 | G    | No  |
+| EXISTS+aggregation (ExistentialSubquery2)       |     1 | I    | Yes |
+| Implicit grouping with path (With6 [4])         |     1 | I    | Yes |
+| Hard / Tier-K (Set1, List11)                    |     2 | K    | —   |
+| Parse errors (Gherkin bugs in TCK corpus)       |     3 | —    | —   |
+| **Total**                                       |    71 |      |     |
+
+*Duration arithmetic: SPARQL 1.1 does not support `xsd:duration + xsd:duration`.
+Requires a custom implementation (string decomposition arithmetic in expressions
+or a post-projection interpreter step).
+
+---
 
 **Tier F** (duration arithmetic) was designed in F.1–F.3 but *never implemented* —
 all 17 Temporal8 failures are still open.
