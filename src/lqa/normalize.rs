@@ -128,7 +128,7 @@ pub fn desugar_implicit_alias(
         .into_iter()
         .map(|(expr, alias)| {
             let alias = alias.unwrap_or_else(|| gen.next());
-            ProjItem { expr, alias }
+            ProjItem { expr, alias, display_name: None }
         })
         .collect()
 }
@@ -225,6 +225,7 @@ pub fn normalize_op(op: Op) -> Op {
                 .map(|pi| ProjItem {
                     expr: normalize_expr(pi.expr),
                     alias: pi.alias,
+                    display_name: pi.display_name,
                 })
                 .collect();
             Op::Projection {
@@ -436,6 +437,7 @@ mod tests {
         let items = vec![ProjItem {
             expr: Expr::Not(Box::new(Expr::Not(Box::new(Expr::bool(false))))),
             alias: "x".into(),
+            display_name: None,
         }];
         let op = Op::Projection {
             inner: Box::new(Op::Unit),

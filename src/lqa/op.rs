@@ -54,8 +54,13 @@ impl Default for PathRange {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjItem {
     pub expr: Expr,
-    /// The name under which `expr` is available in the parent scope.
+    /// The SPARQL variable name for this projected item.
     pub alias: String,
+    /// The Cypher output column name to expose in the result schema.
+    /// When `None`, `alias` is also used as the Cypher column name.
+    /// Used when the SPARQL variable name must be a valid identifier but the
+    /// Cypher column name is an expression like `max(x)` or `n.name`.
+    pub display_name: Option<String>,
 }
 
 /// A sort key in an `OrderBy` operator: `(expr, direction)`.
@@ -459,14 +464,14 @@ mod tests {
 
     #[test]
     fn project_builder() {
-        let items = vec![ProjItem { expr: Expr::var("n"), alias: "node".into() }];
+        let items = vec![ProjItem { expr: Expr::var("n"), alias: "node".into(), display_name: None }];
         let op = Op::Unit.project(items, false);
         assert!(matches!(op, Op::Projection { distinct: false, .. }));
     }
 
     #[test]
     fn project_distinct_builder() {
-        let items = vec![ProjItem { expr: Expr::var("n"), alias: "node".into() }];
+        let items = vec![ProjItem { expr: Expr::var("n"), alias: "node".into(), display_name: None }];
         let op = Op::Unit.project(items, true);
         assert!(matches!(op, Op::Projection { distinct: true, .. }));
     }

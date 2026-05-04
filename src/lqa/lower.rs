@@ -511,11 +511,21 @@ impl AstLowerer {
                 proj.push(ProjItem {
                     expr: Expr::var("*"),
                     alias: "*".into(),
+                    display_name: None,
                 });
             }
             ast::ReturnItems::Explicit(list) => {
                 for item in list {
-                    let alias = item.alias.clone().unwrap_or_else(|| {
+                    // Compute the Cypher output column name (the "natural alias").
+                    // For an explicit AS, this is the alias text.
+                    // For a bare variable, it's the variable name.
+                    // For computed expressions like `max(x)`, use expr_natural_alias.
+                    let explicit_alias = item.alias.as_deref();
+                    let natural_cypher_name: Option<String> = explicit_alias
+                        .map(|s| s.to_owned())
+                        .or_else(|| expr_natural_alias(&item.expression));
+
+                    let alias = explicit_alias.map(|s| s.to_owned()).unwrap_or_else(|| {
                         // If the expression is a bare variable reference, use its name as the
                         // implicit alias (e.g. `WITH i` or `RETURN x` → alias = "i"/"x"),
                         // matching openCypher semantics. Only generate a fresh name for
@@ -528,6 +538,13 @@ impl AstLowerer {
                             a
                         }
                     });
+                    // The display_name is set when the Cypher column name differs from the
+                    // SPARQL variable name (alias), e.g. `max(x)` gets alias `_gen_0` but
+                    // display_name `max(x)` to match TCK column headers.
+                    let display_name = match &natural_cypher_name {
+                        Some(name) if name != &alias => Some(name.clone()),
+                        _ => None,
+                    };
                     let expr = self.lower_expr(&item.expression)?;
                     // Check if this expression is/wraps an aggregate.
                     if matches!(expr, Expr::Aggregate { .. }) {
@@ -540,9 +557,10 @@ impl AstLowerer {
                         proj.push(ProjItem {
                             expr: Expr::var(&alias),
                             alias: alias.clone(),
+                            display_name: display_name.clone(),
                         });
                     } else {
-                        proj.push(ProjItem { expr, alias });
+                        proj.push(ProjItem { expr, alias, display_name });
                     }
                 }
             }
@@ -1090,6 +1108,31 @@ fn proj_cols_keys(items: &[ProjItem], agg_aliases: &[String]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Derive the "natural" implicit Cypher alias for a return expression.
+///
+/// openCypher specifies that, when no `AS alias` is given, the column name is
+/// the original expression text.  This function recreates that text for the
+/// common cases so that TCK column headers match.
+///
+/// Returns `None` when no natural alias exists (caller generates `_gen_N`).
+fn expr_natural_alias(expr: &ast::Expression) -> Option<String> {
+    use ast::Expression as E;
+    match expr {
+        E::Variable(v) => Some(v.clone()),
+        E::Property(base, key) => {
+            let base_alias = expr_natural_alias(base)?;
+            Some(format!("{}.{}", base_alias, key))
+        }
+        E::FunctionCall { name, args, .. } => {
+            // e.g. `count(n)` → `count(n)`, `type(r)` → `type(r)`
+            let arg_strs: Option<Vec<String>> = args.iter().map(expr_natural_alias).collect();
+            // Only produce a natural alias if all args have natural aliases.
+            arg_strs.map(|args| format!("{}({})", name, args.join(", ")))
+        }
+        _ => None,
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
