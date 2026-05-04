@@ -1,0 +1,23 @@
+name = "multi_label_and_filter"
+description = "Nodes carrying two labels filtered by a property."
+spec_ref = "openCypher 9 §2.1 Patterns — multi-label with property filter"
+
+cypher = """
+MATCH (n:Person:Employee)
+WHERE n.dept = 'Engineering'
+RETURN n.name AS name
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person", "Employee"], properties = { name = "Alice", dept = "Engineering" } },
+    { id = "b", labels = ["Person", "Employee"], properties = { name = "Bob",   dept = "HR"          } },
+    { id = "c", labels = ["Person"],             properties = { name = "Carol", dept = "Engineering" } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [["Alice"]]
+order = "bag"

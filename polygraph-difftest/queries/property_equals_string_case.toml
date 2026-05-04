@@ -1,0 +1,22 @@
+name = "property_equals_string_case"
+description = "String equality is case-sensitive in openCypher."
+spec_ref = "openCypher 9 §6.3.4 Comparison — string equality case-sensitivity"
+
+cypher = """
+MATCH (n:Category)
+WHERE n.name = 'Sports'
+RETURN n.name AS name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Category"], properties = { name = "Sports" } },
+    { id = "b", labels = ["Category"], properties = { name = "sports" } },
+    { id = "c", labels = ["Category"], properties = { name = "SPORTS" } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [["Sports"]]
+order = "bag"

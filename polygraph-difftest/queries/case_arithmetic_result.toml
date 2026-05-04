@@ -1,0 +1,27 @@
+name = "case_arithmetic_result"
+description = "CASE returns arithmetic results; combined with aggregation."
+spec_ref = "openCypher 9 §6.2.3 CASE — arithmetic in THEN branch"
+
+cypher = """
+MATCH (n:Order)
+RETURN n.id AS oid,
+       CASE WHEN n.priority = 'high' THEN n.amount * 2 ELSE n.amount END AS weighted
+ORDER BY oid
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Order"], properties = { id = 1, priority = "high",   amount = 100 } },
+    { id = "b", labels = ["Order"], properties = { id = 2, priority = "normal", amount = 50  } },
+    { id = "c", labels = ["Order"], properties = { id = 3, priority = "high",   amount = 75  } },
+]
+edges = []
+
+[expected]
+columns = ["oid", "weighted"]
+rows = [
+    [1, 200],
+    [2, 50],
+    [3, 150],
+]
+order = "ordered"

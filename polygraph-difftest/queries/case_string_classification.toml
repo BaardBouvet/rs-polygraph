@@ -1,0 +1,33 @@
+name = "case_string_classification"
+description = "CASE classifies string property values into categories."
+spec_ref = "openCypher 9 §6.2.3 CASE — string comparison in WHEN"
+
+cypher = """
+MATCH (n:Animal)
+RETURN n.name AS name,
+       CASE
+           WHEN n.type = 'dog' OR n.type = 'cat' THEN 'pet'
+           WHEN n.type = 'lion' OR n.type = 'tiger' THEN 'wild'
+           ELSE 'other'
+       END AS category
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Animal"], properties = { name = "Buddy", type = "dog"   } },
+    { id = "b", labels = ["Animal"], properties = { name = "Leo",   type = "lion"  } },
+    { id = "c", labels = ["Animal"], properties = { name = "Nemo",  type = "fish"  } },
+    { id = "d", labels = ["Animal"], properties = { name = "Whiskers", type = "cat" } },
+]
+edges = []
+
+[expected]
+columns = ["name", "category"]
+rows = [
+    ["Buddy",    "pet"],
+    ["Leo",      "wild"],
+    ["Nemo",     "other"],
+    ["Whiskers", "pet"],
+]
+order = "ordered"

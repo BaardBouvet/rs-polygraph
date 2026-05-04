@@ -1,0 +1,22 @@
+name = "count_distinct_property"
+description = "COUNT(DISTINCT n.prop) — duplicates not counted."
+spec_ref = "openCypher 9 §3.4.2 COUNT DISTINCT"
+
+cypher = """
+MATCH (n:Tag)
+RETURN count(DISTINCT n.color) AS unique_colors
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Tag"], properties = { color = "red"   } },
+    { id = "b", labels = ["Tag"], properties = { color = "blue"  } },
+    { id = "c", labels = ["Tag"], properties = { color = "red"   } },
+    { id = "d", labels = ["Tag"], properties = { color = "green" } },
+]
+edges = []
+
+[expected]
+columns = ["unique_colors"]
+rows = [[3]]
+order = "bag"

@@ -1,0 +1,26 @@
+name = "with_multiple_aggregates"
+description = "WITH projects multiple aggregate expressions simultaneously."
+spec_ref = "openCypher 9 §3.5.3 WITH — multiple aggregate projections"
+
+cypher = """
+MATCH (n:Sensor)
+WITH n.zone AS zone, count(*) AS readings, avg(n.temp) AS avg_temp, max(n.temp) AS peak
+RETURN zone, readings, avg_temp, peak
+ORDER BY zone
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Sensor"], properties = { zone = "A", temp = 20 } },
+    { id = "b", labels = ["Sensor"], properties = { zone = "A", temp = 22 } },
+    { id = "c", labels = ["Sensor"], properties = { zone = "B", temp = 30 } },
+]
+edges = []
+
+[expected]
+columns = ["zone", "readings", "avg_temp", "peak"]
+rows = [
+    ["A", 2, 21.0, 22],
+    ["B", 1, 30.0, 30],
+]
+order = "ordered"

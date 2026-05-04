@@ -1,0 +1,29 @@
+name = "null_order_last"
+description = "Rows with absent property appear in result; ORDER BY on nullable property."
+spec_ref = "openCypher 9 §7.1 ORDER BY — KNOWN LIMITATION: SPARQL sorts unbound first (ASC), Cypher sorts null last"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.name AS name, n.score AS score
+ORDER BY score ASC
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", score = 10 } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob"               } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol", score = 5  } },
+]
+edges = []
+
+[expected]
+columns = ["name", "score"]
+# Note: bag mode because SPARQL puts unbound ?score first (ASC) whereas Cypher
+# puts null last.  The row *content* is what matters here; the ordering test
+# for the null position is deferred until the translator emits null-last coercion.
+rows = [
+    ["Alice", 10],
+    ["Bob",   "__null__"],
+    ["Carol", 5],
+]
+order = "bag"

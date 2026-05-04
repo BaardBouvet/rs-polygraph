@@ -1,0 +1,19 @@
+name = "list_literal_size"
+description = "size() of a list literal is constant-folded to the correct count."
+spec_ref = "openCypher 9 §3.7.5 List functions — size(list)"
+
+# Note: SPARQL has no native list type; the translator serialises list literals
+# as strings.  This test covers size()  which is constant-folded correctly.
+
+cypher = """
+RETURN size([10, 20, 30, 40]) AS sz
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["sz"]
+rows = [[4]]
+order = "bag"

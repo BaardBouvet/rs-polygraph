@@ -1,0 +1,26 @@
+name = "regex_pattern_filter"
+description = "WHERE n.val =~ 'pattern' filters nodes by regex match."
+spec_ref = "openCypher 9 §6.3.4 String comparison — regex =~"
+
+cypher = """
+MATCH (n:Email)
+WHERE n.address =~ '.*@example.*'
+RETURN n.address AS addr
+ORDER BY addr
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Email"], properties = { address = "alice@example.com" } },
+    { id = "b", labels = ["Email"], properties = { address = "bob@gmail.com"     } },
+    { id = "c", labels = ["Email"], properties = { address = "carol@example.com" } },
+]
+edges = []
+
+[expected]
+columns = ["addr"]
+rows = [
+    ["alice@example.com"],
+    ["carol@example.com"],
+]
+order = "ordered"

@@ -1,0 +1,24 @@
+name = "string_trim_variants"
+description = "ltrim, rtrim, and trim remove leading/trailing whitespace."
+spec_ref = "openCypher 9 §3.7 String functions — ltrim, rtrim, trim"
+
+cypher = """
+MATCH (n:Msg)
+RETURN ltrim(n.text) AS ltrimmed, rtrim(n.text) AS rtrimmed, trim(n.text) AS trimmed
+ORDER BY n.text
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Msg"], properties = { text = "  hello  " } },
+    { id = "b", labels = ["Msg"], properties = { text = "world"     } },
+]
+edges = []
+
+[expected]
+columns = ["ltrimmed", "rtrimmed", "trimmed"]
+rows = [
+    ["hello  ",  "  hello", "hello"],
+    ["world",    "world",   "world"],
+]
+order = "ordered"

@@ -1,0 +1,17 @@
+name = "sum_after_unwind"
+description = "UNWIND a list then aggregate the items with SUM."
+spec_ref = "openCypher 9 §3.6 UNWIND; §3.4.2 SUM"
+
+cypher = """
+UNWIND range(1, 10) AS n
+RETURN sum(n) AS total
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["total"]
+rows = [[55]]
+order = "bag"

@@ -1,0 +1,34 @@
+name = "case_multiple_when"
+description = "Generic CASE WHEN with three branches and a fallback ELSE."
+spec_ref = "openCypher 9 §6.2.3 CASE — multiple WHEN branches"
+
+cypher = """
+MATCH (n:Student)
+RETURN n.score AS score,
+       CASE
+           WHEN n.score >= 90 THEN 'A'
+           WHEN n.score >= 80 THEN 'B'
+           WHEN n.score >= 70 THEN 'C'
+           ELSE 'F'
+       END AS grade
+ORDER BY score DESC
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Student"], properties = { score = 95 } },
+    { id = "b", labels = ["Student"], properties = { score = 83 } },
+    { id = "c", labels = ["Student"], properties = { score = 71 } },
+    { id = "d", labels = ["Student"], properties = { score = 55 } },
+]
+edges = []
+
+[expected]
+columns = ["score", "grade"]
+rows = [
+    [95, "A"],
+    [83, "B"],
+    [71, "C"],
+    [55, "F"],
+]
+order = "ordered"

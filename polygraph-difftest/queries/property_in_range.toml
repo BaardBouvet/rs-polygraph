@@ -1,0 +1,29 @@
+name = "property_in_range"
+description = "WHERE property BETWEEN equivalent using two comparisons with AND."
+spec_ref = "openCypher 9 §3.2 WHERE; §6.3.4 Comparison — range predicate"
+
+cypher = """
+MATCH (n:Product)
+WHERE n.price >= 10 AND n.price <= 50
+RETURN n.name AS name, n.price AS price
+ORDER BY price, name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Product"], properties = { name = "Bolt",   price = 1   } },
+    { id = "b", labels = ["Product"], properties = { name = "Widget", price = 25  } },
+    { id = "c", labels = ["Product"], properties = { name = "Cog",    price = 50  } },
+    { id = "d", labels = ["Product"], properties = { name = "Gear",   price = 100 } },
+    { id = "e", labels = ["Product"], properties = { name = "Spring", price = 10  } },
+]
+edges = []
+
+[expected]
+columns = ["name", "price"]
+rows = [
+    ["Spring", 10],
+    ["Widget", 25],
+    ["Cog",    50],
+]
+order = "ordered"

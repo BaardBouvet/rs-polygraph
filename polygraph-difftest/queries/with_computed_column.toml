@@ -1,0 +1,27 @@
+name = "with_computed_column"
+description = "WITH introduces a computed expression column consumed by subsequent RETURN."
+spec_ref = "openCypher 9 §3.5.3 WITH — computed expressions"
+
+cypher = """
+MATCH (n:Product)
+WITH n.name AS name, n.price * 1.1 AS price_with_tax
+WHERE price_with_tax < 50
+RETURN name, price_with_tax
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Product"], properties = { name = "Widget", price = 40 } },
+    { id = "b", labels = ["Product"], properties = { name = "Gadget", price = 50 } },
+    { id = "c", labels = ["Product"], properties = { name = "Donut",  price = 5  } },
+]
+edges = []
+
+[expected]
+columns = ["name", "price_with_tax"]
+rows = [
+    ["Donut",  5.5],
+    ["Widget", 44.0],
+]
+order = "ordered"

@@ -1,0 +1,21 @@
+name = "min_string_property"
+description = "MIN on a string property returns lexicographically least value."
+spec_ref = "openCypher 9 §3.4.2 Aggregating functions — MIN on string"
+
+cypher = """
+MATCH (n:Fruit)
+RETURN min(n.name) AS first_fruit
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Fruit"], properties = { name = "Apple"  } },
+    { id = "b", labels = ["Fruit"], properties = { name = "Banana" } },
+    { id = "c", labels = ["Fruit"], properties = { name = "Cherry" } },
+]
+edges = []
+
+[expected]
+columns = ["first_fruit"]
+rows = [["Apple"]]
+order = "bag"

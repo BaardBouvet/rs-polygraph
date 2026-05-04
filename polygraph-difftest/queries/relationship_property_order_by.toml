@@ -1,0 +1,31 @@
+name = "relationship_property_order_by"
+description = "ORDER BY a relationship property value."
+spec_ref = "openCypher 9 §7.1 ORDER BY — edge property sort key"
+
+cypher = """
+MATCH (a:Person)-[r:RATED]->(m:Movie)
+RETURN a.name AS person, m.title AS movie, r.stars AS rating
+ORDER BY rating DESC
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "m1",    labels = ["Movie"],  properties = { title = "Inception"  } },
+    { id = "m2",    labels = ["Movie"],  properties = { title = "Interstellar" } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "m1", rel_type = "RATED", properties = { stars = 5 } },
+    { id = "e2", from = "bob",   to = "m1", rel_type = "RATED", properties = { stars = 3 } },
+    { id = "e3", from = "alice", to = "m2", rel_type = "RATED", properties = { stars = 4 } },
+]
+
+[expected]
+columns = ["person", "movie", "rating"]
+rows = [
+    ["Alice", "Inception",    5],
+    ["Alice", "Interstellar", 4],
+    ["Bob",   "Inception",    3],
+]
+order = "ordered"

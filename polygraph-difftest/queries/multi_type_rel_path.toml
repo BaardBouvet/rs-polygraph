@@ -1,0 +1,30 @@
+name = "multi_type_rel_path"
+description = "Path mix: first hop one type, second hop another type."
+spec_ref = "openCypher 9 §2.1 Patterns — heterogeneous multi-hop"
+
+cypher = """
+MATCH (a:Person)-[:WORKS_AT]->(c:Company)-[:LOCATED_IN]->(city:City)
+RETURN a.name AS person, city.name AS city_name
+ORDER BY person
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"],  properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"],  properties = { name = "Bob"   } },
+    { id = "acme",  labels = ["Company"], properties = { name = "ACME"  } },
+    { id = "nyc",   labels = ["City"],    properties = { name = "NYC"   } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "acme", rel_type = "WORKS_AT",    properties = {} },
+    { id = "e2", from = "bob",   to = "acme", rel_type = "WORKS_AT",    properties = {} },
+    { id = "e3", from = "acme",  to = "nyc",  rel_type = "LOCATED_IN", properties = {} },
+]
+
+[expected]
+columns = ["person", "city_name"]
+rows = [
+    ["Alice", "NYC"],
+    ["Bob",   "NYC"],
+]
+order = "ordered"

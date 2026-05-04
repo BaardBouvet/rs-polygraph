@@ -1,0 +1,27 @@
+name = "ternary_string_predicate"
+description = "STARTS WITH + ENDS WITH combined with AND in WHERE."
+spec_ref = "openCypher 9 §6.3.4 String comparison — startsWith, endsWith"
+
+cypher = """
+MATCH (n:Path)
+WHERE n.route STARTS WITH '/api' AND n.route ENDS WITH '.json'
+RETURN n.route AS route
+ORDER BY route
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Path"], properties = { route = "/api/users.json"   } },
+    { id = "b", labels = ["Path"], properties = { route = "/api/items"         } },
+    { id = "c", labels = ["Path"], properties = { route = "/static/app.json"  } },
+    { id = "d", labels = ["Path"], properties = { route = "/api/orders.json"  } },
+]
+edges = []
+
+[expected]
+columns = ["route"]
+rows = [
+    ["/api/orders.json"],
+    ["/api/users.json"],
+]
+order = "ordered"

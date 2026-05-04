@@ -1,0 +1,29 @@
+name = "with_filter_property_after_match"
+description = "WITH passes the matched node's properties through for further filtering."
+spec_ref = "openCypher 9 §3.5.3 WITH — retaining node property access"
+
+cypher = """
+MATCH (n:Person)-[:WORKS_AT]->(c:Company)
+WITH n.name AS name, c.name AS company, n.salary AS salary
+WHERE salary > 60000
+RETURN name, company, salary
+ORDER BY salary DESC
+"""
+
+[fixture]
+nodes = [
+    { id = "a",   labels = ["Person"],  properties = { name = "Alice", salary = 80000 } },
+    { id = "b",   labels = ["Person"],  properties = { name = "Bob",   salary = 50000 } },
+    { id = "acme",labels = ["Company"], properties = { name = "ACME"  } },
+]
+edges = [
+    { id = "e1", from = "a", to = "acme", rel_type = "WORKS_AT", properties = {} },
+    { id = "e2", from = "b", to = "acme", rel_type = "WORKS_AT", properties = {} },
+]
+
+[expected]
+columns = ["name", "company", "salary"]
+rows = [
+    ["Alice", "ACME", 80000],
+]
+order = "ordered"

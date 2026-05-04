@@ -1,0 +1,26 @@
+name = "count_grouped_by_dept_size"
+description = "Filter groups with having-equivalent: only depts with > 2 employees."
+spec_ref = "openCypher 9 §3.5.3 WITH — HAVING pattern using count"
+
+cypher = """
+MATCH (n:Employee)
+WITH n.department AS dept, count(*) AS size
+WHERE size > 2
+RETURN dept, size
+ORDER BY dept
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Employee"], properties = { department = "Eng" } },
+    { id = "b", labels = ["Employee"], properties = { department = "Eng" } },
+    { id = "c", labels = ["Employee"], properties = { department = "Eng" } },
+    { id = "d", labels = ["Employee"], properties = { department = "HR"  } },
+    { id = "e", labels = ["Employee"], properties = { department = "HR"  } },
+]
+edges = []
+
+[expected]
+columns = ["dept", "size"]
+rows = [["Eng", 3]]
+order = "bag"

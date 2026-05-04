@@ -1,0 +1,21 @@
+name = "count_per_label_match"
+description = "count(*) after MATCH on labelled nodes, no GROUP BY needed."
+spec_ref = "openCypher 9 §3.4.2 Aggregating functions — COUNT(*) on single label"
+
+cypher = """
+MATCH (n:Book)
+RETURN count(*) AS book_count
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Book"],   properties = { title = "Dune"       } },
+    { id = "b", labels = ["Book"],   properties = { title = "Foundation" } },
+    { id = "c", labels = ["Person"], properties = { name  = "Alice"      } },
+]
+edges = []
+
+[expected]
+columns = ["book_count"]
+rows = [[2]]
+order = "bag"

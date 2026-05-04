@@ -1,0 +1,22 @@
+name = "avg_float_result"
+description = "AVG of integer values returns a float."
+spec_ref = "openCypher 9 §3.4.2 Aggregating functions — AVG returns float"
+
+cypher = """
+MATCH (n:Number)
+RETURN avg(n.val) AS mean
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Number"], properties = { val = 1 } },
+    { id = "b", labels = ["Number"], properties = { val = 2 } },
+    { id = "c", labels = ["Number"], properties = { val = 3 } },
+    { id = "d", labels = ["Number"], properties = { val = 4 } },
+]
+edges = []
+
+[expected]
+columns = ["mean"]
+rows = [[2.5]]
+order = "bag"

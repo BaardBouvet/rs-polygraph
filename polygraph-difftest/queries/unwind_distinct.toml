@@ -1,0 +1,18 @@
+name = "unwind_distinct"
+description = "UNWIND with RETURN DISTINCT removes duplicate items."
+spec_ref = "openCypher 9 §3.6 UNWIND — DISTINCT after UNWIND"
+
+cypher = """
+UNWIND [3, 1, 3, 2, 1, 2] AS x
+RETURN DISTINCT x
+ORDER BY x
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["x"]
+rows = [[1], [2], [3]]
+order = "ordered"

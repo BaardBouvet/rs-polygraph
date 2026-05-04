@@ -5,11 +5,14 @@
 //! through both Neo4j and Oxigraph and be compared under bag-equality with
 //! Cypher's null-propagating equality semantics.
 
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Serialize};
+
+/// Sentinel string in TOML expected-rows that represents a Cypher `null`.
+/// TOML has no null literal, so curated test files use `"__null__"` instead.
+pub const NULL_SENTINEL: &str = "__null__";
 
 /// A Cypher value as observed at the result-row level.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum Value {
     Null,
     Bool(bool),
@@ -22,6 +25,63 @@ pub enum Value {
     /// A relationship reference, same treatment as `Node`.
     Rel(String),
     List(Vec<Value>),
+}
+
+/// Custom deserializer: identical to a `#[serde(untagged)]` derive, except
+/// that the string `"__null__"` is decoded as `Value::Null` so that TOML
+/// expected-row arrays can express null results without a native null literal.
+impl<'de> Deserialize<'de> for Value {
+    fn deserialize<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct ValueVisitor;
+        impl<'de> de::Visitor<'de> for ValueVisitor {
+            type Value = Value;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(
+                    f,
+                    "a Cypher value (bool, int, float, string, list, or \"__null__\")"
+                )
+            }
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<Value, E> {
+                Ok(Value::Bool(v))
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Value, E> {
+                Ok(Value::Int(v))
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<Value, E> {
+                Ok(Value::Int(v as i64))
+            }
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<Value, E> {
+                Ok(Value::Float(v))
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Value, E> {
+                if v == NULL_SENTINEL {
+                    Ok(Value::Null)
+                } else {
+                    Ok(Value::String(v.to_owned()))
+                }
+            }
+            fn visit_string<E: de::Error>(self, v: String) -> Result<Value, E> {
+                self.visit_str(&v)
+            }
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+                let mut items = Vec::new();
+                while let Some(v) = seq.next_element::<Value>()? {
+                    items.push(v);
+                }
+                Ok(Value::List(items))
+            }
+            fn visit_unit<E: de::Error>(self) -> Result<Value, E> {
+                Ok(Value::Null)
+            }
+            fn visit_none<E: de::Error>(self) -> Result<Value, E> {
+                Ok(Value::Null)
+            }
+            fn visit_some<D2: de::Deserializer<'de>>(self, d: D2) -> Result<Value, D2::Error> {
+                Deserialize::deserialize(d)
+            }
+        }
+        d.deserialize_any(ValueVisitor)
+    }
 }
 
 impl Value {
@@ -69,7 +129,9 @@ impl Value {
             }
             (Value::List(a), Value::List(b)) => {
                 a.len() == b.len()
-                    && a.iter().zip(b.iter()).all(|(x, y)| x.cypher_structural_eq(y))
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(x, y)| x.cypher_structural_eq(y))
             }
             (a, b) => a == b,
         }

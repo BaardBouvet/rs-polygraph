@@ -1,0 +1,22 @@
+name = "float_round_trip"
+description = "Float property round-trips through SPARQL comparison without precision loss."
+spec_ref = "openCypher 9 §2.4.1 Numeric — float comparison"
+
+cypher = """
+MATCH (n:Measurement)
+WHERE n.value > 3.14 AND n.value < 3.15
+RETURN n.name AS name, n.value AS val
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Measurement"], properties = { name = "pi",   value = 3.14159 } },
+    { id = "b", labels = ["Measurement"], properties = { name = "e",    value = 2.71828 } },
+    { id = "c", labels = ["Measurement"], properties = { name = "phi",  value = 1.61803 } },
+]
+edges = []
+
+[expected]
+columns = ["name", "val"]
+rows = [["pi", 3.14159]]
+order = "bag"

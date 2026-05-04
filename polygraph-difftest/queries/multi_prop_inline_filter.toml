@@ -1,0 +1,26 @@
+name = "multi_prop_inline_filter"
+description = "Inline property map on MATCH filters by multiple properties at once."
+spec_ref = "openCypher 9 §2.1 Patterns — inline property map predicate"
+
+cypher = """
+MATCH (n:Server {env: 'prod', status: 'up'})
+RETURN n.host AS host
+ORDER BY host
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Server"], properties = { host = "web01", env = "prod", status = "up"   } },
+    { id = "b", labels = ["Server"], properties = { host = "web02", env = "prod", status = "down" } },
+    { id = "c", labels = ["Server"], properties = { host = "db01",  env = "dev",  status = "up"   } },
+    { id = "d", labels = ["Server"], properties = { host = "db02",  env = "prod", status = "up"   } },
+]
+edges = []
+
+[expected]
+columns = ["host"]
+rows = [
+    ["db02"],
+    ["web01"],
+]
+order = "ordered"

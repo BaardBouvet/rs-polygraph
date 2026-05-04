@@ -1,0 +1,27 @@
+name = "boolean_and_or_not"
+description = "Complex boolean expression with AND, OR, NOT in WHERE."
+spec_ref = "openCypher 9 §6.3.3 Boolean operators — AND, OR, NOT"
+
+cypher = """
+MATCH (n:Item)
+WHERE (n.color = 'red' OR n.color = 'blue') AND NOT n.broken
+RETURN n.name AS name
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Item"], properties = { name = "Widget",  color = "red",   broken = false } },
+    { id = "b", labels = ["Item"], properties = { name = "Gadget",  color = "blue",  broken = false } },
+    { id = "c", labels = ["Item"], properties = { name = "Thingy",  color = "red",   broken = true  } },
+    { id = "d", labels = ["Item"], properties = { name = "Doohick", color = "green", broken = false } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [
+    ["Gadget"],
+    ["Widget"],
+]
+order = "ordered"

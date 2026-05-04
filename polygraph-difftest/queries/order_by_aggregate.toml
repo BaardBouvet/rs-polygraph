@@ -1,0 +1,29 @@
+name = "order_by_aggregate"
+description = "ORDER BY the result of an aggregate function."
+spec_ref = "openCypher 9 §7.1 ORDER BY — ordering by aggregate"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.city AS city, count(*) AS cnt
+ORDER BY cnt DESC
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { city = "NYC" } },
+    { id = "b", labels = ["Person"], properties = { city = "NYC" } },
+    { id = "c", labels = ["Person"], properties = { city = "NYC" } },
+    { id = "d", labels = ["Person"], properties = { city = "LA"  } },
+    { id = "e", labels = ["Person"], properties = { city = "LA"  } },
+    { id = "f", labels = ["Person"], properties = { city = "SF"  } },
+]
+edges = []
+
+[expected]
+columns = ["city", "cnt"]
+rows = [
+    ["NYC", 3],
+    ["LA",  2],
+    ["SF",  1],
+]
+order = "ordered"

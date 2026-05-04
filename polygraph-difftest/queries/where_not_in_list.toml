@@ -1,0 +1,27 @@
+name = "where_not_in_list"
+description = "NOT x IN [list] excludes nodes whose property is in the list."
+spec_ref = "openCypher 9 §6.3.4 Comparison — NOT IN"
+
+cypher = """
+MATCH (n:Tag)
+WHERE NOT n.name IN ['red', 'blue']
+RETURN n.name AS name
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Tag"], properties = { name = "red"    } },
+    { id = "b", labels = ["Tag"], properties = { name = "green"  } },
+    { id = "c", labels = ["Tag"], properties = { name = "blue"   } },
+    { id = "d", labels = ["Tag"], properties = { name = "yellow" } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [
+    ["green"],
+    ["yellow"],
+]
+order = "ordered"

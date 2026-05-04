@@ -1,0 +1,28 @@
+name = "not_exists_pattern"
+description = "NOT (n)-[:R]->() selects nodes with no outgoing edges of that type."
+spec_ref = "openCypher 9 §6.3.4 Pattern predicates — NOT EXISTS"
+
+cypher = """
+MATCH (n:Person)
+WHERE NOT (n)-[:FRIEND]->()
+RETURN n.name AS name
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob", rel_type = "FRIEND", properties = {} },
+]
+
+[expected]
+columns = ["name"]
+rows = [
+    ["Bob"],
+    ["Carol"],
+]
+order = "ordered"

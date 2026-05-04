@@ -1,0 +1,31 @@
+name = "skip_offset_pagination"
+description = "SKIP and LIMIT implement a pagination window."
+spec_ref = "openCypher 9 §7.2 SKIP; §7.3 LIMIT"
+
+cypher = """
+MATCH (n:Item)
+RETURN n.name AS name
+ORDER BY name
+SKIP 2
+LIMIT 3
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Item"], properties = { name = "Apple"   } },
+    { id = "b", labels = ["Item"], properties = { name = "Banana"  } },
+    { id = "c", labels = ["Item"], properties = { name = "Cherry"  } },
+    { id = "d", labels = ["Item"], properties = { name = "Date"    } },
+    { id = "e", labels = ["Item"], properties = { name = "Elderberry" } },
+    { id = "f", labels = ["Item"], properties = { name = "Fig"     } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [
+    ["Cherry"],
+    ["Date"],
+    ["Elderberry"],
+]
+order = "ordered"

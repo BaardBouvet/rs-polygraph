@@ -1,0 +1,24 @@
+name = "string_strafter_function"
+description = "STRAFTER-equivalent: test substring after a delimiter using split workaround."
+spec_ref = "openCypher 9 §3.7 String functions — substring(str, indexOf+1)"
+
+cypher = """
+MATCH (n:Url)
+RETURN n.path AS path, substring(n.path, 1) AS after_slash
+ORDER BY path
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Url"], properties = { path = "/api/users"   } },
+    { id = "b", labels = ["Url"], properties = { path = "/api/products" } },
+]
+edges = []
+
+[expected]
+columns = ["path", "after_slash"]
+rows = [
+    ["/api/products", "api/products"],
+    ["/api/users",    "api/users"   ],
+]
+order = "ordered"

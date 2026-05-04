@@ -1,0 +1,28 @@
+name = "multiple_where_conditions"
+description = "WHERE with three conditions combined using AND."
+spec_ref = "openCypher 9 §3.2 WHERE — compound predicates"
+
+cypher = """
+MATCH (n:Product)
+WHERE n.price > 10 AND n.price < 100 AND n.inStock = true
+RETURN n.name AS name, n.price AS price
+ORDER BY price
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Product"], properties = { name = "Alpha", price = 5,   inStock = true  } },
+    { id = "b", labels = ["Product"], properties = { name = "Beta",  price = 50,  inStock = true  } },
+    { id = "c", labels = ["Product"], properties = { name = "Gamma", price = 200, inStock = true  } },
+    { id = "d", labels = ["Product"], properties = { name = "Delta", price = 35,  inStock = false } },
+    { id = "e", labels = ["Product"], properties = { name = "Eta",   price = 75,  inStock = true  } },
+]
+edges = []
+
+[expected]
+columns = ["name", "price"]
+rows = [
+    ["Beta", 50],
+    ["Eta",  75],
+]
+order = "ordered"

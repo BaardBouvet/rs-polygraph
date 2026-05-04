@@ -1,0 +1,29 @@
+name = "with_chain_aggregate_twice"
+description = "Two consecutive WITH aggregation steps — count then re-group."
+spec_ref = "openCypher 9 §3.5.3 WITH — chained aggregations"
+
+cypher = """
+MATCH (n:Event)
+WITH n.city AS city, n.year AS yr, count(*) AS cnt
+WITH city, sum(cnt) AS total_events
+RETURN city, total_events
+ORDER BY total_events DESC, city
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Event"], properties = { city = "NYC", year = 2022 } },
+    { id = "b", labels = ["Event"], properties = { city = "NYC", year = 2022 } },
+    { id = "c", labels = ["Event"], properties = { city = "NYC", year = 2023 } },
+    { id = "d", labels = ["Event"], properties = { city = "LA",  year = 2022 } },
+    { id = "e", labels = ["Event"], properties = { city = "LA",  year = 2023 } },
+]
+edges = []
+
+[expected]
+columns = ["city", "total_events"]
+rows = [
+    ["NYC", 3],
+    ["LA",  2],
+]
+order = "ordered"

@@ -1,0 +1,17 @@
+name = "unwind_aggregate_sum"
+description = "UNWIND then aggregate with sum()."
+spec_ref = "openCypher 9 §3.6 UNWIND — aggregation after UNWIND"
+
+cypher = """
+UNWIND [10, 20, 30] AS val
+RETURN sum(val) AS total
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["total"]
+rows = [[60]]
+order = "bag"

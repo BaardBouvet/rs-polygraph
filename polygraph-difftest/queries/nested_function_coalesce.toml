@@ -1,0 +1,24 @@
+name = "nested_function_coalesce"
+description = "Nested function: coalesce(toInteger(n.score), 0)."
+spec_ref = "openCypher 9 §6.3.6 COALESCE; §3.7 toInteger"
+
+cypher = """
+MATCH (n:Result)
+RETURN n.name AS name, coalesce(toInteger(n.score), 0) AS int_score
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Result"], properties = { name = "Alice", score = "42" } },
+    { id = "b", labels = ["Result"], properties = { name = "Bob"                 } },
+]
+edges = []
+
+[expected]
+columns = ["name", "int_score"]
+rows = [
+    ["Alice", 42],
+    ["Bob",    0],
+]
+order = "ordered"

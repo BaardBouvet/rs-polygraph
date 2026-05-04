@@ -1,0 +1,21 @@
+name = "max_string_property"
+description = "MAX on a string property returns lexicographically greatest value."
+spec_ref = "openCypher 9 §3.4.2 Aggregating functions — MAX on string"
+
+cypher = """
+MATCH (n:Fruit)
+RETURN max(n.name) AS last_fruit
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Fruit"], properties = { name = "Apple"  } },
+    { id = "b", labels = ["Fruit"], properties = { name = "Banana" } },
+    { id = "c", labels = ["Fruit"], properties = { name = "Cherry" } },
+]
+edges = []
+
+[expected]
+columns = ["last_fruit"]
+rows = [["Cherry"]]
+order = "bag"

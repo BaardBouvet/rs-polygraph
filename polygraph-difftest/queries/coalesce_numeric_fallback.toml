@@ -1,0 +1,24 @@
+name = "coalesce_numeric_fallback"
+description = "COALESCE with numeric fallback when property is absent."
+spec_ref = "openCypher 9 §6.3.6 COALESCE"
+
+cypher = """
+MATCH (n:Item)
+RETURN n.name AS name, coalesce(n.discount, 0) AS discount
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Item"], properties = { name = "Alpha", discount = 10 } },
+    { id = "b", labels = ["Item"], properties = { name = "Beta"                 } },
+]
+edges = []
+
+[expected]
+columns = ["name", "discount"]
+rows = [
+    ["Alpha", 10],
+    ["Beta",  0],
+]
+order = "ordered"

@@ -1,0 +1,26 @@
+name = "coalesce_optional_property"
+description = "COALESCE with an optional property gives fallback when property absent."
+spec_ref = "openCypher 9 §3.1.3 OPTIONAL MATCH; §6.3.6 COALESCE"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.name AS name, coalesce(n.phone, 'N/A') AS contact
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", phone = "555-1234" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob"                       } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol", phone = "555-5678" } },
+]
+edges = []
+
+[expected]
+columns = ["name", "contact"]
+rows = [
+    ["Alice", "555-1234"],
+    ["Bob",   "N/A"],
+    ["Carol", "555-5678"],
+]
+order = "ordered"

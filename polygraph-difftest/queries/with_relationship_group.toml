@@ -1,0 +1,31 @@
+name = "with_relationship_group"
+description = "WITH groups matched relationships by a node property."
+spec_ref = "openCypher 9 §3.5.3 WITH — grouping over relationship traversal"
+
+cypher = """
+MATCH (a:Person)-[:KNOWS]->(b:Person)
+WITH a.name AS person, count(b) AS friends
+RETURN person, friends
+ORDER BY friends DESC, person
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+    { id = "dave",  labels = ["Person"], properties = { name = "Dave"  } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob",   rel_type = "KNOWS", properties = {} },
+    { id = "e2", from = "alice", to = "carol", rel_type = "KNOWS", properties = {} },
+    { id = "e3", from = "bob",   to = "dave",  rel_type = "KNOWS", properties = {} },
+]
+
+[expected]
+columns = ["person", "friends"]
+rows = [
+    ["Alice", 2],
+    ["Bob",   1],
+]
+order = "ordered"

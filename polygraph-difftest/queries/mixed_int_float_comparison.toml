@@ -1,0 +1,24 @@
+name = "mixed_int_float_comparison"
+description = "Integer and float comparisons across types (Cypher numeric coercion)."
+spec_ref = "openCypher 9 §6.3.4 Comparison — numeric type coercion"
+
+cypher = """
+MATCH (n:Measure)
+WHERE n.val >= 2
+RETURN n.val AS val
+ORDER BY val
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Measure"], properties = { val = 1    } },
+    { id = "b", labels = ["Measure"], properties = { val = 2    } },
+    { id = "c", labels = ["Measure"], properties = { val = 2.5  } },
+    { id = "d", labels = ["Measure"], properties = { val = 3    } },
+]
+edges = []
+
+[expected]
+columns = ["val"]
+rows = [[2], [2.5], [3]]
+order = "ordered"

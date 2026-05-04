@@ -1,0 +1,31 @@
+name = "filter_by_two_relationship_types"
+description = "Find nodes connected by either of two distinct relationship types to a common node."
+spec_ref = "openCypher 9 §2.1 Patterns — multiple MATCH clauses"
+
+cypher = """
+MATCH (hub:Hub)<-[:DEPENDS_ON]-(pkg:Package)
+MATCH (hub)<-[:USES]-(app:App)
+RETURN DISTINCT pkg.name AS package, app.name AS application
+ORDER BY package, application
+"""
+
+[fixture]
+nodes = [
+    { id = "hub",  labels = ["Hub"],     properties = { name = "CoreLib" } },
+    { id = "p1",   labels = ["Package"], properties = { name = "pkg-a"   } },
+    { id = "p2",   labels = ["Package"], properties = { name = "pkg-b"   } },
+    { id = "app1", labels = ["App"],     properties = { name = "app-1"   } },
+]
+edges = [
+    { id = "e1", from = "p1",   to = "hub", rel_type = "DEPENDS_ON", properties = {} },
+    { id = "e2", from = "p2",   to = "hub", rel_type = "DEPENDS_ON", properties = {} },
+    { id = "e3", from = "app1", to = "hub", rel_type = "USES",       properties = {} },
+]
+
+[expected]
+columns = ["package", "application"]
+rows = [
+    ["pkg-a", "app-1"],
+    ["pkg-b", "app-1"],
+]
+order = "ordered"

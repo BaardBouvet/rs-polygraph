@@ -1,0 +1,26 @@
+name = "not_null_where"
+description = "WHERE n.prop IS NOT NULL filters to only nodes with the property present."
+spec_ref = "openCypher 9 §6.1.1 NULL — IS NOT NULL predicate"
+
+cypher = """
+MATCH (n:Person)
+WHERE n.email IS NOT NULL
+RETURN n.name AS name
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", email = "a@x.com" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob"                      } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol", email = "c@x.com" } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [
+    ["Alice"],
+    ["Carol"],
+]
+order = "ordered"

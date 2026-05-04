@@ -1,0 +1,24 @@
+name = "return_expression_alias"
+description = "RETURN with aliased arithmetic and string expression."
+spec_ref = "openCypher 9 §3.3 RETURN — expression aliasing with AS"
+
+cypher = """
+MATCH (n:Box)
+RETURN n.width * n.height AS area, n.label + '_box' AS tag
+ORDER BY area
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Box"], properties = { width = 3, height = 4, label = "small" } },
+    { id = "b", labels = ["Box"], properties = { width = 5, height = 6, label = "big"   } },
+]
+edges = []
+
+[expected]
+columns = ["area", "tag"]
+rows = [
+    [12, "small_box"],
+    [30, "big_box"],
+]
+order = "ordered"

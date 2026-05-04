@@ -1,0 +1,23 @@
+name = "limit_one_first_row"
+description = "LIMIT 1 after ORDER BY returns only the top row."
+spec_ref = "openCypher 9 §7.3 LIMIT — top-1 query"
+
+cypher = """
+MATCH (n:Athlete)
+RETURN n.name AS name, n.time AS time
+ORDER BY time ASC
+LIMIT 1
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Athlete"], properties = { name = "Alice", time = 120 } },
+    { id = "b", labels = ["Athlete"], properties = { name = "Bob",   time = 95  } },
+    { id = "c", labels = ["Athlete"], properties = { name = "Carol", time = 110 } },
+]
+edges = []
+
+[expected]
+columns = ["name", "time"]
+rows = [["Bob", 95]]
+order = "ordered"

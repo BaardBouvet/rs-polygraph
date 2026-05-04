@@ -1,0 +1,23 @@
+name = "string_contains_case"
+description = "CONTAINS is case-sensitive; different case does not match."
+spec_ref = "openCypher 9 §6.3.4 String comparison — CONTAINS"
+
+cypher = """
+MATCH (n:Doc)
+WHERE n.content CONTAINS 'Graph'
+RETURN n.title AS title
+ORDER BY title
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Doc"], properties = { title = "Alpha", content = "A Graph query language" } },
+    { id = "b", labels = ["Doc"], properties = { title = "Beta",  content = "a graph query language" } },
+    { id = "c", labels = ["Doc"], properties = { title = "Gamma", content = "openCypher spec"        } },
+]
+edges = []
+
+[expected]
+columns = ["title"]
+rows = [["Alpha"]]
+order = "bag"

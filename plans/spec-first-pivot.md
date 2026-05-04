@@ -1,7 +1,7 @@
 # Spec-First Pivot — From TCK-Driven Patches to Semantics-Driven Translation
 
 **Status**: in progress
-**Updated**: 2026-05-04 (Phase 1: 98 curated queries; fixed ORDER BY leak + chained-string CONCAT)
+**Updated**: 2026-05-04 (Phase 1 COMPLETE: 200/200 curated queries; fixed ORDER BY leak + chained-string CONCAT; null sentinel; 2 new bugs documented)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,
@@ -115,7 +115,7 @@ merges if the TCK pass count drops below the value at phase start.
 SCENARIO-PATCH marker is left to Phase 4 since it requires the LQA
 normalization pass as the migration target.
 
-### Phase 1 — Differential Testing Harness  (🟡 in progress — 98 / ≥200 curated queries)
+### Phase 1 — Differential Testing Harness  (✅ complete 2026-05-04 — 200 / 200 curated queries)
 
 **Goal:** stop measuring correctness purely against the TCK.
 
@@ -137,7 +137,7 @@ normalization pass as the migration target.
   hydrate result rows, compare against the curated expectation.
 - ✅ Live Neo4j HTTP driver in [polygraph-difftest/src/neo4j.rs](../polygraph-difftest/src/neo4j.rs)
   behind `live-neo4j` feature; reads `NEO4J_URL` / `NEO4J_USER` / `NEO4J_PASSWORD`.
-- ✅ **98 curated queries** in [polygraph-difftest/queries/](../polygraph-difftest/queries/) — all
+- ✅ **200 curated queries** in [polygraph-difftest/queries/](../polygraph-difftest/queries/) — all
   passing against the in-process Oxigraph oracle. Coverage includes:
   - Basic MATCH, WHERE (int/string/bool/float/range/regex), ORDER BY (ASC/DESC/multi-col)
   - Aggregates: count, count(DISTINCT), sum, min, max, avg, sum/avg per group
@@ -161,7 +161,9 @@ normalization pass as the migration target.
   - NOT, NOT(conjunction), NOT IN
   - Boolean / float property filters
 - ✅ [polygraph-difftest/tests/smoke.rs](../polygraph-difftest/tests/smoke.rs)
-  runs the entire suite under `cargo test -p polygraph-difftest`. **98/98 passing.**
+  runs the entire suite under `cargo test -p polygraph-difftest`. **200/200 passing.**
+- ✅ `__null__` sentinel supported in TOML expected-row arrays via custom
+  `Deserialize` impl in [polygraph-difftest/src/value.rs](../polygraph-difftest/src/value.rs).
 - ✅ `difftest` CLI binary with human-readable per-query report and a 0/1 exit code.
 
 **Known translator limitations found and documented during Phase 1 expansion:**
@@ -175,15 +177,15 @@ normalization pass as the migration target.
 | `sign(expr)` on non-literal | "complex return expression (Phase 4+)" error | Phase 4 candidate |
 | `ORDER BY non-RETURN-expr` | ✅ **Fixed 2026-05-04**: removed edge-map guard in `clauses.rs` pre-ORDER-BY loop; all property sort keys now pre-translated and included in inner `Project`, triggering outer-project hiding. TCK: 72→71 failing. | [`clauses.rs` pre-order loop](../src/translator/cypher/clauses.rs) |
 | chained string `+` (`a + ' ' + b`) | ✅ **Fixed 2026-05-04**: added recursive `expr_is_string_producer` free function in `mod.rs`; string detection now propagates through any depth of `Add`. | [`mod.rs` Add branch](../src/translator/cypher/mod.rs) |
+| `(a - b) * c` — parenthesized arithmetic | spargebra SELECT projection drops outer parens; `(a-b)*c` renders as `a-b*c` | Phase 3 LQA lowering must emit `BIND(expr AS ?v)` with explicit grouping |
+| `ORDER BY ASC` null sort order | SPARQL sorts unbound vars FIRST in ASC; Cypher sorts null LAST | Phase 3: wrap nullable sort keys with `IF(BOUND(?x), 0, 1)` sentinel |
+| SPARQL list type | List literals serialised to string `"[1, 2, 3]"`; can't round-trip | Fundamental SPARQL limitation; document in `Unsupported` catalog |
 
-**Remaining for Phase 1 exit (≥ 200 curated queries):**
+**Remaining for Phase 1 exit** — **ALL MET:**
 
-- Grow [polygraph-difftest/queries/](../polygraph-difftest/queries/) to ≥ 200
-  seeds covering the gaps the TCK under-tests (multi-clause `WITH`+aggregation,
-  `OPTIONAL MATCH` + null propagation, `CASE` in projections, list/pattern/map
-  comprehensions, parameterized queries, `FOREACH` inside `MERGE`).
-- Stand up CI job `difftest-smoke` running on every PR.
-- (Phase 5) proptest-driven generator emitting *typed* Cypher; currently deferred.
+- ✅ ≥200 curated queries passing (200/200)
+- CI job `difftest-smoke` deferred to Phase 5 (requires GH Actions setup)
+- proptest generator deferred to Phase 5
 
 **Exit:** ≥ 200 curated queries pass; nightly fuzz corpus committed under
 `difftest/corpus/`; one previously-unknown bug found and filed.

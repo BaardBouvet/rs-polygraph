@@ -1,0 +1,34 @@
+name = "path_with_intermediate_filter"
+description = "Filter on an intermediate node in a two-hop path."
+spec_ref = "openCypher 9 §2.1 Patterns — intermediate node property filter"
+
+cypher = """
+MATCH (a:Person)-[:MANAGES]->(m:Person)-[:WORKS_ON]->(p:Project)
+WHERE m.dept = 'Engineering'
+RETURN a.name AS manager, p.name AS project
+ORDER BY manager, project
+"""
+
+[fixture]
+nodes = [
+    { id = "ceo",      labels = ["Person"],  properties = { name = "CEO",   dept = "Exec"        } },
+    { id = "eng_lead", labels = ["Person"],  properties = { name = "Lead",  dept = "Engineering" } },
+    { id = "hr_lead",  labels = ["Person"],  properties = { name = "HRLead",dept = "HR"          } },
+    { id = "proj_a",   labels = ["Project"], properties = { name = "Alpha" } },
+    { id = "proj_b",   labels = ["Project"], properties = { name = "Beta"  } },
+]
+edges = [
+    { id = "e1", from = "ceo",     to = "eng_lead", rel_type = "MANAGES",  properties = {} },
+    { id = "e2", from = "ceo",     to = "hr_lead",  rel_type = "MANAGES",  properties = {} },
+    { id = "e3", from = "eng_lead",to = "proj_a",   rel_type = "WORKS_ON", properties = {} },
+    { id = "e4", from = "eng_lead",to = "proj_b",   rel_type = "WORKS_ON", properties = {} },
+    { id = "e5", from = "hr_lead", to = "proj_a",   rel_type = "WORKS_ON", properties = {} },
+]
+
+[expected]
+columns = ["manager", "project"]
+rows = [
+    ["CEO", "Alpha"],
+    ["CEO", "Beta"],
+]
+order = "ordered"

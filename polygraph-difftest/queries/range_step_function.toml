@@ -1,0 +1,18 @@
+name = "range_step_function"
+description = "range(start, end, step) generates a stepped integer list."
+spec_ref = "openCypher 9 §3.7.5 List functions — range()"
+
+cypher = """
+UNWIND range(0, 10, 2) AS n
+RETURN n
+ORDER BY n
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["n"]
+rows = [[0], [2], [4], [6], [8], [10]]
+order = "ordered"

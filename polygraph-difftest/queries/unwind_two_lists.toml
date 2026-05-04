@@ -1,0 +1,24 @@
+name = "unwind_two_lists"
+description = "Two UNWIND in sequence creates a cross product of two lists."
+spec_ref = "openCypher 9 §3.6 UNWIND — sequential UNWIND cross product"
+
+cypher = """
+UNWIND [1, 2] AS a
+UNWIND ['x', 'y'] AS b
+RETURN a, b
+ORDER BY a, b
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["a", "b"]
+rows = [
+    [1, "x"],
+    [1, "y"],
+    [2, "x"],
+    [2, "y"],
+]
+order = "ordered"

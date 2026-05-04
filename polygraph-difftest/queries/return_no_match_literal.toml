@@ -1,0 +1,16 @@
+name = "return_no_match_literal"
+description = "RETURN-only query (no MATCH) returns a single row of computed expressions."
+spec_ref = "openCypher 9 §3.3 RETURN — without a preceding MATCH"
+
+cypher = """
+RETURN 2 + 3 AS sum_val, 10 * 5 AS product, 'hello' AS greeting
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["sum_val", "product", "greeting"]
+rows = [[5, 50, "hello"]]
+order = "bag"

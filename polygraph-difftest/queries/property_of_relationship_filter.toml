@@ -1,0 +1,30 @@
+name = "property_of_relationship_filter"
+description = "Filter rows by a property on the matched relationship in WHERE."
+spec_ref = "openCypher 9 §3.1 MATCH — relationship property in WHERE"
+
+cypher = """
+MATCH (a:Station)-[r:TRAIN]->(b:Station)
+WHERE r.duration < 60
+RETURN a.name AS from_stn, b.name AS to_stn, r.duration AS mins
+ORDER BY mins
+"""
+
+[fixture]
+nodes = [
+    { id = "s1", labels = ["Station"], properties = { name = "Central" } },
+    { id = "s2", labels = ["Station"], properties = { name = "North"   } },
+    { id = "s3", labels = ["Station"], properties = { name = "South"   } },
+]
+edges = [
+    { id = "t1", from = "s1", to = "s2", rel_type = "TRAIN", properties = { duration = 30  } },
+    { id = "t2", from = "s1", to = "s3", rel_type = "TRAIN", properties = { duration = 90  } },
+    { id = "t3", from = "s2", to = "s3", rel_type = "TRAIN", properties = { duration = 45  } },
+]
+
+[expected]
+columns = ["from_stn", "to_stn", "mins"]
+rows = [
+    ["Central", "North", 30],
+    ["North",   "South", 45],
+]
+order = "ordered"

@@ -1,0 +1,35 @@
+name = "multiple_match_clauses_filter"
+description = "Two MATCH clauses joined implicitly; WHERE on the second result."
+spec_ref = "openCypher 9 §3.1 MATCH — multiple MATCH clauses"
+
+cypher = """
+MATCH (a:Author)-[:WROTE]->(b:Book)
+MATCH (b)-[:TAGGED]->(t:Tag)
+WHERE t.name = 'classic'
+RETURN DISTINCT a.name AS author
+ORDER BY author
+"""
+
+[fixture]
+nodes = [
+    { id = "a1",  labels = ["Author"], properties = { name = "Tolkien"  } },
+    { id = "a2",  labels = ["Author"], properties = { name = "Asimov"   } },
+    { id = "b1",  labels = ["Book"],   properties = { title = "LotR"    } },
+    { id = "b2",  labels = ["Book"],   properties = { title = "Foundation" } },
+    { id = "b3",  labels = ["Book"],   properties = { title = "Silmarillion" } },
+    { id = "t1",  labels = ["Tag"],    properties = { name = "classic"  } },
+    { id = "t2",  labels = ["Tag"],    properties = { name = "scifi"    } },
+]
+edges = [
+    { id = "e1", from = "a1", to = "b1", rel_type = "WROTE",  properties = {} },
+    { id = "e2", from = "a2", to = "b2", rel_type = "WROTE",  properties = {} },
+    { id = "e3", from = "a1", to = "b3", rel_type = "WROTE",  properties = {} },
+    { id = "e4", from = "b1", to = "t1", rel_type = "TAGGED", properties = {} },
+    { id = "e5", from = "b2", to = "t2", rel_type = "TAGGED", properties = {} },
+    { id = "e6", from = "b3", to = "t1", rel_type = "TAGGED", properties = {} },
+]
+
+[expected]
+columns = ["author"]
+rows = [["Tolkien"]]
+order = "bag"

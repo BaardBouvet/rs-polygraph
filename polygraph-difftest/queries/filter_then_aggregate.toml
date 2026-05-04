@@ -1,0 +1,23 @@
+name = "filter_then_aggregate"
+description = "WHERE filter applied before aggregation — only qualifying rows are counted."
+spec_ref = "openCypher 9 §3.2 WHERE; §3.4.2 Aggregating functions"
+
+cypher = """
+MATCH (n:Reading)
+WHERE n.valid = true
+RETURN count(*) AS valid_count, avg(n.value) AS avg_val
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Reading"], properties = { valid = true,  value = 10 } },
+    { id = "b", labels = ["Reading"], properties = { valid = false, value = 99 } },
+    { id = "c", labels = ["Reading"], properties = { valid = true,  value = 20 } },
+    { id = "d", labels = ["Reading"], properties = { valid = true,  value = 30 } },
+]
+edges = []
+
+[expected]
+columns = ["valid_count", "avg_val"]
+rows = [[3, 20.0]]
+order = "bag"

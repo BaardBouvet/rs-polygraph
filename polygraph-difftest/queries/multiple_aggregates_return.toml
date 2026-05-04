@@ -1,0 +1,21 @@
+name = "multiple_aggregates_return"
+description = "count, sum, min, max in a single RETURN clause."
+spec_ref = "openCypher 9 §3.4.2 Aggregating functions — multiple aggregates"
+
+cypher = """
+MATCH (n:Score)
+RETURN count(n.val) AS cnt, sum(n.val) AS total, min(n.val) AS lo, max(n.val) AS hi
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Score"], properties = { val = 10 } },
+    { id = "b", labels = ["Score"], properties = { val = 20 } },
+    { id = "c", labels = ["Score"], properties = { val = 30 } },
+]
+edges = []
+
+[expected]
+columns = ["cnt", "total", "lo", "hi"]
+rows = [[3, 60, 10, 30]]
+order = "bag"

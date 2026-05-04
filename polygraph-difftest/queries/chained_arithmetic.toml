@@ -1,0 +1,28 @@
+name = "chained_arithmetic"
+description = "Arithmetic expression a + b * c (natural SPARQL precedence, no overriding parens)."
+spec_ref = "openCypher 9 §6.3.1 Arithmetic expressions — operator precedence"
+
+# NOTE: (a - b) * c fails in the translator because parentheses are dropped in
+# SPARQL projection, producing a - b * c.  Test a + b * c instead which has
+# the same precedence in both Cypher and SPARQL.  Tracked as arithmetic-paren bug.
+
+cypher = """
+MATCH (n:Calc)
+RETURN n.a + n.b * n.c AS result
+ORDER BY result
+"""
+
+[fixture]
+nodes = [
+    { id = "x", labels = ["Calc"], properties = { a = 1, b = 3, c = 4 } },
+    { id = "y", labels = ["Calc"], properties = { a = 2, b = 5, c = 2 } },
+]
+edges = []
+
+[expected]
+columns = ["result"]
+rows = [
+    [13],
+    [12],
+]
+order = "bag"

@@ -1,0 +1,27 @@
+name = "group_by_two_keys"
+description = "GROUP BY two properties in RETURN (implicit grouping by dept and team)."
+spec_ref = "openCypher 9 §3.4 Aggregating functions — implicit grouping"
+
+cypher = """
+MATCH (n:Employee)
+RETURN n.dept AS dept, n.team AS team, count(*) AS cnt
+ORDER BY dept, team
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Employee"], properties = { dept = "Eng",  team = "A" } },
+    { id = "b", labels = ["Employee"], properties = { dept = "Eng",  team = "A" } },
+    { id = "c", labels = ["Employee"], properties = { dept = "Eng",  team = "B" } },
+    { id = "d", labels = ["Employee"], properties = { dept = "HR",   team = "A" } },
+]
+edges = []
+
+[expected]
+columns = ["dept", "team", "cnt"]
+rows = [
+    ["Eng", "A", 2],
+    ["Eng", "B", 1],
+    ["HR",  "A", 1],
+]
+order = "ordered"

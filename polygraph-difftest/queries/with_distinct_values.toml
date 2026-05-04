@@ -1,0 +1,28 @@
+name = "with_distinct_values"
+description = "WITH DISTINCT eliminates duplicate projected values."
+spec_ref = "openCypher 9 §3.5.3 WITH — DISTINCT clause"
+
+cypher = """
+MATCH (n:Person)
+WITH DISTINCT n.city AS city
+RETURN city
+ORDER BY city
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { city = "LA"  } },
+    { id = "b", labels = ["Person"], properties = { city = "NYC" } },
+    { id = "c", labels = ["Person"], properties = { city = "LA"  } },
+    { id = "d", labels = ["Person"], properties = { city = "SF"  } },
+]
+edges = []
+
+[expected]
+columns = ["city"]
+rows = [
+    ["LA"],
+    ["NYC"],
+    ["SF"],
+]
+order = "ordered"

@@ -1,0 +1,27 @@
+name = "sum_group_by_label"
+description = "SUM grouped by a property that has the same value across many nodes."
+spec_ref = "openCypher 9 §3.4.2 Aggregating functions — SUM + GROUP BY"
+
+cypher = """
+MATCH (n:Order)
+WITH n.status AS status, sum(n.amount) AS total
+RETURN status, total
+ORDER BY status
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Order"], properties = { status = "open",   amount = 100 } },
+    { id = "b", labels = ["Order"], properties = { status = "closed", amount = 50  } },
+    { id = "c", labels = ["Order"], properties = { status = "open",   amount = 200 } },
+    { id = "d", labels = ["Order"], properties = { status = "closed", amount = 75  } },
+]
+edges = []
+
+[expected]
+columns = ["status", "total"]
+rows = [
+    ["closed", 125],
+    ["open",   300],
+]
+order = "ordered"

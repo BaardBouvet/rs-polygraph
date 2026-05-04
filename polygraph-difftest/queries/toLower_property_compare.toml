@@ -1,0 +1,25 @@
+name = "toLower_property_compare"
+description = "Case-insensitive comparison using toLower() on both sides."
+spec_ref = "openCypher 9 §3.7 String functions — toLower for case-insensitive match"
+
+cypher = """
+MATCH (n:Tag)
+WHERE toLower(n.name) = 'javascript'
+RETURN n.name AS tag
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Tag"], properties = { name = "JavaScript" } },
+    { id = "b", labels = ["Tag"], properties = { name = "JAVASCRIPT" } },
+    { id = "c", labels = ["Tag"], properties = { name = "typescript" } },
+]
+edges = []
+
+[expected]
+columns = ["tag"]
+rows = [
+    ["JavaScript"],
+    ["JAVASCRIPT"],
+]
+order = "bag"

@@ -1,0 +1,32 @@
+name = "count_incoming_relationships"
+description = "Count incoming relationships per target node."
+spec_ref = "openCypher 9 §2.1 Patterns — incoming direction"
+
+cypher = """
+MATCH (a:Person)-[:FOLLOWS]->(b:Person)
+WITH b.name AS celeb, count(a) AS followers
+RETURN celeb, followers
+ORDER BY followers DESC
+"""
+
+[fixture]
+nodes = [
+    { id = "alice",  labels = ["Person"], properties = { name = "Alice"  } },
+    { id = "bob",    labels = ["Person"], properties = { name = "Bob"    } },
+    { id = "carol",  labels = ["Person"], properties = { name = "Carol"  } },
+    { id = "famous", labels = ["Person"], properties = { name = "Famous" } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "famous", rel_type = "FOLLOWS", properties = {} },
+    { id = "e2", from = "bob",   to = "famous", rel_type = "FOLLOWS", properties = {} },
+    { id = "e3", from = "carol", to = "famous", rel_type = "FOLLOWS", properties = {} },
+    { id = "e4", from = "alice", to = "bob",    rel_type = "FOLLOWS", properties = {} },
+]
+
+[expected]
+columns = ["celeb", "followers"]
+rows = [
+    ["Famous", 3],
+    ["Bob",    1],
+]
+order = "ordered"

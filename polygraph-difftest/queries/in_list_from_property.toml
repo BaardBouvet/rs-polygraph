@@ -1,0 +1,28 @@
+name = "in_list_from_property"
+description = "WHERE n.prop IN [...list...] tests membership."
+spec_ref = "openCypher 9 §6.3.4 Comparison — IN operator"
+
+cypher = """
+MATCH (n:City)
+WHERE n.country IN ['US', 'UK', 'CA']
+RETURN n.name AS city, n.country AS country
+ORDER BY n.country, city
+"""
+
+[fixture]
+nodes = [
+    { id = "nyc", labels = ["City"], properties = { name = "NYC",    country = "US" } },
+    { id = "la",  labels = ["City"], properties = { name = "LA",     country = "US" } },
+    { id = "ldn", labels = ["City"], properties = { name = "London", country = "UK" } },
+    { id = "par", labels = ["City"], properties = { name = "Paris",  country = "FR" } },
+]
+edges = []
+
+[expected]
+columns = ["city", "country"]
+rows = [
+    ["London", "UK"],
+    ["LA",     "US"],
+    ["NYC",    "US"],
+]
+order = "ordered"

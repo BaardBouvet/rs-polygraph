@@ -1,0 +1,31 @@
+name = "case_in_where"
+description = "CASE expression used inside a WHERE predicate."
+spec_ref = "openCypher 9 §6.2.3 CASE — used in filter predicates"
+
+cypher = """
+MATCH (n:Product)
+WHERE CASE n.category
+          WHEN 'food'  THEN n.price < 20
+          WHEN 'tech'  THEN n.price < 500
+          ELSE false
+      END
+RETURN n.name AS name
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Product"], properties = { name = "Bread",  category = "food", price = 3   } },
+    { id = "b", labels = ["Product"], properties = { name = "Cake",   category = "food", price = 25  } },
+    { id = "c", labels = ["Product"], properties = { name = "Laptop", category = "tech", price = 999 } },
+    { id = "d", labels = ["Product"], properties = { name = "Mouse",  category = "tech", price = 29  } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [
+    ["Bread"],
+    ["Mouse"],
+]
+order = "ordered"

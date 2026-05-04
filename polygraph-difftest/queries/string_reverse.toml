@@ -1,0 +1,24 @@
+name = "string_left_property"
+description = "left(n.val, n) on a property works end to end."
+spec_ref = "openCypher 9 §3.7 String functions — left on node property"
+
+cypher = """
+MATCH (n:Code)
+RETURN n.val AS val, left(n.val, 3) AS prefix
+ORDER BY val
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Code"], properties = { val = "ABCDEF" } },
+    { id = "b", labels = ["Code"], properties = { val = "XYZ123" } },
+]
+edges = []
+
+[expected]
+columns = ["val", "prefix"]
+rows = [
+    ["ABCDEF", "ABC"],
+    ["XYZ123", "XYZ"],
+]
+order = "ordered"

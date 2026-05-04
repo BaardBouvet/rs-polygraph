@@ -1,0 +1,24 @@
+name = "unwind_with_computation"
+description = "UNWIND then compute an expression per item."
+spec_ref = "openCypher 9 §3.6 UNWIND — expression in RETURN"
+
+cypher = """
+UNWIND range(1, 5) AS n
+RETURN n, n * n AS sq
+ORDER BY n
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["n", "sq"]
+rows = [
+    [1, 1],
+    [2, 4],
+    [3, 9],
+    [4, 16],
+    [5, 25],
+]
+order = "ordered"

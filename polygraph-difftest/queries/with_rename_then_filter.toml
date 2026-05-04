@@ -1,0 +1,27 @@
+name = "with_rename_then_filter"
+description = "WITH renames a variable, subsequent WHERE uses the new name."
+spec_ref = "openCypher 9 §3.5.3 WITH — rename + filter"
+
+cypher = """
+MATCH (n:Widget)
+WITH n.name AS nm, n.weight AS w
+WHERE w > 5
+RETURN nm, w
+ORDER BY nm
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Widget"], properties = { name = "A", weight = 3 } },
+    { id = "b", labels = ["Widget"], properties = { name = "B", weight = 7 } },
+    { id = "c", labels = ["Widget"], properties = { name = "C", weight = 10 } },
+]
+edges = []
+
+[expected]
+columns = ["nm", "w"]
+rows = [
+    ["B", 7],
+    ["C", 10],
+]
+order = "ordered"

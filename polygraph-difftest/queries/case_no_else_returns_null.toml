@@ -1,0 +1,30 @@
+name = "case_no_else_returns_null"
+description = "CASE without ELSE returns null when no branch matches."
+spec_ref = "openCypher 9 §6.2.3 CASE — no ELSE produces null"
+
+cypher = """
+MATCH (n:Item)
+RETURN n.code AS code,
+       CASE n.code
+           WHEN 'A' THEN 'Alpha'
+           WHEN 'B' THEN 'Beta'
+       END AS label
+ORDER BY code
+"""
+
+[fixture]
+nodes = [
+    { id = "x", labels = ["Item"], properties = { code = "A" } },
+    { id = "y", labels = ["Item"], properties = { code = "B" } },
+    { id = "z", labels = ["Item"], properties = { code = "C" } },
+]
+edges = []
+
+[expected]
+columns = ["code", "label"]
+rows = [
+    ["A", "Alpha"],
+    ["B", "Beta"],
+    ["C", "__null__"],
+]
+order = "ordered"

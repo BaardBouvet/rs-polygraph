@@ -1,0 +1,26 @@
+name = "negative_number_abs"
+description = "abs() applied to negative integers."
+spec_ref = "openCypher 9 §3.7.4 Mathematical functions — abs()"
+
+cypher = """
+MATCH (n:Temp)
+RETURN n.delta AS delta, abs(n.delta) AS magnitude
+ORDER BY n.delta
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Temp"], properties = { delta = -5  } },
+    { id = "b", labels = ["Temp"], properties = { delta = 0   } },
+    { id = "c", labels = ["Temp"], properties = { delta = 3   } },
+]
+edges = []
+
+[expected]
+columns = ["delta", "magnitude"]
+rows = [
+    [-5, 5],
+    [0,  0],
+    [3,  3],
+]
+order = "ordered"

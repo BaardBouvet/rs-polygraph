@@ -1,0 +1,17 @@
+name = "unwind_count_items"
+description = "UNWIND then COUNT the items."
+spec_ref = "openCypher 9 §3.6 UNWIND — count after UNWIND"
+
+cypher = """
+UNWIND ['a', 'b', 'c', 'd'] AS item
+RETURN count(item) AS num
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["num"]
+rows = [[4]]
+order = "bag"

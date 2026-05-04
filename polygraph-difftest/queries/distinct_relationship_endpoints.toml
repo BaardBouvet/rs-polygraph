@@ -1,0 +1,29 @@
+name = "distinct_relationship_endpoints"
+description = "DISTINCT removes duplicate node-pair results from multi-edge traversal."
+spec_ref = "openCypher 9 §3.3 RETURN — DISTINCT on relationship endpoints"
+
+cypher = """
+MATCH (a:Person)-[:LIKES]->(b:Person)
+RETURN DISTINCT a.name AS fan, b.name AS liked
+ORDER BY fan, liked
+"""
+
+[fixture]
+nodes = [
+    { id = "u1", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "u2", labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "u3", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = [
+    { id = "e1", from = "u1", to = "u2", rel_type = "LIKES", properties = {} },
+    { id = "e2", from = "u1", to = "u2", rel_type = "LIKES", properties = {} },
+    { id = "e3", from = "u1", to = "u3", rel_type = "LIKES", properties = {} },
+]
+
+[expected]
+columns = ["fan", "liked"]
+rows = [
+    ["Alice", "Bob"],
+    ["Alice", "Carol"],
+]
+order = "ordered"

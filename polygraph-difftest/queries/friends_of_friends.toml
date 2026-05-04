@@ -1,0 +1,31 @@
+name = "friends_of_friends"
+description = "Two-hop social graph: friends of friends excluding direct friends."
+spec_ref = "openCypher 9 §2.1 Patterns — two-hop with inequality filter"
+
+cypher = """
+MATCH (alice:Person {name: 'Alice'})-[:FRIEND]->(friend)-[:FRIEND]->(fof:Person)
+WHERE NOT (alice)-[:FRIEND]->(fof) AND alice <> fof
+RETURN DISTINCT fof.name AS name
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+    { id = "dave",  labels = ["Person"], properties = { name = "Dave"  } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob",   rel_type = "FRIEND", properties = {} },
+    { id = "e2", from = "bob",   to = "carol", rel_type = "FRIEND", properties = {} },
+    { id = "e3", from = "bob",   to = "dave",  rel_type = "FRIEND", properties = {} },
+]
+
+[expected]
+columns = ["name"]
+rows = [
+    ["Carol"],
+    ["Dave"],
+]
+order = "ordered"

@@ -1,0 +1,26 @@
+name = "coalesce_chain"
+description = "COALESCE with three arguments returns the first non-null."
+spec_ref = "openCypher 9 §6.3.6 COALESCE"
+
+cypher = """
+MATCH (n:Node)
+RETURN coalesce(n.a, n.b, n.c) AS val
+ORDER BY val
+"""
+
+[fixture]
+nodes = [
+    { id = "x", labels = ["Node"], properties = { a = "found_a"                              } },
+    { id = "y", labels = ["Node"], properties = {              b = "found_b"                 } },
+    { id = "z", labels = ["Node"], properties = {                            c = "found_c"   } },
+]
+edges = []
+
+[expected]
+columns = ["val"]
+rows = [
+    ["found_a"],
+    ["found_b"],
+    ["found_c"],
+]
+order = "ordered"

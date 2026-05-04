@@ -1,0 +1,29 @@
+name = "with_group_then_order_limit"
+description = "WITH aggregation then ORDER BY and LIMIT to get top-N groups."
+spec_ref = "openCypher 9 §3.5.3 WITH — ORDER BY + LIMIT after aggregation"
+
+cypher = """
+MATCH (n:Sale)
+WITH n.product AS product, sum(n.amount) AS revenue
+ORDER BY revenue DESC
+LIMIT 2
+RETURN product, revenue
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Sale"], properties = { product = "Alpha", amount = 100 } },
+    { id = "b", labels = ["Sale"], properties = { product = "Alpha", amount = 200 } },
+    { id = "c", labels = ["Sale"], properties = { product = "Beta",  amount = 50  } },
+    { id = "d", labels = ["Sale"], properties = { product = "Gamma", amount = 400 } },
+    { id = "e", labels = ["Sale"], properties = { product = "Gamma", amount = 100 } },
+]
+edges = []
+
+[expected]
+columns = ["product", "revenue"]
+rows = [
+    ["Gamma", 500],
+    ["Alpha", 300],
+]
+order = "ordered"

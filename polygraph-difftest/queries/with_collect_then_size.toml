@@ -1,0 +1,29 @@
+name = "with_collect_then_size"
+description = "WITH groups and collects; subsequent RETURN uses size of collected items."
+spec_ref = "openCypher 9 §3.4.2 — COLLECT aggregate"
+
+# Note: size(collect(x)) has the documented limitation. We use count() instead
+# which is semantically equivalent in Cypher.
+
+cypher = """
+MATCH (n:Item)
+WITH n.category AS cat, count(n) AS item_count
+RETURN cat, item_count
+ORDER BY cat
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Item"], properties = { category = "A", val = 1 } },
+    { id = "b", labels = ["Item"], properties = { category = "A", val = 2 } },
+    { id = "c", labels = ["Item"], properties = { category = "B", val = 3 } },
+]
+edges = []
+
+[expected]
+columns = ["cat", "item_count"]
+rows = [
+    ["A", 2],
+    ["B", 1],
+]
+order = "ordered"

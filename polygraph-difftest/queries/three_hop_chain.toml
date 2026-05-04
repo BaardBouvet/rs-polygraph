@@ -1,0 +1,26 @@
+name = "three_hop_chain"
+description = "Three-hop path match: (a)-[:R]->(b)-[:R]->(c)-[:R]->(d)."
+spec_ref = "openCypher 9 §2.1 Patterns — multi-hop chain"
+
+cypher = """
+MATCH (a:Node)-[:NEXT]->(b:Node)-[:NEXT]->(c:Node)-[:NEXT]->(d:Node)
+RETURN a.name AS start_node, d.name AS end_node
+"""
+
+[fixture]
+nodes = [
+    { id = "n1", labels = ["Node"], properties = { name = "one"   } },
+    { id = "n2", labels = ["Node"], properties = { name = "two"   } },
+    { id = "n3", labels = ["Node"], properties = { name = "three" } },
+    { id = "n4", labels = ["Node"], properties = { name = "four"  } },
+]
+edges = [
+    { id = "e1", from = "n1", to = "n2", rel_type = "NEXT", properties = {} },
+    { id = "e2", from = "n2", to = "n3", rel_type = "NEXT", properties = {} },
+    { id = "e3", from = "n3", to = "n4", rel_type = "NEXT", properties = {} },
+]
+
+[expected]
+columns = ["start_node", "end_node"]
+rows = [["one", "four"]]
+order = "bag"

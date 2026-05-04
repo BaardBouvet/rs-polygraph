@@ -1,0 +1,26 @@
+name = "substring_extract"
+description = "substring(str, start, length) extracts a sub-string via 0-based start."
+spec_ref = "openCypher 9 §3.7.7 String functions — substring"
+
+cypher = """
+MATCH (n:Log)
+RETURN substring(n.message, 0, 5) AS prefix
+ORDER BY prefix
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Log"], properties = { message = "ERROR: disk full"  } },
+    { id = "b", labels = ["Log"], properties = { message = "WARNing: high cpu"  } },
+    { id = "c", labels = ["Log"], properties = { message = "INFO: all good"    } },
+]
+edges = []
+
+[expected]
+columns = ["prefix"]
+rows = [
+    ["ERROR"],
+    ["INFO:"],
+    ["WARNi"],
+]
+order = "ordered"

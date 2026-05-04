@@ -1,0 +1,28 @@
+name = "type_function_rel"
+description = "type(r) returns the relationship type label as a string."
+spec_ref = "openCypher 9 §3.7 Functions — type()"
+
+cypher = """
+MATCH (a:Person)-[r]->(b:Person)
+RETURN a.name AS from_node, type(r) AS rel_type, b.name AS to_node
+ORDER BY from_node, rel_type, to_node
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob",   rel_type = "KNOWS",  properties = {} },
+    { id = "e2", from = "alice", to = "carol", rel_type = "LIKES",  properties = {} },
+]
+
+[expected]
+columns = ["from_node", "rel_type", "to_node"]
+rows = [
+    ["Alice", "KNOWS",  "Bob"   ],
+    ["Alice", "LIKES",  "Carol" ],
+]
+order = "ordered"

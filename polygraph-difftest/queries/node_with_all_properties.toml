@@ -1,0 +1,28 @@
+name = "node_with_all_properties"
+description = "Return multiple properties from nodes; multi-column result."
+spec_ref = "openCypher 9 §3.3 RETURN — multiple property columns"
+
+cypher = """
+MATCH (n:Employee)
+WHERE n.active = true
+RETURN n.name AS name, n.dept AS dept, n.salary AS salary
+ORDER BY salary DESC, name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Employee"], properties = { name = "Alice",   dept = "Eng", salary = 90000, active = true  } },
+    { id = "b", labels = ["Employee"], properties = { name = "Bob",     dept = "HR",  salary = 70000, active = false } },
+    { id = "c", labels = ["Employee"], properties = { name = "Carol",   dept = "Eng", salary = 95000, active = true  } },
+    { id = "d", labels = ["Employee"], properties = { name = "Dave",    dept = "Eng", salary = 90000, active = true  } },
+]
+edges = []
+
+[expected]
+columns = ["name", "dept", "salary"]
+rows = [
+    ["Carol", "Eng", 95000],
+    ["Alice", "Eng", 90000],
+    ["Dave",  "Eng", 90000],
+]
+order = "ordered"

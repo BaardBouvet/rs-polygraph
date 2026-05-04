@@ -1,0 +1,28 @@
+name = "min_max_per_group_ordered"
+description = "min and max per group, ordered by group key."
+spec_ref = "openCypher 9 §3.4.2 Aggregating functions — MIN, MAX per group"
+
+cypher = """
+MATCH (n:Reading)
+WITH n.sensor AS sensor, min(n.value) AS lo, max(n.value) AS hi
+RETURN sensor, lo, hi
+ORDER BY sensor
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Reading"], properties = { sensor = "A", value = 10 } },
+    { id = "b", labels = ["Reading"], properties = { sensor = "A", value = 30 } },
+    { id = "c", labels = ["Reading"], properties = { sensor = "A", value = 20 } },
+    { id = "d", labels = ["Reading"], properties = { sensor = "B", value = 5  } },
+    { id = "e", labels = ["Reading"], properties = { sensor = "B", value = 15 } },
+]
+edges = []
+
+[expected]
+columns = ["sensor", "lo", "hi"]
+rows = [
+    ["A", 10, 30],
+    ["B",  5, 15],
+]
+order = "ordered"

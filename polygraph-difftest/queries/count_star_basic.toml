@@ -1,0 +1,21 @@
+name = "count_star_basic"
+description = "COUNT(*) returns total number of matched rows."
+spec_ref = "openCypher 9 §3.4.2 Aggregating functions — COUNT(*)"
+
+cypher = """
+MATCH (n:Item)
+RETURN count(*) AS total
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Item"], properties = { val = 1 } },
+    { id = "b", labels = ["Item"], properties = { val = 2 } },
+    { id = "c", labels = ["Item"], properties = { val = 3 } },
+]
+edges = []
+
+[expected]
+columns = ["total"]
+rows = [[3]]
+order = "bag"

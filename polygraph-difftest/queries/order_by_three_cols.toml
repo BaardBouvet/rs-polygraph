@@ -1,0 +1,28 @@
+name = "order_by_three_cols"
+description = "ORDER BY three columns: first ASC, second ASC, third DESC."
+spec_ref = "openCypher 9 §7.1 ORDER BY — multi-column ordering"
+
+cypher = """
+MATCH (n:Record)
+RETURN n.a AS a, n.b AS b, n.c AS c
+ORDER BY a ASC, b ASC, c DESC
+"""
+
+[fixture]
+nodes = [
+    { id = "x1", labels = ["Record"], properties = { a = 1, b = 1, c = 10 } },
+    { id = "x2", labels = ["Record"], properties = { a = 1, b = 1, c = 20 } },
+    { id = "x3", labels = ["Record"], properties = { a = 1, b = 2, c = 5  } },
+    { id = "x4", labels = ["Record"], properties = { a = 2, b = 1, c = 1  } },
+]
+edges = []
+
+[expected]
+columns = ["a", "b", "c"]
+rows = [
+    [1, 1, 20],
+    [1, 1, 10],
+    [1, 2, 5 ],
+    [2, 1, 1 ],
+]
+order = "ordered"

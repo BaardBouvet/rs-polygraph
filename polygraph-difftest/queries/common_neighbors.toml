@@ -1,0 +1,28 @@
+name = "common_neighbors"
+description = "Find nodes with an outgoing edge to both Alice and Bob."
+spec_ref = "openCypher 9 §2.1 Patterns — intersection via two MATCH paths"
+
+cypher = """
+MATCH (x)-[:KNOWS]->(alice:Person {name: 'Alice'})
+MATCH (x)-[:KNOWS]->(bob:Person {name: 'Bob'})
+RETURN x.name AS mutual
+ORDER BY mutual
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+    { id = "dave",  labels = ["Person"], properties = { name = "Dave"  } },
+]
+edges = [
+    { id = "e1", from = "carol", to = "alice", rel_type = "KNOWS", properties = {} },
+    { id = "e2", from = "carol", to = "bob",   rel_type = "KNOWS", properties = {} },
+    { id = "e3", from = "dave",  to = "alice", rel_type = "KNOWS", properties = {} },
+]
+
+[expected]
+columns = ["mutual"]
+rows = [["Carol"]]
+order = "bag"

@@ -1,0 +1,19 @@
+name = "unwind_filter_items"
+description = "UNWIND a list then use WITH+WHERE to filter items."
+spec_ref = "openCypher 9 §3.6 UNWIND — filter via WITH+WHERE"
+
+cypher = """
+UNWIND [1, 2, 3, 4, 5] AS x
+WITH x WHERE x % 2 = 0
+RETURN x
+ORDER BY x
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["x"]
+rows = [[2], [4]]
+order = "ordered"

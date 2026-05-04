@@ -1,0 +1,21 @@
+name = "sum_float_property"
+description = "SUM over floating-point property values."
+spec_ref = "openCypher 9 §3.4.2 Aggregating functions — SUM on float"
+
+cypher = """
+MATCH (n:Transaction)
+RETURN sum(n.amount) AS total
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Transaction"], properties = { amount = 10.5 } },
+    { id = "b", labels = ["Transaction"], properties = { amount = 2.25 } },
+    { id = "c", labels = ["Transaction"], properties = { amount = 7.25 } },
+]
+edges = []
+
+[expected]
+columns = ["total"]
+rows = [[20.0]]
+order = "bag"

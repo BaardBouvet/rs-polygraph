@@ -1,0 +1,26 @@
+name = "avg_score_grouped"
+description = "AVG score per group, ordered by group name."
+spec_ref = "openCypher 9 §3.4.2 Aggregating functions — AVG with grouping"
+
+cypher = """
+MATCH (n:Student)
+RETURN n.class AS class, avg(n.score) AS avg_score
+ORDER BY class
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Student"], properties = { class = "Math",    score = 80 } },
+    { id = "b", labels = ["Student"], properties = { class = "Math",    score = 90 } },
+    { id = "c", labels = ["Student"], properties = { class = "Science", score = 70 } },
+    { id = "d", labels = ["Student"], properties = { class = "Science", score = 70 } },
+]
+edges = []
+
+[expected]
+columns = ["class", "avg_score"]
+rows = [
+    ["Math",    85.0],
+    ["Science", 70.0],
+]
+order = "ordered"

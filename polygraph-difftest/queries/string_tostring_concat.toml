@@ -1,0 +1,26 @@
+name = "string_tostring_concat"
+description = "Concatenate toString of a number with a string suffix."
+spec_ref = "openCypher 9 §3.7 String functions — toString + concatenation"
+
+cypher = """
+MATCH (n:Version)
+RETURN 'v' + toString(n.major) + '.' + toString(n.minor) AS ver
+ORDER BY n.major, n.minor
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Version"], properties = { major = 1, minor = 0 } },
+    { id = "b", labels = ["Version"], properties = { major = 1, minor = 2 } },
+    { id = "c", labels = ["Version"], properties = { major = 2, minor = 0 } },
+]
+edges = []
+
+[expected]
+columns = ["ver"]
+rows = [
+    ["v1.0"],
+    ["v1.2"],
+    ["v2.0"],
+]
+order = "ordered"

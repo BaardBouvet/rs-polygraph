@@ -1,0 +1,29 @@
+name = "with_order_rename"
+description = "WITH renames and orders; subsequent RETURN uses renamed column."
+spec_ref = "openCypher 9 §3.5.3 WITH — column renaming + implicit ORDER"
+
+cypher = """
+MATCH (n:Task)
+WITH n.priority AS pri, n.name AS task_name
+ORDER BY pri ASC, task_name ASC
+LIMIT 3
+RETURN task_name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Task"], properties = { name = "Do laundry", priority = 3 } },
+    { id = "b", labels = ["Task"], properties = { name = "Fix bug",    priority = 1 } },
+    { id = "c", labels = ["Task"], properties = { name = "Write test", priority = 1 } },
+    { id = "d", labels = ["Task"], properties = { name = "Deploy",     priority = 2 } },
+]
+edges = []
+
+[expected]
+columns = ["task_name"]
+rows = [
+    ["Fix bug"],
+    ["Write test"],
+    ["Deploy"],
+]
+order = "ordered"

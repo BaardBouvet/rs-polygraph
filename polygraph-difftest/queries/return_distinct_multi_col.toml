@@ -1,0 +1,27 @@
+name = "return_distinct_multi_col"
+description = "RETURN DISTINCT on multiple columns — deduplicates entire rows."
+spec_ref = "openCypher 9 §3.3 RETURN — DISTINCT"
+
+cypher = """
+MATCH (n:Event)
+RETURN DISTINCT n.category AS cat, n.year AS yr
+ORDER BY cat, yr
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Event"], properties = { category = "Music",  year = 2022 } },
+    { id = "b", labels = ["Event"], properties = { category = "Music",  year = 2022 } },
+    { id = "c", labels = ["Event"], properties = { category = "Sports", year = 2022 } },
+    { id = "d", labels = ["Event"], properties = { category = "Music",  year = 2023 } },
+]
+edges = []
+
+[expected]
+columns = ["cat", "yr"]
+rows = [
+    ["Music",  2022],
+    ["Music",  2023],
+    ["Sports", 2022],
+]
+order = "ordered"

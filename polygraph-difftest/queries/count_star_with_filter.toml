@@ -1,0 +1,22 @@
+name = "count_star_with_filter"
+description = "COUNT(*) applied after WHERE filter."
+spec_ref = "openCypher 9 §3.4.2 Aggregating functions — COUNT(*) with WHERE"
+
+cypher = """
+MATCH (n:Item)
+WHERE n.val > 1
+RETURN count(*) AS total
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Item"], properties = { val = 1 } },
+    { id = "b", labels = ["Item"], properties = { val = 2 } },
+    { id = "c", labels = ["Item"], properties = { val = 3 } },
+]
+edges = []
+
+[expected]
+columns = ["total"]
+rows = [[2]]
+order = "bag"

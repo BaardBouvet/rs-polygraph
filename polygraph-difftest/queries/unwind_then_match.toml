@@ -1,0 +1,27 @@
+name = "unwind_then_match"
+description = "UNWIND a list of ids then MATCH nodes using WHERE equal."
+spec_ref = "openCypher 9 §3.6 UNWIND — use unwound value in WHERE"
+
+cypher = """
+UNWIND ['Alice', 'Carol'] AS target_name
+MATCH (n:Person)
+WHERE n.name = target_name
+RETURN n.name AS name
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [
+    ["Alice"],
+    ["Carol"],
+]
+order = "ordered"

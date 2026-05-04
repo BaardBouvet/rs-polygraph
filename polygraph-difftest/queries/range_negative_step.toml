@@ -1,0 +1,18 @@
+name = "range_negative_step"
+description = "range() with a negative step produces a descending list."
+spec_ref = "openCypher 9 §3.7.5 List functions — range() with negative step"
+
+cypher = """
+UNWIND range(5, 1, -1) AS n
+RETURN n
+ORDER BY n ASC
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["n"]
+rows = [[1], [2], [3], [4], [5]]
+order = "ordered"

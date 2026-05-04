@@ -1,0 +1,28 @@
+name = "or_label_like_pattern"
+description = "WHERE with OR on different property predicates."
+spec_ref = "openCypher 9 §6.3.3 Boolean operators — OR"
+
+cypher = """
+MATCH (n:Node)
+WHERE n.type = 'A' OR n.type = 'C'
+RETURN n.name AS name
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Node"], properties = { name = "one",   type = "A" } },
+    { id = "b", labels = ["Node"], properties = { name = "two",   type = "B" } },
+    { id = "c", labels = ["Node"], properties = { name = "three", type = "C" } },
+    { id = "d", labels = ["Node"], properties = { name = "four",  type = "A" } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [
+    ["four"],
+    ["one"],
+    ["three"],
+]
+order = "ordered"

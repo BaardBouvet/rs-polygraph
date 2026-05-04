@@ -1,0 +1,31 @@
+name = "relationship_count_undirected"
+description = "Count undirected relationships touching each node."
+spec_ref = "openCypher 9 §2.1 Patterns — undirected relationship"
+
+cypher = """
+MATCH (n:Person)-[:FRIEND]-(other:Person)
+WITH n.name AS person, count(other) AS degree
+RETURN person, degree
+ORDER BY degree DESC, person
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = [
+    { id = "e1", from = "a", to = "b", rel_type = "FRIEND", properties = {} },
+    { id = "e2", from = "a", to = "c", rel_type = "FRIEND", properties = {} },
+    { id = "e3", from = "b", to = "c", rel_type = "FRIEND", properties = {} },
+]
+
+[expected]
+columns = ["person", "degree"]
+rows = [
+    ["Alice", 2],
+    ["Bob",   2],
+    ["Carol", 2],
+]
+order = "ordered"

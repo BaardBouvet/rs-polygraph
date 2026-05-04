@@ -1,0 +1,21 @@
+name = "match_no_results_filter"
+description = "WHERE filter that matches no rows returns empty result."
+spec_ref = "openCypher 9 §3.2 WHERE — empty result set"
+
+cypher = """
+MATCH (n:Person)
+WHERE n.age > 1000
+RETURN n.name AS name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", age = 30 } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob",   age = 25 } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = []
+order = "bag"

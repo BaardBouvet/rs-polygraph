@@ -1,0 +1,26 @@
+name = "with_aggregate_string_group"
+description = "WITH groups by a computed string expression."
+spec_ref = "openCypher 9 §3.5.3 WITH — grouping by expression"
+
+cypher = """
+MATCH (n:Event)
+WITH toLower(n.category) AS cat, count(*) AS cnt
+RETURN cat, cnt
+ORDER BY cat
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Event"], properties = { category = "Music"  } },
+    { id = "b", labels = ["Event"], properties = { category = "music"  } },
+    { id = "c", labels = ["Event"], properties = { category = "Sports" } },
+]
+edges = []
+
+[expected]
+columns = ["cat", "cnt"]
+rows = [
+    ["music",  2],
+    ["sports", 1],
+]
+order = "ordered"

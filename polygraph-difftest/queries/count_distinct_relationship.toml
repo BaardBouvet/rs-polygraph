@@ -1,0 +1,27 @@
+name = "count_distinct_relationship"
+description = "COUNT(DISTINCT rel_var) counts unique relationships traversed."
+spec_ref = "openCypher 9 §3.4.2 COUNT DISTINCT on relationship"
+
+cypher = """
+MATCH (a:Person)-[r:KNOWS]->(b:Person)
+WITH a.name AS person, count(DISTINCT b) AS friend_count
+RETURN person, friend_count
+ORDER BY person
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob",   rel_type = "KNOWS", properties = {} },
+    { id = "e2", from = "alice", to = "carol", rel_type = "KNOWS", properties = {} },
+    { id = "e3", from = "alice", to = "bob",   rel_type = "KNOWS", properties = {} },
+]
+
+[expected]
+columns = ["person", "friend_count"]
+rows = [["Alice", 2]]
+order = "bag"
