@@ -334,9 +334,12 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
         }
     }
 
-    // Route MATCH…RETURN and UNWIND-first…RETURN shapes through LQA.
-    // WITH-first and bare-RETURN queries may have SyntaxError semantics or scoping
-    // issues that LQA doesn't yet handle, so they stay on the legacy path.
+    // Route queries through LQA for these clause shapes:
+    //   - MATCH…RETURN
+    //   - UNWIND…RETURN
+    // WITH-first, bare-RETURN, and RETURN-UNION-RETURN shapes stay on the legacy
+    // path because they require error semantics or column naming that LQA doesn't
+    // yet replicate (e.g. arithmetic column headers, type-error tests).
     {
         let first = clause_kinds.first().copied();
         let last = clause_kinds.last().copied();

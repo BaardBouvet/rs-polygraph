@@ -731,16 +731,12 @@ fn tck_eval_duration(pairs: &[(String, Expression)]) -> Option<String> {
     let s_final = s_whole - carry_min * 60;
     let min_total = mins_int as i64 + carry_min;
 
-    // Fix 2: normalize hours≥24 (or hours<-24) into extra days so the resulting
-    // duration string has a valid per-component representation for XSD arithmetic.
-    // Example: P12Y11M29DT33H58M13.5S → P12Y11M30DT9H58M13.5S.
-    let extra_days_from_hours = if hours_int_raw >= 0.0 {
-        (hours_int_raw as i64 / 24) as f64
-    } else {
-        -((-hours_int_raw as i64) / 24) as f64
-    };
-    let hours_int = hours_int_raw - extra_days_from_hours * 24.0;
-    let days_int = days_int + extra_days_from_hours;
+    // Do NOT normalize hours≥24 into extra days. The TCK expects durations in
+    // their un-normalised form (e.g. PT32H rather than P1DT8H), matching
+    // Cypher semantics where duration constructor fields are kept as-is.
+    // XSD 1.1 xs:duration also permits hours (and days) outside their "clock"
+    // range, so Oxigraph handles PT32H correctly in arithmetic.
+    let hours_int = hours_int_raw;
 
     let mut date_s = String::new();
     if let Some(y) = years {
