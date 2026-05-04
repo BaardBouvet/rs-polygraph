@@ -1,0 +1,21 @@
+name = "abs_negative_integer"
+description = "abs() returns the absolute value of a negative integer."
+spec_ref = "openCypher 9 §3.8.1 Numeric functions — abs()"
+
+cypher = """
+MATCH (n:Reading)
+RETURN abs(n.delta) AS magnitude
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Reading"], properties = { delta = -7  } },
+    { id = "b", labels = ["Reading"], properties = { delta =  3  } },
+    { id = "c", labels = ["Reading"], properties = { delta = -12 } },
+]
+edges = []
+
+[expected]
+columns = ["magnitude"]
+rows = [[7], [3], [12]]
+order = "bag"

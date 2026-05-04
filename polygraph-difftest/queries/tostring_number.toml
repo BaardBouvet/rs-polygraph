@@ -1,0 +1,16 @@
+name = "tostring_number"
+description = "toString() converts a numeric value to its string representation."
+spec_ref = "openCypher 9 §8.5.2 Conversion functions — toString()"
+
+cypher = """
+RETURN toString(42) AS s
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["s"]
+rows = [["42"]]
+order = "bag"

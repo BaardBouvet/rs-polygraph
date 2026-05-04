@@ -1,0 +1,21 @@
+name = "sum_integer_property"
+description = "SUM aggregation over an integer node property."
+spec_ref = "openCypher 9 §3.7.2 sum(); bag semantics — single output row"
+
+cypher = """
+MATCH (n:Person)
+RETURN sum(n.age) AS total
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", age = 10 } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob",   age = 20 } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol", age = 30 } },
+]
+edges = []
+
+[expected]
+columns = ["total"]
+rows = [[60]]
+order = "bag"

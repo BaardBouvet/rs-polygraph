@@ -1,0 +1,29 @@
+name = "optional_match_no_nulls"
+description = "OPTIONAL MATCH where every node has the optional relationship — no null rows."
+spec_ref = "openCypher 9 §3.4.4 OPTIONAL MATCH — when all optionals bind"
+
+cypher = """
+MATCH (n:Person)
+OPTIONAL MATCH (n)-[:WORKS_AT]->(c:Company)
+RETURN n.name AS name, c.name AS company
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"],  properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"],  properties = { name = "Bob"   } },
+    { id = "acme",  labels = ["Company"], properties = { name = "Acme"  } },
+    { id = "beta",  labels = ["Company"], properties = { name = "Beta"  } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "acme", rel_type = "WORKS_AT" },
+    { id = "e2", from = "bob",   to = "beta", rel_type = "WORKS_AT" },
+]
+
+[expected]
+columns = ["name", "company"]
+rows = [
+    ["Alice", "Acme"],
+    ["Bob",   "Beta"],
+]
+order = "bag"

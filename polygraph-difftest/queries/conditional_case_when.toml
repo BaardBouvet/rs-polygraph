@@ -1,0 +1,35 @@
+name = "conditional_case_when"
+description = "CASE with multiple WHEN branches and no initial expression (generic form)."
+spec_ref = "openCypher 9 §6.5.3 Conditional expressions — generic form CASE WHEN"
+
+cypher = """
+MATCH (n:Student)
+RETURN n.name AS name,
+       CASE
+         WHEN n.grade >= 90 THEN 'A'
+         WHEN n.grade >= 80 THEN 'B'
+         WHEN n.grade >= 70 THEN 'C'
+         ELSE 'F'
+       END AS letter
+ORDER BY n.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Student"], properties = { name = "Alice", grade = 92 } },
+    { id = "bob",   labels = ["Student"], properties = { name = "Bob",   grade = 75 } },
+    { id = "carol", labels = ["Student"], properties = { name = "Carol", grade = 88 } },
+    { id = "dave",  labels = ["Student"], properties = { name = "Dave",  grade = 60 } },
+]
+edges = []
+
+[expected]
+columns = ["name", "letter"]
+# Alice=92→A, Bob=75→C, Carol=88→B, Dave=60→F; ordered by name.
+rows = [
+    ["Alice", "A"],
+    ["Bob",   "C"],
+    ["Carol", "B"],
+    ["Dave",  "F"],
+]
+order = "ordered"

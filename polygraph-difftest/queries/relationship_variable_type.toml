@@ -1,0 +1,28 @@
+name = "relationship_variable_type"
+description = "Bind a relationship to a variable and return type() of it."
+spec_ref = "openCypher 9 §8.5.1 Scalar functions — type()"
+
+cypher = """
+MATCH (a:Person)-[r]->(b:Person)
+RETURN a.name AS from_name, type(r) AS rel_type, b.name AS to_name
+ORDER BY a.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob",   rel_type = "KNOWS"  },
+    { id = "e2", from = "bob",   to = "carol", rel_type = "LIKES"  },
+]
+
+[expected]
+columns = ["from_name", "rel_type", "to_name"]
+rows = [
+    ["Alice", "KNOWS", "Bob"],
+    ["Bob",   "LIKES", "Carol"],
+]
+order = "ordered"

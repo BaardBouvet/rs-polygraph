@@ -1,0 +1,22 @@
+name = "min_max_same_query"
+description = "Return both MIN() and MAX() in the same aggregation."
+spec_ref = "openCypher 9 §5.2.1 min() and max() combined"
+
+cypher = """
+MATCH (n:Sensor)
+RETURN min(n.reading) AS low, max(n.reading) AS high
+"""
+
+[fixture]
+nodes = [
+    { id = "s1", labels = ["Sensor"], properties = { reading = 12 } },
+    { id = "s2", labels = ["Sensor"], properties = { reading = 55 } },
+    { id = "s3", labels = ["Sensor"], properties = { reading = 7  } },
+    { id = "s4", labels = ["Sensor"], properties = { reading = 99 } },
+]
+edges = []
+
+[expected]
+columns = ["low", "high"]
+rows = [[7, 99]]
+order = "bag"

@@ -1,0 +1,26 @@
+name = "order_by_int_asc"
+description = "ORDER BY ascending — verifies the harness's ordered comparison mode."
+spec_ref = "openCypher 9 §3.5.6 ORDER BY"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.name AS name, n.age AS age
+ORDER BY n.age
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", age = 30 } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob",   age = 25 } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol", age = 40 } },
+]
+edges = []
+
+[expected]
+columns = ["name", "age"]
+rows = [
+    ["Bob",   25],
+    ["Alice", 30],
+    ["Carol", 40],
+]
+order = "ordered"

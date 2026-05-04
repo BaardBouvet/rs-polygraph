@@ -1,0 +1,28 @@
+name = "not_in_list"
+description = "NOT ... IN [...] excludes specific values."
+spec_ref = "openCypher 9 §6.4.2 IN operator — negated"
+
+cypher = """
+MATCH (n:Person)
+WHERE NOT n.name IN ['Alice', 'Dave']
+RETURN n.name AS name
+ORDER BY n.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+    { id = "dave",  labels = ["Person"], properties = { name = "Dave"  } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+# Alice and Dave are excluded; Bob and Carol remain, sorted.
+rows = [
+    ["Bob"],
+    ["Carol"],
+]
+order = "ordered"

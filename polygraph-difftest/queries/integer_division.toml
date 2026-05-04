@@ -1,0 +1,17 @@
+name = "integer_division"
+description = "Integer division via toInteger(a / b) produces truncated result."
+spec_ref = "openCypher 9 §6.3.3 Arithmetic — integer division"
+
+cypher = """
+RETURN toInteger(7 / 2) AS int_div, 7 / 2.0 AS float_div
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["int_div", "float_div"]
+# 7 / 2 in Cypher is already integer division when both are ints → 3; 7 / 2.0 = 3.5.
+rows = [[3, 3.5]]
+order = "bag"

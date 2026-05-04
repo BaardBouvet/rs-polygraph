@@ -21,6 +21,8 @@
 // * Relationship property access (reification path) → results may diverge.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Write as _;
+use std::sync::OnceLock;
 
 use cucumber::{gherkin::Step, given, then, when, World};
 use oxigraph::{
@@ -330,18 +332,41 @@ fn parse_duration_semantic(s: &str) -> Option<(i64, i64)> {
 
     // Parse date components.
     let mut dp = date_part;
-    let years = if dp.contains('Y') { parse_int_before(&mut dp, 'Y').unwrap_or(0) } else { 0 };
-    let months = if dp.contains('M') { parse_int_before(&mut dp, 'M').unwrap_or(0) } else { 0 };
-    let days = if dp.contains('D') { parse_int_before(&mut dp, 'D').unwrap_or(0) } else { 0 };
+    let years = if dp.contains('Y') {
+        parse_int_before(&mut dp, 'Y').unwrap_or(0)
+    } else {
+        0
+    };
+    let months = if dp.contains('M') {
+        parse_int_before(&mut dp, 'M').unwrap_or(0)
+    } else {
+        0
+    };
+    let days = if dp.contains('D') {
+        parse_int_before(&mut dp, 'D').unwrap_or(0)
+    } else {
+        0
+    };
 
     // Parse time components.
     let (hours, mins, secs_ns) = if let Some(tp) = time_part {
         let mut t = tp;
-        let h = if t.contains('H') { parse_int_before(&mut t, 'H').unwrap_or(0) } else { 0 };
-        let m = if t.contains('M') { parse_int_before(&mut t, 'M').unwrap_or(0) } else { 0 };
+        let h = if t.contains('H') {
+            parse_int_before(&mut t, 'H').unwrap_or(0)
+        } else {
+            0
+        };
+        let m = if t.contains('M') {
+            parse_int_before(&mut t, 'M').unwrap_or(0)
+        } else {
+            0
+        };
         let sns = if t.ends_with('S') {
             let sstr = &t[..t.len() - 1];
-            sstr.parse::<f64>().ok().map(|f| (f * 1_000_000_000.0).round() as i64).unwrap_or(0)
+            sstr.parse::<f64>()
+                .ok()
+                .map(|f| (f * 1_000_000_000.0).round() as i64)
+                .unwrap_or(0)
         } else {
             0
         };
@@ -829,9 +854,7 @@ fn expr_to_sparql_update_expr(expr: &Expression, var: &str) -> Option<String> {
 /// for CREATE clauses with pre-bound variables. Returns a SPARQL expression
 /// string and the set of (variable, property_key) pairs that need to be
 /// bound via OPTIONAL triple patterns in the WHERE.
-fn expr_to_create_insert_expr(
-    expr: &Expression,
-) -> Option<(String, Vec<(String, String)>)> {
+fn expr_to_create_insert_expr(expr: &Expression) -> Option<(String, Vec<(String, String)>)> {
     match expr {
         Expression::Literal(Literal::Integer(n)) => Some((format!("{n}"), vec![])),
         Expression::Literal(Literal::Float(f)) => Some((
@@ -1048,8 +1071,7 @@ fn check_nondetach_delete_connected(
                 for elem in &pattern.elements {
                     if let PatternElement::Node(node) = elem {
                         if let Some(var) = &node.variable {
-                            let mut triples =
-                                vec![format!("?{var} <{BASE}__node> <{BASE}__node>")];
+                            let mut triples = vec![format!("?{var} <{BASE}__node> <{BASE}__node>")];
                             for label in &node.labels {
                                 triples.push(format!("?{var} <{rdf_type}> <{BASE}{label}>"));
                             }
@@ -1255,10 +1277,7 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                 // Check if any CREATE pattern node references a pre-bound variable
                 // (from MATCH or WITH alias tracking) — either as the node variable
                 // or in a property expression.
-                fn expr_refs_bound(
-                    e: &Expression,
-                    bound: &HashMap<String, Vec<String>>,
-                ) -> bool {
+                fn expr_refs_bound(e: &Expression, bound: &HashMap<String, Vec<String>>) -> bool {
                     match e {
                         Expression::Variable(v) => bound.contains_key(v.as_str()),
                         Expression::Property(b, _) => expr_refs_bound(b, bound),
@@ -1294,9 +1313,9 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                 .properties
                                 .as_ref()
                                 .map(|props| {
-                                    props.iter().any(|(_, v)| {
-                                        expr_refs_bound(v, &match_node_triples)
-                                    })
+                                    props
+                                        .iter()
+                                        .any(|(_, v)| expr_refs_bound(v, &match_node_triples))
                                 })
                                 .unwrap_or(false);
                             var_bound || props_bound
@@ -1491,9 +1510,7 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                                     if let Some(props) = &node.properties {
                                         for (key, val) in props {
                                             if let Some(lit) = expr_to_sparql_lit(val) {
-                                                triples.push(format!(
-                                                    "?{var} <{BASE}{key}> {lit}"
-                                                ));
+                                                triples.push(format!("?{var} <{BASE}{key}> {lit}"));
                                             }
                                         }
                                     }
@@ -1645,10 +1662,13 @@ fn write_clauses_to_updates(cypher: &str) -> Vec<String> {
                             // Check if any MERGE property references an outer-scope variable
                             // that can't be resolved as a literal. In that case, skip the
                             // INSERT (the write can't be done statically without MATCH context).
-                            let has_unresolved_prop = node.properties.as_ref().map_or(false, |props| {
-                                props.iter().any(|(_, val)| resolve_val(val, &bindings_map).is_none()
-                                    && !matches!(val, Expression::Literal(_)))
-                            });
+                            let has_unresolved_prop =
+                                node.properties.as_ref().map_or(false, |props| {
+                                    props.iter().any(|(_, val)| {
+                                        resolve_val(val, &bindings_map).is_none()
+                                            && !matches!(val, Expression::Literal(_))
+                                    })
+                                });
                             if has_unresolved_prop {
                                 // Skip INSERT — properties reference MATCH-derived variables.
                                 continue;
@@ -2075,9 +2095,7 @@ async fn having_executed(world: &mut TckWorld, step: &Step) {
             .get_or_insert_with(|| OxStore(Store::new().unwrap()));
         for upd in &updates {
             if let Err(e) = store.0.update(upd.as_str()) {
-                eprintln!(
-                    "[TCK setup] UPDATE failed for {cypher:?}: {e}\nGenerated:\n{upd}"
-                );
+                eprintln!("[TCK setup] UPDATE failed for {cypher:?}: {e}\nGenerated:\n{upd}");
                 world.skip = true;
                 return;
             }
@@ -2480,7 +2498,10 @@ fn compare_results(world: &TckWorld, step: &Step, ordered: bool, sort_lists: boo
         let mut remaining_actual = actual.clone();
         let mut unmatched_expected: Vec<&Vec<Option<String>>> = Vec::new();
         for exp_row in &expected {
-            if let Some(pos) = remaining_actual.iter().position(|a_row| rows_equal(a_row, exp_row)) {
+            if let Some(pos) = remaining_actual
+                .iter()
+                .position(|a_row| rows_equal(a_row, exp_row))
+            {
                 remaining_actual.remove(pos);
             } else {
                 unmatched_expected.push(exp_row);
@@ -2715,6 +2736,41 @@ async fn run_tests() {
         TckWorld::cucumber()
             .with_default_cli() // bypass clap arg-parsing (nextest injects --exact/--nocapture)
             .max_concurrent_scenarios(None) // unlimited — each scenario is isolated
+            .after(|feature, _rule, scenario, ev, _world| {
+                let feature_path = feature
+                    .path
+                    .as_ref()
+                    .and_then(|p| p.to_str().map(str::to_owned))
+                    .map(|p| {
+                        // Make path workspace-relative for portable baselines.
+                        if let Some(idx) = p.find("tests/tck/features/") {
+                            p[idx..].to_owned()
+                        } else {
+                            p
+                        }
+                    })
+                    .unwrap_or_else(|| feature.name.clone());
+                let feature_name = feature.name.clone();
+                let scenario_name = scenario.name.clone();
+                let scenario_line = scenario.position.line;
+                let tags: Vec<String> = scenario.tags.clone();
+                let status = match ev {
+                    cucumber::event::ScenarioFinished::StepPassed => "pass",
+                    cucumber::event::ScenarioFinished::StepSkipped => "skip",
+                    cucumber::event::ScenarioFinished::StepFailed(_, _, _) => "fail",
+                    cucumber::event::ScenarioFinished::BeforeHookFailed(_) => "fail",
+                };
+                Box::pin(async move {
+                    record_scenario_result(
+                        &feature_path,
+                        &feature_name,
+                        &scenario_name,
+                        scenario_line,
+                        &tags,
+                        status,
+                    );
+                })
+            })
             .filter_run(&dir, move |_, _, sc| {
                 if !run_slow && sc.tags.iter().any(|t| t == "slow") {
                     return false;
@@ -2723,4 +2779,78 @@ async fn run_tests() {
             })
             .await;
     }
+}
+
+// ── Phase 0 instrumentation: per-scenario result capture (JSONL) ─────────────
+//
+// When the env var `POLYGRAPH_TCK_RESULTS_PATH` is set, the TCK harness appends
+// one JSON record per scenario to that file. The file is JSON-Lines (one
+// record per line) so it can be append-written from concurrent scenarios under
+// a Mutex, and consumed by `tools/tck_diff.sh` without a JSON-stream parser.
+//
+// Schema:
+//   { "feature_path": str, "feature": str, "scenario": str,
+//     "line": int, "tags": [str], "status": "pass" | "fail" | "skip" }
+//
+// See plans/spec-first-pivot.md Phase 0.
+
+static RESULTS_FILE: OnceLock<Option<std::sync::Mutex<std::fs::File>>> = OnceLock::new();
+
+fn record_scenario_result(
+    feature_path: &str,
+    feature_name: &str,
+    scenario_name: &str,
+    scenario_line: usize,
+    tags: &[String],
+    status: &str,
+) {
+    let cell = RESULTS_FILE.get_or_init(|| {
+        std::env::var("POLYGRAPH_TCK_RESULTS_PATH")
+            .ok()
+            .and_then(|p| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(&p)
+                    .ok()
+                    .map(std::sync::Mutex::new)
+            })
+    });
+    let Some(mutex) = cell.as_ref() else { return };
+    let tags_json = tags
+        .iter()
+        .map(|t| json_str(t))
+        .collect::<Vec<_>>()
+        .join(",");
+    let line = format!(
+        "{{\"feature_path\":{},\"feature\":{},\"scenario\":{},\"line\":{},\"tags\":[{}],\"status\":\"{}\"}}\n",
+        json_str(feature_path),
+        json_str(feature_name),
+        json_str(scenario_name),
+        scenario_line,
+        tags_json,
+        status
+    );
+    if let Ok(mut f) = mutex.lock() {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }

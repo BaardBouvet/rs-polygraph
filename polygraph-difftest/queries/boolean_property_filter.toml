@@ -1,0 +1,26 @@
+name = "boolean_property_filter"
+description = "Filter on a boolean property value."
+spec_ref = "openCypher 9 §6.4.1 Comparison — boolean property equality"
+
+cypher = """
+MATCH (n:Task)
+WHERE n.done = true
+RETURN n.title AS title
+ORDER BY n.title
+"""
+
+[fixture]
+nodes = [
+    { id = "t1", labels = ["Task"], properties = { title = "Code review",  done = true  } },
+    { id = "t2", labels = ["Task"], properties = { title = "Deploy",       done = false } },
+    { id = "t3", labels = ["Task"], properties = { title = "Write tests",  done = true  } },
+]
+edges = []
+
+[expected]
+columns = ["title"]
+rows = [
+    ["Code review"],
+    ["Write tests"],
+]
+order = "ordered"

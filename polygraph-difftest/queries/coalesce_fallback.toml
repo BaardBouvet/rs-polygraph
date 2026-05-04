@@ -1,0 +1,20 @@
+name = "coalesce_fallback"
+description = "coalesce() returns the first non-null argument — used when a property may be absent."
+spec_ref = "openCypher 9 §3.8.3 Miscellaneous functions — coalesce()"
+
+cypher = """
+MATCH (n:Person)
+RETURN coalesce(n.display_name, n.name) AS shown
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "alice", display_name = "Alice Smith" } },
+    { id = "b", labels = ["Person"], properties = { name = "bob" } },
+]
+edges = []
+
+[expected]
+columns = ["shown"]
+rows = [["Alice Smith"], ["bob"]]
+order = "bag"

@@ -1,0 +1,16 @@
+name = "string_size_function"
+description = "size() on a string literal returns character count."
+spec_ref = "openCypher 9 §8.3.15 String functions — size(string)"
+
+cypher = """
+RETURN size('hello') AS n
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["n"]
+rows = [[5]]
+order = "bag"

@@ -1,0 +1,32 @@
+name = "undirected_relationship_match"
+description = "Undirected relationship pattern (a)-[:R]-(b) matches either direction."
+spec_ref = "openCypher 9 §3.4.2 Relationship patterns — undirected"
+
+cypher = """
+MATCH (a:Person)-[:MARRIED]-(b:Person)
+RETURN a.name AS p1, b.name AS p2
+ORDER BY p1, p2
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+    { id = "dave",  labels = ["Person"], properties = { name = "Dave"  } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob",   rel_type = "MARRIED" },
+    { id = "e2", from = "carol", to = "dave",  rel_type = "MARRIED" },
+]
+
+[expected]
+columns = ["p1", "p2"]
+# Undirected: each edge appears once forward and once reverse.
+rows = [
+    ["Alice", "Bob"],
+    ["Bob",   "Alice"],
+    ["Carol", "Dave"],
+    ["Dave",  "Carol"],
+]
+order = "ordered"

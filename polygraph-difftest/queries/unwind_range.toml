@@ -1,0 +1,17 @@
+name = "unwind_range"
+description = "UNWIND over range(start, end) produces one row per integer in the range."
+spec_ref = "openCypher 9 §3.4.6 UNWIND; §3.8.7 range()"
+
+cypher = """
+UNWIND range(1, 4) AS n
+RETURN n
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["n"]
+rows = [[1], [2], [3], [4]]
+order = "ordered"

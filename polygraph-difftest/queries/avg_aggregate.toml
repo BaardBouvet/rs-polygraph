@@ -1,0 +1,22 @@
+name = "avg_aggregate"
+description = "AVG() aggregation over integer property."
+spec_ref = "openCypher 9 §5.2.1 avg()"
+
+cypher = """
+MATCH (n:Person)
+RETURN avg(n.age) AS average
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", age = 10 } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob",   age = 30 } },
+]
+edges = []
+
+[expected]
+columns = ["average"]
+# avg([10, 30]) = 20.0; SPARQL AVG of xsd:integer → xsd:decimal, runner maps to Float.
+# Cross-type comparison allows matching Int(20) with Float(20.0) too.
+rows = [[20.0]]
+order = "bag"

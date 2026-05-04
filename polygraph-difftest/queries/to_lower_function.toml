@@ -1,0 +1,20 @@
+name = "to_lower_function"
+description = "toLower() converts a string property to lower case."
+spec_ref = "openCypher 9 §3.8.2 String functions — toLower()"
+
+cypher = """
+MATCH (n:Person)
+RETURN toLower(n.name) AS lower_name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "b", labels = ["Person"], properties = { name = "BOB"   } },
+]
+edges = []
+
+[expected]
+columns = ["lower_name"]
+rows = [["alice"], ["bob"]]
+order = "bag"

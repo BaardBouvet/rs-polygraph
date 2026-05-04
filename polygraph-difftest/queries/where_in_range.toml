@@ -1,0 +1,28 @@
+name = "where_in_range"
+description = "Compound WHERE with AND on a numeric range (>= and <=)."
+spec_ref = "openCypher 9 §6.4.1 Boolean operators — AND in range predicate"
+
+cypher = """
+MATCH (n:Person)
+WHERE n.age >= 25 AND n.age <= 35
+RETURN n.name AS name
+ORDER BY n.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", age = 20 } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob",   age = 28 } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol", age = 32 } },
+    { id = "dave",  labels = ["Person"], properties = { name = "Dave",  age = 40 } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+# Alice(20) ✗, Bob(28) ✓, Carol(32) ✓, Dave(40) ✗; ordered by name.
+rows = [
+    ["Bob"],
+    ["Carol"],
+]
+order = "ordered"

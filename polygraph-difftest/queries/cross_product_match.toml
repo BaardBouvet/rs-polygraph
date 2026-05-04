@@ -1,0 +1,26 @@
+name = "cross_product_match"
+description = "Cartesian product of two independent MATCH patterns."
+spec_ref = "openCypher 9 §3.4.1 MATCH — multiple patterns produce the cross product"
+
+cypher = """
+MATCH (p:Person), (a:Animal)
+RETURN p.name AS person, a.name AS animal
+ORDER BY p.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice",    labels = ["Person"], properties = { name = "Alice"    } },
+    { id = "bob",      labels = ["Person"], properties = { name = "Bob"      } },
+    { id = "whiskers", labels = ["Animal"], properties = { name = "Whiskers" } },
+]
+edges = []
+
+[expected]
+columns = ["person", "animal"]
+# 2 persons × 1 animal = 2 rows; ordered by person name ascending.
+rows = [
+    ["Alice", "Whiskers"],
+    ["Bob",   "Whiskers"],
+]
+order = "ordered"

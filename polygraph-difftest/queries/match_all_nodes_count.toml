@@ -1,0 +1,21 @@
+name = "match_all_nodes_count"
+description = "MATCH (n) without a label counts every node in the graph."
+spec_ref = "openCypher 9 §3.4.1 MATCH — unlabeled node pattern"
+
+cypher = """
+MATCH (n)
+RETURN count(n) AS total
+"""
+
+[fixture]
+nodes = [
+    { id = "n1", labels = ["Person"],  properties = { name = "Alice"    } },
+    { id = "n2", labels = ["Person"],  properties = { name = "Bob"      } },
+    { id = "n3", labels = ["Company"], properties = { name = "Acme Inc" } },
+]
+edges = []
+
+[expected]
+columns = ["total"]
+rows = [[3]]
+order = "bag"

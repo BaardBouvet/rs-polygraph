@@ -1,5 +1,4 @@
 impl TranslationState {
-
     // ── RETURN clause ─────────────────────────────────────────────────────────
 
     /// Returns `(extra_bgp_triples, Some(projected_vars) | None for *, distinct_flag, aggregates, pre_extends, post_extends)`.
@@ -214,15 +213,21 @@ impl TranslationState {
                 }
                 // Handle startNode(r).prop and endNode(r).prop by rewriting to the
                 // underlying node variable's property access.
-                if let Expression::FunctionCall { name: fn_name, args: fn_args, .. } =
-                    base_expr.as_ref()
+                if let Expression::FunctionCall {
+                    name: fn_name,
+                    args: fn_args,
+                    ..
+                } = base_expr.as_ref()
                 {
                     let fn_lc = fn_name.to_ascii_lowercase();
                     if (fn_lc == "startnode" || fn_lc == "endnode") && fn_args.len() == 1 {
                         if let Some(Expression::Variable(rel_var)) = fn_args.first() {
                             if let Some(edge) = self.edge_map.get(rel_var.as_str()).cloned() {
-                                let node_term =
-                                    if fn_lc == "startnode" { &edge.src } else { &edge.dst };
+                                let node_term = if fn_lc == "startnode" {
+                                    &edge.src
+                                } else {
+                                    &edge.dst
+                                };
                                 if let TermPattern::Variable(node_var) = node_term {
                                     let rewritten_item = ReturnItem {
                                         expression: Expression::Property(
@@ -620,5 +625,4 @@ impl TranslationState {
             }
         }
     }
-
 }

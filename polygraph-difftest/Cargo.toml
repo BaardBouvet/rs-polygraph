@@ -1,0 +1,31 @@
+[package]
+name = "polygraph-difftest"
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Differential testing harness for rs-polygraph (Cypher → SPARQL transpiler)"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "difftest"
+path = "src/bin/difftest.rs"
+
+[dependencies]
+polygraph = { path = ".." }
+oxigraph = { version = "0.5", default-features = false, features = ["rdf-12"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+ureq = { version = "2.10", default-features = false, features = ["json", "tls"], optional = true }
+
+[features]
+default = []
+# Enable the live Neo4j HTTP driver. Requires NEO4J_URL, NEO4J_USER, NEO4J_PASSWORD env vars
+# at runtime. Without this feature, the curated suite runs against pre-recorded expected
+# results only.
+live-neo4j = ["dep:ureq"]
+
+[dev-dependencies]

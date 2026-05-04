@@ -1,0 +1,16 @@
+name = "string_concat_return"
+description = "String concatenation using the + operator in RETURN."
+spec_ref = "openCypher 9 §6.3.1 Arithmetic — + operator on strings"
+
+cypher = """
+RETURN 'Hello' + ' ' + 'World' AS greeting
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["greeting"]
+rows = [["Hello World"]]
+order = "bag"

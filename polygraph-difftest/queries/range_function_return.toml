@@ -1,0 +1,18 @@
+name = "range_function_return"
+description = "range(start, end) returns a list of integers from start to end inclusive."
+spec_ref = "openCypher 9 §8.4.5 List functions — range()"
+
+cypher = """
+RETURN range(1, 5) AS nums
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["nums"]
+# The translator serializes range() as a string literal "[1, 2, 3, 4, 5]" in the SPARQL
+# (SPARQL has no native list type, so lists are encoded as quoted strings).
+rows = [["[1, 2, 3, 4, 5]"]]
+order = "bag"

@@ -1,0 +1,32 @@
+name = "incoming_relationship_direction"
+description = "Left-pointing arrow (a)<-[:R]-(b) matches incoming relationship direction."
+spec_ref = "openCypher 9 §3.4.2 Relationship patterns — direction"
+
+cypher = """
+MATCH (manager:Person)<-[:REPORTS_TO]-(report:Person)
+RETURN manager.name AS mgr_name, report.name AS report_name
+ORDER BY mgr_name, report_name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+    { id = "dave",  labels = ["Person"], properties = { name = "Dave"  } },
+]
+edges = [
+    { id = "e1", from = "bob",   to = "alice", rel_type = "REPORTS_TO" },
+    { id = "e2", from = "carol", to = "alice", rel_type = "REPORTS_TO" },
+    { id = "e3", from = "dave",  to = "bob",   rel_type = "REPORTS_TO" },
+]
+
+[expected]
+columns = ["mgr_name", "report_name"]
+# alice receives reports from bob and carol; bob receives from dave.
+rows = [
+    ["Alice", "Bob"],
+    ["Alice", "Carol"],
+    ["Bob",   "Dave"],
+]
+order = "ordered"

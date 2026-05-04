@@ -1,0 +1,16 @@
+name = "sqrt_function"
+description = "sqrt() of a perfect square returns an exact float."
+spec_ref = "openCypher 9 §8.3.5 Mathematical functions — sqrt()"
+
+cypher = """
+RETURN sqrt(144.0) AS n
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["n"]
+rows = [[12.0]]
+order = "bag"

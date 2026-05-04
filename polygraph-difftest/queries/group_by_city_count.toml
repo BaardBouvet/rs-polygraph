@@ -1,0 +1,26 @@
+name = "group_by_city_count"
+description = "Implicit GROUP BY via WITH aggregation; tests partition-then-aggregate semantics."
+spec_ref = "openCypher 9 §3.5.3 WITH — grouping key; §3.7.1 count()"
+
+cypher = """
+MATCH (n:Person)
+WITH n.city AS city, count(*) AS cnt
+RETURN city, cnt
+ORDER BY city
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", city = "NYC" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob",   city = "NYC" } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol", city = "LA"  } },
+]
+edges = []
+
+[expected]
+columns = ["city", "cnt"]
+rows = [
+    ["LA",  1],
+    ["NYC", 2],
+]
+order = "ordered"

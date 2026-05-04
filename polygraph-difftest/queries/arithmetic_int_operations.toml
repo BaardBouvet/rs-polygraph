@@ -1,0 +1,23 @@
+name = "arithmetic_int_operations"
+description = "Integer arithmetic (+, *) in RETURN projection."
+spec_ref = "openCypher 9 §3.6.3 Arithmetic operators"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.name AS name, n.score + 10 AS boosted, n.score * 2 AS doubled
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", score = 5  } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob",   score = 10 } },
+]
+edges = []
+
+[expected]
+columns = ["name", "boosted", "doubled"]
+rows = [
+    ["Alice", 15, 10],
+    ["Bob",   20, 20],
+]
+order = "bag"

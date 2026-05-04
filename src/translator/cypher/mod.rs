@@ -1398,10 +1398,16 @@ impl TranslationState {
             return Ok(gp);
         }
 
-        // Q1: Quantifier tautology folding for Quantifier9–12 TCK patterns.
-        // Detects queries that test mathematical invariants of quantifiers over
-        // randomly-generated lists (using rand()/reverse()) and folds the
-        // expression to a constant result at translation time.
+        // SCENARIO-PATCH(Quantifier9, Quantifier10, Quantifier11, Quantifier12):
+        //   Quantifier tautology folding for Quantifier9–12 TCK patterns.
+        //   Detects queries that test mathematical invariants of quantifiers over
+        //   randomly-generated lists (using rand()/reverse()) and folds the
+        //   expression to a constant result at translation time.
+        //   This is a scenario-shaped pattern match, NOT a normalization rule
+        //   derivable from the openCypher spec. Phase 4 of plans/spec-first-pivot.md
+        //   should either generalize this into a value-flow analysis (folding any
+        //   provably-tautological boolean expression) or move it to an explicit
+        //   `Unsupported("non-deterministic predicate")` error path.
         if let Some(gp) = self.try_fold_quantifier_invariants(&clauses) {
             return Ok(gp);
         }
@@ -1736,6 +1742,38 @@ include!("patterns.rs");
 
 include!("return_proj.rs");
 
+/// Returns true if `expr` is statically known to produce a string value:
+/// - a string literal
+/// - an `Add(a, b)` where either sub-expression is a string producer (recursive),
+///   which covers chained `+` like `first + ' ' + last`
+/// - a call to a function that always returns a string value
+///
+/// NORMALIZATION(openCypher 9 §6.3.1): the `+` operator concatenates strings when
+/// either operand is a string.  Used by `translate_expr` Add handling to select
+/// SPARQL CONCAT over numeric `+`.
+fn expr_is_string_producer(expr: &Expression) -> bool {
+    match expr {
+        Expression::Literal(Literal::String(_)) => true,
+        Expression::Add(a, b) => expr_is_string_producer(a) || expr_is_string_producer(b),
+        Expression::FunctionCall { name, .. } => matches!(
+            name.to_ascii_lowercase().as_str(),
+            "tolower"
+                | "toupper"
+                | "tostring"
+                | "trim"
+                | "ltrim"
+                | "rtrim"
+                | "substring"
+                | "left"
+                | "right"
+                | "replace"
+                | "reverse"
+                | "split"
+        ),
+        _ => false,
+    }
+}
+
 impl TranslationState {
     // ── Expression translation ────────────────────────────────────────────────
 
@@ -1743,7 +1781,6 @@ impl TranslationState {
     ///
     /// Property accesses `n.key` are rewritten to fresh SPARQL variables, and
     /// the corresponding BGP triple is pushed into `extra_triples`.
-
     fn translate_expr(
         &mut self,
         expr: &Expression,
@@ -1817,15 +1854,21 @@ impl TranslationState {
                 }
                 // Handle startNode(r).prop and endNode(r).prop by rewriting to the
                 // underlying node variable's property access.
-                if let Expression::FunctionCall { name: fn_name, args: fn_args, .. } =
-                    base_expr.as_ref()
+                if let Expression::FunctionCall {
+                    name: fn_name,
+                    args: fn_args,
+                    ..
+                } = base_expr.as_ref()
                 {
                     let fn_lc = fn_name.to_ascii_lowercase();
                     if (fn_lc == "startnode" || fn_lc == "endnode") && fn_args.len() == 1 {
                         if let Some(Expression::Variable(rel_var)) = fn_args.first() {
                             if let Some(edge) = self.edge_map.get(rel_var.as_str()).cloned() {
-                                let node_term =
-                                    if fn_lc == "startnode" { &edge.src } else { &edge.dst };
+                                let node_term = if fn_lc == "startnode" {
+                                    &edge.src
+                                } else {
+                                    &edge.dst
+                                };
                                 if let TermPattern::Variable(node_var) = node_term {
                                     let rewritten = Expression::Property(
                                         Box::new(Expression::Variable(
@@ -2572,9 +2615,14 @@ impl TranslationState {
                     let lb = self.translate_expr(b, extra)?;
                     return Ok(temporal_add_sparql(la, lb, is_date_add));
                 }
-                // Check if either operand is a string literal → CONCAT semantics.
-                let a_is_string = matches!(a.as_ref(), Expression::Literal(Literal::String(_)));
-                let b_is_string = matches!(b.as_ref(), Expression::Literal(Literal::String(_)));
+                // Check if either operand is statically known to produce a string value
+                // → CONCAT semantics.  Detection is recursive so that chained + like
+                // `a + ' ' + b` (parsed as Add(Add(a,' '),b)) is also treated as CONCAT.
+                //
+                // NORMALIZATION(openCypher 9 §6.3.1): the `+` operator concatenates strings
+                // when either operand is a string; recursively true for nested additions.
+                let a_is_string = expr_is_string_producer(a);
+                let b_is_string = expr_is_string_producer(b);
                 // Check if both operands are property accesses — may be list concatenation.
                 // Use runtime type check: IF(STRSTARTS(?a, "["), concat_lists, numeric_add)
                 let is_list_candidate = matches!(a.as_ref(), Expression::Property(..))
@@ -2586,10 +2634,10 @@ impl TranslationState {
                     use spargebra::algebra::Function;
                     let str_la = SparExpr::FunctionCall(Function::Str, vec![la]);
                     let str_lb = SparExpr::FunctionCall(Function::Str, vec![lb]);
-                    return Ok(SparExpr::FunctionCall(
+                    Ok(SparExpr::FunctionCall(
                         Function::Concat,
                         vec![str_la, str_lb],
-                    ));
+                    ))
                 } else if is_list_candidate {
                     // List concat: CONCAT(SUBSTR(?a, 1, STRLEN(?a)-1), ", ", SUBSTR(?b, 2))
                     use spargebra::algebra::Function;

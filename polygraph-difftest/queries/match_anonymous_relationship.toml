@@ -1,0 +1,30 @@
+name = "match_with_anonymous_relationship"
+description = "Pattern with anonymous (no-type) relationship matches any relationship."
+spec_ref = "openCypher 9 §3.4.2 Relationship patterns — anonymous relationship"
+
+cypher = """
+MATCH (a:Node)-[]->(b:Node)
+RETURN a.val AS src, b.val AS dst
+ORDER BY a.val, b.val
+"""
+
+[fixture]
+nodes = [
+    { id = "n1", labels = ["Node"], properties = { val = 1 } },
+    { id = "n2", labels = ["Node"], properties = { val = 2 } },
+    { id = "n3", labels = ["Node"], properties = { val = 3 } },
+]
+edges = [
+    { id = "e1", from = "n1", to = "n2", rel_type = "NEXT" },
+    { id = "e2", from = "n2", to = "n3", rel_type = "NEXT" },
+    { id = "e3", from = "n1", to = "n3", rel_type = "SKIP" },
+]
+
+[expected]
+columns = ["src", "dst"]
+rows = [
+    [1, 2],
+    [1, 3],
+    [2, 3],
+]
+order = "ordered"

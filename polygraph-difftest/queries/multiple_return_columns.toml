@@ -1,0 +1,25 @@
+name = "multiple_return_columns"
+description = "RETURN with more than two columns from node properties."
+spec_ref = "openCypher 9 §3.5.1 RETURN — multiple projections"
+
+cypher = """
+MATCH (n:Product)
+RETURN n.id AS id, n.name AS name, n.price AS price
+"""
+
+[fixture]
+nodes = [
+    { id = "p1", labels = ["Product"], properties = { id = 1, name = "Widget", price = 9  } },
+    { id = "p2", labels = ["Product"], properties = { id = 2, name = "Gadget", price = 19 } },
+    { id = "p3", labels = ["Product"], properties = { id = 3, name = "Donut",  price = 2  } },
+]
+edges = []
+
+[expected]
+columns = ["id", "name", "price"]
+rows = [
+    [1, "Widget", 9],
+    [2, "Gadget", 19],
+    [3, "Donut",  2],
+]
+order = "bag"

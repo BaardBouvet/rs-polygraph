@@ -1,0 +1,28 @@
+name = "float_property_comparison"
+description = "Comparison of floating-point property values."
+spec_ref = "openCypher 9 §6.4.1 Comparison operators on Float values"
+
+cypher = """
+MATCH (n:Measurement)
+WHERE n.value > 3.5
+RETURN n.label AS label, n.value AS value
+ORDER BY n.value
+"""
+
+[fixture]
+nodes = [
+    { id = "m1", labels = ["Measurement"], properties = { label = "A", value = 1.5 } },
+    { id = "m2", labels = ["Measurement"], properties = { label = "B", value = 4.2 } },
+    { id = "m3", labels = ["Measurement"], properties = { label = "C", value = 3.5 } },
+    { id = "m4", labels = ["Measurement"], properties = { label = "D", value = 7.0 } },
+]
+edges = []
+
+[expected]
+columns = ["label", "value"]
+# Only values > 3.5: B(4.2) and D(7.0); C is exactly 3.5 (not strictly greater).
+rows = [
+    ["B", 4.2],
+    ["D", 7.0],
+]
+order = "ordered"

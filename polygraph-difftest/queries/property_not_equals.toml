@@ -1,0 +1,27 @@
+name = "property_not_equals"
+description = "Inequality operator <> filters out a specific property value."
+spec_ref = "openCypher 9 §6.4.1 Comparison operators — <>"
+
+cypher = """
+MATCH (n:Person)
+WHERE n.status <> 'inactive'
+RETURN n.name AS name
+ORDER BY n.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", status = "active"   } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob",   status = "inactive" } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol", status = "pending"  } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+# Bob is inactive and excluded; Alice and Carol remain.
+rows = [
+    ["Alice"],
+    ["Carol"],
+]
+order = "ordered"

@@ -1,0 +1,16 @@
+name = "string_substring"
+description = "substring(s, start, length) extracts a portion of a string."
+spec_ref = "openCypher 9 §8.3.7 String functions — substring()"
+
+cypher = """
+RETURN substring('Hello World', 6, 5) AS sub
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["sub"]
+rows = [["World"]]
+order = "bag"

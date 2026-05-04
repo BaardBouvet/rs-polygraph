@@ -1,0 +1,33 @@
+name = "count_nodes_per_relationship"
+description = "Count how many outgoing edges each node has."
+spec_ref = "openCypher 9 §5.2.2 count() — count edges per node"
+
+cypher = """
+MATCH (p:Person)
+OPTIONAL MATCH (p)-[:FOLLOWS]->(:Person)
+WITH p, count(*) AS following_count
+RETURN p.name AS name, following_count
+ORDER BY p.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob",   rel_type = "FOLLOWS" },
+    { id = "e2", from = "alice", to = "carol", rel_type = "FOLLOWS" },
+]
+
+[expected]
+columns = ["name", "following_count"]
+# Alice follows 2; Bob and Carol follow 0 (but count(*) with OPTIONAL returns 1 for the row).
+# In Cypher: OPTIONAL MATCH + count(*) counts 1 for the null row when there's no match.
+rows = [
+    ["Alice", 2],
+    ["Bob",   1],
+    ["Carol", 1],
+]
+order = "ordered"

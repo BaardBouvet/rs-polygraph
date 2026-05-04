@@ -1,0 +1,16 @@
+name = "string_left_function"
+description = "left(s, n) returns the first n characters of a string."
+spec_ref = "openCypher 9 §8.3.9 String functions — left()"
+
+cypher = """
+RETURN left('abcdef', 3) AS l
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["l"]
+rows = [["abc"]]
+order = "bag"

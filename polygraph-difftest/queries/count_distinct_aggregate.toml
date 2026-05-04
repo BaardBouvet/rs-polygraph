@@ -1,0 +1,22 @@
+name = "count_distinct_aggregate"
+description = "COUNT(DISTINCT expr) aggregation deduplicates values before counting."
+spec_ref = "openCypher 9 §5.2.2 count() with DISTINCT"
+
+cypher = """
+MATCH (n:Person)
+RETURN count(DISTINCT n.city) AS unique_cities
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", city = "NYC" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob",   city = "NYC" } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol", city = "LA"  } },
+]
+edges = []
+
+[expected]
+columns = ["unique_cities"]
+# Alice and Bob share NYC; Carol has LA → 2 distinct cities.
+rows = [[2]]
+order = "bag"

@@ -1,0 +1,27 @@
+name = "multiple_labels_filter"
+description = "MATCH on node with multiple labels both of which must be present."
+spec_ref = "openCypher 9 §3.4.1 MATCH — multiple label constraints"
+
+cypher = """
+MATCH (n:Person:Manager)
+RETURN n.name AS name
+ORDER BY n.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person", "Manager"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"],            properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person", "Manager"], properties = { name = "Carol" } },
+    { id = "dave",  labels = ["Manager"],           properties = { name = "Dave"  } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+# Only nodes with BOTH Person AND Manager labels: Alice and Carol.
+rows = [
+    ["Alice"],
+    ["Carol"],
+]
+order = "ordered"

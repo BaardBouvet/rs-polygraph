@@ -1,0 +1,17 @@
+name = "round_function"
+description = "round() rounds a float to the nearest integer value (as float)."
+spec_ref = "openCypher 9 §8.3.3 Mathematical functions — round()"
+
+cypher = """
+RETURN round(3.4) AS lo, round(3.6) AS hi
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["lo", "hi"]
+# round(3.4) = 3.0, round(3.6) = 4.0 (SPARQL ROUND returns double).
+rows = [[3.0, 4.0]]
+order = "bag"

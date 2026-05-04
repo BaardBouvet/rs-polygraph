@@ -1,0 +1,35 @@
+name = "match_anonymous_target"
+description = "Pattern with anonymous target node () — only the source is projected."
+spec_ref = "openCypher 9 §3.4.1 MATCH — anonymous node in pattern"
+
+cypher = """
+MATCH (n:Person)-[:MANAGES]->()
+RETURN n.name AS manager
+ORDER BY n.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"],  properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"],  properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"],  properties = { name = "Carol" } },
+    { id = "team1", labels = ["Team"],    properties = { name = "Alpha" } },
+    { id = "team2", labels = ["Team"],    properties = { name = "Beta"  } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "team1", rel_type = "MANAGES" },
+    { id = "e2", from = "alice", to = "team2", rel_type = "MANAGES" },
+    { id = "e3", from = "bob",   to = "team1", rel_type = "MANAGES" },
+    # Carol manages nothing.
+]
+
+[expected]
+columns = ["manager"]
+# Alice manages two teams → appears twice; Bob appears once; Carol has no edge → excluded.
+# Sorted by name; Alice appears before Bob; Alice appears twice.
+rows = [
+    ["Alice"],
+    ["Alice"],
+    ["Bob"],
+]
+order = "ordered"

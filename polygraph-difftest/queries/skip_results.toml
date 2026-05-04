@@ -1,0 +1,28 @@
+name = "skip_results"
+description = "SKIP n offsets the start of the result window."
+spec_ref = "openCypher 9 §7.3 SKIP"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.name AS name
+ORDER BY n.name
+SKIP 2
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+    { id = "dave",  labels = ["Person"], properties = { name = "Dave"  } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+# Sorted: Alice, Bob, Carol, Dave.  SKIP 2 drops Alice and Bob.
+rows = [
+    ["Carol"],
+    ["Dave"],
+]
+order = "ordered"

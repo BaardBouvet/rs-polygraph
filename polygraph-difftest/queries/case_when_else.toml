@@ -1,0 +1,26 @@
+name = "case_when_else"
+description = "CASE WHEN simple conditional expression in RETURN projection."
+spec_ref = "openCypher 9 §3.6.9 CASE expressions"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.name AS name,
+       CASE WHEN n.age >= 30 THEN 'senior' ELSE 'junior' END AS tier
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", age = 35 } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob",   age = 22 } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol", age = 30 } },
+]
+edges = []
+
+[expected]
+columns = ["name", "tier"]
+rows = [
+    ["Alice", "senior"],
+    ["Bob",   "junior"],
+    ["Carol", "senior"],
+]
+order = "bag"

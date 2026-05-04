@@ -1,0 +1,29 @@
+name = "string_length_function"
+description = "size() on a string property returns character count."
+spec_ref = "openCypher 9 §8.3.15 String functions — size(string)"
+
+cypher = """
+MATCH (n:Word)
+RETURN n.text AS word, size(n.text) AS len
+ORDER BY len, n.text
+"""
+
+[fixture]
+nodes = [
+    { id = "w1", labels = ["Word"], properties = { text = "hi"      } },
+    { id = "w2", labels = ["Word"], properties = { text = "hello"   } },
+    { id = "w3", labels = ["Word"], properties = { text = "world"   } },
+    { id = "w4", labels = ["Word"], properties = { text = "a"       } },
+]
+edges = []
+
+[expected]
+columns = ["word", "len"]
+# Sorted by len ASC then text ASC: a(1), hi(2), hello(5), world(5).
+rows = [
+    ["a",     1],
+    ["hi",    2],
+    ["hello", 5],
+    ["world", 5],
+]
+order = "ordered"

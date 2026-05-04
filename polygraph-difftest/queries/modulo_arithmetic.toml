@@ -1,0 +1,29 @@
+name = "modulo_arithmetic"
+description = "Modulo operator on integer expressions."
+spec_ref = "openCypher 9 §6.3.3 Arithmetic — remainder operator %"
+
+cypher = """
+MATCH (n:Number)
+RETURN n.val AS val, n.val % 3 AS rem
+ORDER BY n.val
+"""
+
+[fixture]
+nodes = [
+    { id = "n0", labels = ["Number"], properties = { val = 0 } },
+    { id = "n1", labels = ["Number"], properties = { val = 1 } },
+    { id = "n2", labels = ["Number"], properties = { val = 4 } },
+    { id = "n3", labels = ["Number"], properties = { val = 7 } },
+]
+edges = []
+
+[expected]
+columns = ["val", "rem"]
+# 0 % 3 = 0, 1 % 3 = 1, 4 % 3 = 1, 7 % 3 = 1
+rows = [
+    [0, 0],
+    [1, 1],
+    [4, 1],
+    [7, 1],
+]
+order = "ordered"

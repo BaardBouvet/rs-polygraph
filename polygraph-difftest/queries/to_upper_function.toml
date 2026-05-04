@@ -1,0 +1,20 @@
+name = "to_upper_function"
+description = "toUpper() converts a string property to upper case."
+spec_ref = "openCypher 9 §3.8.2 String functions — toUpper()"
+
+cypher = """
+MATCH (n:Person)
+RETURN toUpper(n.name) AS upper_name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "alice" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob"   } },
+]
+edges = []
+
+[expected]
+columns = ["upper_name"]
+rows = [["ALICE"], ["BOB"]]
+order = "bag"

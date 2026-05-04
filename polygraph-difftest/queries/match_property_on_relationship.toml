@@ -1,0 +1,32 @@
+name = "match_property_on_relationship"
+description = "Match using an inline property predicate on the relationship pattern."
+spec_ref = "openCypher 9 §3.4.2 Relationship patterns — relationship property predicate"
+
+cypher = """
+MATCH (a:Person)-[r:RATED {stars: 5}]->(m:Movie)
+RETURN a.name AS reviewer, m.title AS movie
+ORDER BY a.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice",  labels = ["Person"], properties = { name = "Alice"       } },
+    { id = "bob",    labels = ["Person"], properties = { name = "Bob"         } },
+    { id = "matrix", labels = ["Movie"],  properties = { title = "The Matrix" } },
+    { id = "jaws",   labels = ["Movie"],  properties = { title = "Jaws"       } },
+]
+edges = [
+    { id = "r1", from = "alice", to = "matrix", rel_type = "RATED", properties = { stars = 5 } },
+    { id = "r2", from = "bob",   to = "matrix", rel_type = "RATED", properties = { stars = 3 } },
+    { id = "r3", from = "alice", to = "jaws",   rel_type = "RATED", properties = { stars = 5 } },
+    { id = "r4", from = "bob",   to = "jaws",   rel_type = "RATED", properties = { stars = 4 } },
+]
+
+[expected]
+columns = ["reviewer", "movie"]
+# Only 5-star ratings: Alice→Matrix, Alice→Jaws.
+rows = [
+    ["Alice", "Jaws"],
+    ["Alice", "The Matrix"],
+]
+order = "ordered"

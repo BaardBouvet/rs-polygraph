@@ -1,0 +1,21 @@
+name = "max_integer_property"
+description = "MAX aggregation returns the largest integer property value."
+spec_ref = "openCypher 9 §3.7.4 max()"
+
+cypher = """
+MATCH (n:Person)
+RETURN max(n.age) AS oldest
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", age = 30 } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob",   age = 20 } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol", age = 25 } },
+]
+edges = []
+
+[expected]
+columns = ["oldest"]
+rows = [[30]]
+order = "bag"

@@ -1,0 +1,27 @@
+name = "order_by_non_returned_prop"
+description = "ORDER BY a property that is not in the RETURN clause — sort key must be hidden from the final projection."
+spec_ref = "openCypher 9 §7.1 ORDER BY — sort keys need not appear in RETURN"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.name AS name
+ORDER BY n.age ASC
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Carol", age = 30 } },
+    { id = "b", labels = ["Person"], properties = { name = "Alice", age = 25 } },
+    { id = "c", labels = ["Person"], properties = { name = "Bob",   age = 40 } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+# Sorted by age ascending: Alice(25), Carol(30), Bob(40).
+rows = [
+    ["Alice"],
+    ["Carol"],
+    ["Bob"],
+]
+order = "ordered"

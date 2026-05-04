@@ -1,0 +1,23 @@
+name = "limit_and_skip"
+description = "SKIP/LIMIT pagination on an ordered result."
+spec_ref = "openCypher 9 §3.5.6 LIMIT/SKIP"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.name AS name
+ORDER BY n.name
+SKIP 1 LIMIT 1
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob" } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [["Bob"]]
+order = "ordered"

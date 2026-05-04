@@ -1,0 +1,16 @@
+name = "literal_return_no_match"
+description = "RETURN without a MATCH clause — a constant expression query."
+spec_ref = "openCypher 9 §3.5.1 RETURN; constant expression evaluation"
+
+cypher = """
+RETURN 6 * 7 AS answer
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["answer"]
+rows = [[42]]
+order = "bag"

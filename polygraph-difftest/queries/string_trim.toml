@@ -1,0 +1,16 @@
+name = "string_trim"
+description = "trim() removes leading and trailing whitespace."
+spec_ref = "openCypher 9 §8.3.11 String functions — trim()"
+
+cypher = """
+RETURN trim('  hello  ') AS s
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["s"]
+rows = [["hello"]]
+order = "bag"

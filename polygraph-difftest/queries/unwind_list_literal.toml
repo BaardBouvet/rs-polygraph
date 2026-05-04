@@ -1,0 +1,17 @@
+name = "unwind_list_literal"
+description = "UNWIND over an inline list literal produces one row per element."
+spec_ref = "openCypher 9 §3.4.6 UNWIND"
+
+cypher = """
+UNWIND [10, 20, 30] AS x
+RETURN x
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["x"]
+rows = [[10], [20], [30]]
+order = "bag"

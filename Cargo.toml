@@ -7,6 +7,9 @@ license = "Apache-2.0"
 description = "A Rust library that transpiles openCypher and ISO GQL queries into SPARQL 1.1 algebra"
 repository = "https://github.com/BaardBouvet/rs-polygraph"
 
+[workspace]
+members = ["polygraph-difftest"]
+
 [lib]
 name = "polygraph"
 path = "src/lib.rs"

@@ -1,0 +1,27 @@
+name = "sum_aggregate_grouped"
+description = "SUM() per group — total sales per department."
+spec_ref = "openCypher 9 §5.2.1 sum() with implicit grouping"
+
+cypher = """
+MATCH (n:Sale)
+WITH n.dept AS dept, sum(n.amount) AS total
+RETURN dept, total
+ORDER BY total DESC
+"""
+
+[fixture]
+nodes = [
+    { id = "s1", labels = ["Sale"], properties = { dept = "Eng", amount = 100 } },
+    { id = "s2", labels = ["Sale"], properties = { dept = "Eng", amount = 200 } },
+    { id = "s3", labels = ["Sale"], properties = { dept = "HR",  amount = 150 } },
+]
+edges = []
+
+[expected]
+columns = ["dept", "total"]
+# Eng: 100+200=300; HR: 150; sorted by total DESC.
+rows = [
+    ["Eng", 300],
+    ["HR",  150],
+]
+order = "ordered"

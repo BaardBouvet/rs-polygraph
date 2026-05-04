@@ -1,0 +1,16 @@
+name = "string_replace"
+description = "replace(s, search, replacement) replaces all occurrences."
+spec_ref = "openCypher 9 §8.3.12 String functions — replace()"
+
+cypher = """
+RETURN replace('hello world world', 'world', 'earth') AS s
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["s"]
+rows = [["hello earth earth"]]
+order = "bag"

@@ -1,0 +1,26 @@
+name = "string_concat_chained"
+description = "Chained + operator over string properties — must produce CONCAT, not arithmetic addition."
+spec_ref = "openCypher 9 §6.3.1 Arithmetic — nested + with string operands becomes concatenation"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.first + ' ' + n.last AS full_name
+ORDER BY full_name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { first = "Alice", last = "Smith"  } },
+    { id = "b", labels = ["Person"], properties = { first = "Bob",   last = "Jones"  } },
+    { id = "c", labels = ["Person"], properties = { first = "Carol", last = "Taylor" } },
+]
+edges = []
+
+[expected]
+columns = ["full_name"]
+rows = [
+    ["Alice Smith"],
+    ["Bob Jones"],
+    ["Carol Taylor"],
+]
+order = "ordered"

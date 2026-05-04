@@ -1,0 +1,28 @@
+name = "where_less_than"
+description = "Less-than comparison operator in WHERE clause."
+spec_ref = "openCypher 9 §6.4.1 Comparison operators — <"
+
+cypher = """
+MATCH (n:Item)
+WHERE n.price < 20
+RETURN n.name AS name, n.price AS price
+ORDER BY n.price
+"""
+
+[fixture]
+nodes = [
+    { id = "i1", labels = ["Item"], properties = { name = "Pen",    price = 2  } },
+    { id = "i2", labels = ["Item"], properties = { name = "Book",   price = 15 } },
+    { id = "i3", labels = ["Item"], properties = { name = "Chair",  price = 80 } },
+    { id = "i4", labels = ["Item"], properties = { name = "Desk",   price = 200} },
+]
+edges = []
+
+[expected]
+columns = ["name", "price"]
+# Only items with price < 20: Pen(2), Book(15).
+rows = [
+    ["Pen",  2],
+    ["Book", 15],
+]
+order = "ordered"

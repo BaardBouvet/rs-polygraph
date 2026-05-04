@@ -1,0 +1,27 @@
+name = "with_having_equivalent"
+description = "WITH aggregation + WHERE acts as a HAVING clause."
+spec_ref = "openCypher 9 §4.1 WITH — filtering on aggregated result (HAVING pattern)"
+
+cypher = """
+MATCH (n:Person)
+WITH n.city AS city, count(*) AS cnt
+WHERE cnt > 1
+RETURN city, cnt
+ORDER BY city
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", city = "NYC" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob",   city = "NYC" } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol", city = "LA"  } },
+]
+edges = []
+
+[expected]
+columns = ["city", "cnt"]
+# NYC has count 2 (> 1) → included; LA has count 1 → excluded.
+rows = [
+    ["NYC", 2],
+]
+order = "ordered"

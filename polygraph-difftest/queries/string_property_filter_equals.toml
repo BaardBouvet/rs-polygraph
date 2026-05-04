@@ -1,0 +1,26 @@
+name = "string_property_filter_equals"
+description = "Exact string equality in WHERE clause on a node property."
+spec_ref = "openCypher 9 §6.4.1 Comparison — string equality"
+
+cypher = """
+MATCH (n:Book)
+WHERE n.genre = 'sci-fi'
+RETURN n.title AS title
+ORDER BY n.title
+"""
+
+[fixture]
+nodes = [
+    { id = "b1", labels = ["Book"], properties = { title = "Dune",            genre = "sci-fi"  } },
+    { id = "b2", labels = ["Book"], properties = { title = "Neuromancer",     genre = "sci-fi"  } },
+    { id = "b3", labels = ["Book"], properties = { title = "Pride & Prejudice",genre = "romance" } },
+]
+edges = []
+
+[expected]
+columns = ["title"]
+rows = [
+    ["Dune"],
+    ["Neuromancer"],
+]
+order = "ordered"

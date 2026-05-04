@@ -1,0 +1,27 @@
+name = "where_regex"
+description = "Regular expression predicate =~ filters by pattern."
+spec_ref = "openCypher 9 §6.4.3 String operator =~ (regex)"
+
+cypher = """
+MATCH (n:Person)
+WHERE n.email =~ '.*@example[.]com'
+RETURN n.name AS name
+ORDER BY n.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", email = "alice@example.com" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob",   email = "bob@other.org"    } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol", email = "carol@example.com"} },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+# Only @example.com addresses: Alice and Carol.
+rows = [
+    ["Alice"],
+    ["Carol"],
+]
+order = "ordered"

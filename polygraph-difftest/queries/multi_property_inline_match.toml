@@ -1,0 +1,27 @@
+name = "multi_property_node_creation_filter"
+description = "Match a node using an inline property map in the MATCH pattern."
+spec_ref = "openCypher 9 §3.4.1 MATCH — inline property map predicate"
+
+cypher = """
+MATCH (n:Config {env: 'prod', active: true})
+RETURN n.name AS name
+ORDER BY n.name
+"""
+
+[fixture]
+nodes = [
+    { id = "c1", labels = ["Config"], properties = { name = "db-prod",    env = "prod", active = true  } },
+    { id = "c2", labels = ["Config"], properties = { name = "db-staging", env = "staging", active = true } },
+    { id = "c3", labels = ["Config"], properties = { name = "cache-prod", env = "prod", active = false } },
+    { id = "c4", labels = ["Config"], properties = { name = "api-prod",   env = "prod", active = true  } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+# Must match env='prod' AND active=true: c1 and c4.
+rows = [
+    ["api-prod"],
+    ["db-prod"],
+]
+order = "ordered"

@@ -1,0 +1,27 @@
+name = "unwind_with_match"
+description = "UNWIND a literal list, then MATCH to look up each element."
+spec_ref = "openCypher 9 §5.3 UNWIND with subsequent MATCH"
+
+cypher = """
+UNWIND ['Alice', 'Carol'] AS target_name
+MATCH (n:Person {name: target_name})
+RETURN n.name AS name, n.age AS age
+ORDER BY n.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", age = 30 } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob",   age = 25 } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol", age = 35 } },
+]
+edges = []
+
+[expected]
+columns = ["name", "age"]
+# Only Alice and Carol are in the UNWIND list.
+rows = [
+    ["Alice", 30],
+    ["Carol", 35],
+]
+order = "ordered"

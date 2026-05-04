@@ -1,0 +1,27 @@
+name = "with_order_and_limit"
+description = "WITH clause with ORDER BY and LIMIT to take top-N."
+spec_ref = "openCypher 9 §4.1 WITH — with ORDER BY and LIMIT"
+
+cypher = """
+MATCH (n:Product)
+WITH n ORDER BY n.price DESC LIMIT 2
+RETURN n.name AS name, n.price AS price
+"""
+
+[fixture]
+nodes = [
+    { id = "p1", labels = ["Product"], properties = { name = "Widget",  price = 10  } },
+    { id = "p2", labels = ["Product"], properties = { name = "Gadget",  price = 50  } },
+    { id = "p3", labels = ["Product"], properties = { name = "Gizmo",   price = 30  } },
+    { id = "p4", labels = ["Product"], properties = { name = "Doohickey",price = 5  } },
+]
+edges = []
+
+[expected]
+columns = ["name", "price"]
+# Top 2 by price DESC: Gadget(50), Gizmo(30).
+rows = [
+    ["Gadget", 50],
+    ["Gizmo",  30],
+]
+order = "ordered"

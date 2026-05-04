@@ -1,0 +1,27 @@
+name = "order_by_desc"
+description = "ORDER BY descending on a numeric property."
+spec_ref = "openCypher 9 §7.1 ORDER BY — DESC keyword"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.name AS name, n.score AS score
+ORDER BY n.score DESC
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", score = 85 } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob",   score = 72 } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol", score = 92 } },
+]
+edges = []
+
+[expected]
+columns = ["name", "score"]
+# Sorted by score descending: Carol(92), Alice(85), Bob(72).
+rows = [
+    ["Carol", 92],
+    ["Alice", 85],
+    ["Bob",   72],
+]
+order = "ordered"

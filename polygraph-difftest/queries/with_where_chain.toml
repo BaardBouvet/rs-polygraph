@@ -1,0 +1,23 @@
+name = "with_where_chain"
+description = "WITH clause that acts as an intermediate projection followed by a WHERE filter."
+spec_ref = "openCypher 9 §3.5.3 WITH; §3.5.4 WHERE"
+
+cypher = """
+MATCH (n:Person)
+WITH n
+WHERE n.age > 28
+RETURN n.name AS name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", age = 30 } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob",   age = 25 } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol", age = 40 } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [["Alice"], ["Carol"]]
+order = "bag"

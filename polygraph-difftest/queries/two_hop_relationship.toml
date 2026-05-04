@@ -1,0 +1,29 @@
+name = "two_hop_relationship"
+description = "Two consecutive relationships in a MATCH pattern — transitivity via explicit hops."
+spec_ref = "openCypher 9 §3.4.2 Relationship patterns; §3.4.3 Pattern path"
+
+cypher = """
+MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)
+RETURN a.name AS src, c.name AS dst
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+    { id = "dave",  labels = ["Person"], properties = { name = "Dave"  } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob",   rel_type = "KNOWS" },
+    { id = "e2", from = "bob",   to = "carol", rel_type = "KNOWS" },
+    { id = "e3", from = "bob",   to = "dave",  rel_type = "KNOWS" },
+]
+
+[expected]
+columns = ["src", "dst"]
+rows = [
+    ["Alice", "Carol"],
+    ["Alice", "Dave"],
+]
+order = "bag"

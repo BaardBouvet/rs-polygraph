@@ -1,0 +1,22 @@
+name = "is_null_optional_property"
+description = "IS NULL on a property that some nodes are missing detects absent triples."
+spec_ref = "openCypher 9 §3.6.7 null handling; §IS NULL predicate"
+
+cypher = """
+MATCH (n:Person)
+WHERE n.nickname IS NULL
+RETURN n.name AS name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", nickname = "Ali" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob" } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [["Bob"], ["Carol"]]
+order = "bag"

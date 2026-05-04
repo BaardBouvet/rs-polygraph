@@ -1,0 +1,28 @@
+name = "with_rename_variable"
+description = "WITH can rename a variable for use in subsequent clauses."
+spec_ref = "openCypher 9 §4.1 WITH — aliasing expressions"
+
+cypher = """
+MATCH (n:Person)
+WITH n.name AS full_name, n.age AS years
+WHERE years >= 30
+RETURN full_name AS name, years AS age
+ORDER BY full_name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", age = 32 } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob",   age = 25 } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol", age = 30 } },
+]
+edges = []
+
+[expected]
+columns = ["name", "age"]
+# Alice(32) and Carol(30) pass the WHERE years >= 30; Bob(25) does not.
+rows = [
+    ["Alice", 32],
+    ["Carol", 30],
+]
+order = "ordered"

@@ -1,0 +1,32 @@
+name = "case_simple_form"
+description = "Simple CASE — CASE expr WHEN val THEN result ... END."
+spec_ref = "openCypher 9 §6.5.2 Conditional expressions — simple form CASE expr WHEN"
+
+cypher = """
+MATCH (n:Traffic)
+RETURN n.color AS color,
+       CASE n.color
+         WHEN 'red'    THEN 'stop'
+         WHEN 'yellow' THEN 'slow'
+         WHEN 'green'  THEN 'go'
+         ELSE 'unknown'
+       END AS action
+ORDER BY n.color
+"""
+
+[fixture]
+nodes = [
+    { id = "l1", labels = ["Traffic"], properties = { color = "green"  } },
+    { id = "l2", labels = ["Traffic"], properties = { color = "red"    } },
+    { id = "l3", labels = ["Traffic"], properties = { color = "yellow" } },
+]
+edges = []
+
+[expected]
+columns = ["color", "action"]
+rows = [
+    ["green",  "go"  ],
+    ["red",    "stop"],
+    ["yellow", "slow"],
+]
+order = "ordered"

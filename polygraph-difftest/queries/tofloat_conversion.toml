@@ -1,0 +1,16 @@
+name = "tofloat_conversion"
+description = "toFloat() converts an integer or string to a floating-point number."
+spec_ref = "openCypher 9 §8.5.2 Conversion functions — toFloat()"
+
+cypher = """
+RETURN toFloat(7) AS from_int, toFloat('3.14') AS from_str
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["from_int", "from_str"]
+rows = [[7.0, 3.14]]
+order = "bag"

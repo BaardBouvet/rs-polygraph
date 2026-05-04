@@ -1,0 +1,31 @@
+name = "order_by_multiple_cols"
+description = "ORDER BY two columns — primary DESC, secondary ASC."
+spec_ref = "openCypher 9 §7.1 ORDER BY — multiple sort keys"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.name AS name, n.city AS city
+ORDER BY city DESC, name ASC
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", city = "NYC" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob",   city = "LA"  } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol", city = "NYC" } },
+    { id = "diana", labels = ["Person"], properties = { name = "Diana", city = "LA"  } },
+]
+edges = []
+
+[expected]
+columns = ["name", "city"]
+# city DESC: NYC > LA (lexicographic desc).
+# Within NYC: name ASC → Alice, Carol.
+# Within LA:  name ASC → Bob, Diana.
+rows = [
+    ["Alice", "NYC"],
+    ["Carol", "NYC"],
+    ["Bob",   "LA"],
+    ["Diana", "LA"],
+]
+order = "ordered"

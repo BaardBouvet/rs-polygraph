@@ -1,0 +1,23 @@
+name = "and_or_predicates"
+description = "AND and OR boolean predicates in WHERE clause."
+spec_ref = "openCypher 9 §3.6.1 Boolean operators — AND; OR"
+
+cypher = """
+MATCH (n:Person)
+WHERE (n.age > 20 AND n.age < 35) OR n.name = 'Elder'
+RETURN n.name AS name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", age = 25 } },
+    { id = "b", labels = ["Person"], properties = { name = "Teen",  age = 18 } },
+    { id = "c", labels = ["Person"], properties = { name = "Elder", age = 70 } },
+    { id = "d", labels = ["Person"], properties = { name = "Bob",   age = 30 } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [["Alice"], ["Elder"], ["Bob"]]
+order = "bag"

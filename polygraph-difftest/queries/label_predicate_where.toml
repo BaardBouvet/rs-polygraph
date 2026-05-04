@@ -1,0 +1,27 @@
+name = "label_predicate_where"
+description = "Label check in WHERE clause using n:Label syntax."
+spec_ref = "openCypher 9 §6.4.4 Label expressions in WHERE"
+
+cypher = """
+MATCH (n)
+WHERE n:Person
+RETURN n.name AS name
+ORDER BY n.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "fido",  labels = ["Dog"],    properties = { name = "Fido"  } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+# Only Person nodes; Fido is a Dog and excluded.
+rows = [
+    ["Alice"],
+    ["Bob"],
+]
+order = "ordered"

@@ -1,0 +1,21 @@
+name = "distinct_string_column"
+description = "DISTINCT deduplicates repeated values in a projected column."
+spec_ref = "openCypher 9 §3.5.1 RETURN DISTINCT; bag semantics §2.3"
+
+cypher = """
+MATCH (n:Person)
+RETURN DISTINCT n.city AS city
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", city = "NYC" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob",   city = "NYC" } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol", city = "LA"  } },
+]
+edges = []
+
+[expected]
+columns = ["city"]
+rows = [["NYC"], ["LA"]]
+order = "bag"

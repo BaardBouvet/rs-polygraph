@@ -1,0 +1,32 @@
+name = "not_conjunction_predicate"
+description = "NOT(compound expression) — negate an AND compound."
+spec_ref = "openCypher 9 §6.4.1 Boolean operators — NOT applied to conjunction"
+
+cypher = """
+MATCH (n:Person)
+WHERE NOT (n.age < 30 AND n.city = 'NYC')
+RETURN n.name AS name
+ORDER BY n.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", age = 25, city = "NYC"  } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob",   age = 35, city = "NYC"  } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol", age = 25, city = "LA"   } },
+    { id = "dave",  labels = ["Person"], properties = { name = "Dave",  age = 35, city = "LA"   } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+# NOT(age<30 AND city='NYC'): Alice (25, NYC) satisfies the inner → excluded.
+# Bob: NOT(35<30 AND 'NYC'='NYC') = NOT(false AND true) = NOT false = true → included.
+# Carol: NOT(25<30 AND 'LA'='NYC') = NOT(true AND false) = NOT false = true → included.
+# Dave: NOT(35<30 AND 'LA'='NYC') = NOT(false AND false) = NOT false = true → included.
+rows = [
+    ["Bob"],
+    ["Carol"],
+    ["Dave"],
+]
+order = "ordered"

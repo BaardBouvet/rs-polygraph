@@ -1,0 +1,31 @@
+name = "relationship_type_or_pattern"
+description = "Relationship type alternative pattern (a)-[:A|B]->(b) matches either type."
+spec_ref = "openCypher 9 §3.4.2 Relationship patterns — type alternatives"
+
+cypher = """
+MATCH (a:Person)-[:KNOWS|LIKES]->(b:Person)
+RETURN a.name AS from_name, b.name AS to_name
+ORDER BY a.name, b.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob",   rel_type = "KNOWS" },
+    { id = "e2", from = "alice", to = "carol", rel_type = "LIKES" },
+    { id = "e3", from = "bob",   to = "carol", rel_type = "KNOWS" },
+]
+
+[expected]
+columns = ["from_name", "to_name"]
+# All KNOWS or LIKES edges; sorted by from_name then to_name.
+rows = [
+    ["Alice", "Bob"],
+    ["Alice", "Carol"],
+    ["Bob",   "Carol"],
+]
+order = "ordered"

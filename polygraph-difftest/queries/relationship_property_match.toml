@@ -1,0 +1,30 @@
+name = "relationship_property_match"
+description = "Filter on a relationship property value."
+spec_ref = "openCypher 9 §3.4.2 Relationship patterns — property predicates"
+
+cypher = """
+MATCH (a:Person)-[r:RATED]->(m:Movie)
+WHERE r.stars >= 4
+RETURN a.name AS reviewer, m.title AS movie, r.stars AS stars
+"""
+
+[fixture]
+nodes = [
+    { id = "alice",  labels = ["Person"], properties = { name = "Alice"       } },
+    { id = "bob",    labels = ["Person"], properties = { name = "Bob"         } },
+    { id = "matrix", labels = ["Movie"],  properties = { title = "The Matrix" } },
+    { id = "jaws",   labels = ["Movie"],  properties = { title = "Jaws"       } },
+]
+edges = [
+    { id = "r1", from = "alice", to = "matrix", rel_type = "RATED", properties = { stars = 5 } },
+    { id = "r2", from = "bob",   to = "matrix", rel_type = "RATED", properties = { stars = 3 } },
+    { id = "r3", from = "alice", to = "jaws",   rel_type = "RATED", properties = { stars = 4 } },
+]
+
+[expected]
+columns = ["reviewer", "movie", "stars"]
+rows = [
+    ["Alice", "The Matrix", 5],
+    ["Alice", "Jaws",       4],
+]
+order = "bag"

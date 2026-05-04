@@ -1,0 +1,22 @@
+name = "multi_label_node_match"
+description = "A node with two labels matched by specifying both labels in the pattern."
+spec_ref = "openCypher 9 §3.4.1 Node patterns — multiple labels"
+
+cypher = """
+MATCH (n:Person:Employee)
+RETURN n.name AS name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person", "Employee"], properties = { name = "Alice" } },
+    { id = "b", labels = ["Person"],             properties = { name = "Bob"   } },
+    { id = "c", labels = ["Person", "Employee"], properties = { name = "Carol" } },
+    { id = "d", labels = ["Employee"],           properties = { name = "Dave"  } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [["Alice"], ["Carol"]]
+order = "bag"

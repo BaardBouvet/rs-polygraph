@@ -1,0 +1,28 @@
+name = "avg_grouped_by_dept"
+description = "AVG() per group using implicit GROUP BY in WITH clause."
+spec_ref = "openCypher 9 §5.2.1 avg() with implicit grouping key"
+
+cypher = """
+MATCH (n:Employee)
+WITH n.dept AS dept, avg(n.salary) AS avg_salary
+RETURN dept, avg_salary
+ORDER BY dept
+"""
+
+[fixture]
+nodes = [
+    { id = "a1", labels = ["Employee"], properties = { name = "Alice", dept = "Eng", salary = 90 } },
+    { id = "a2", labels = ["Employee"], properties = { name = "Bob",   dept = "Eng", salary = 70 } },
+    { id = "a3", labels = ["Employee"], properties = { name = "Carol", dept = "HR",  salary = 60 } },
+    { id = "a4", labels = ["Employee"], properties = { name = "Dave",  dept = "HR",  salary = 80 } },
+]
+edges = []
+
+[expected]
+columns = ["dept", "avg_salary"]
+# Eng: avg(90,70)=80.0; HR: avg(60,80)=70.0; ordered by dept ASC.
+rows = [
+    ["Eng", 80.0],
+    ["HR",  70.0],
+]
+order = "ordered"

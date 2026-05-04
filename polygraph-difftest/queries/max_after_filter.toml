@@ -1,0 +1,23 @@
+name = "max_after_filter"
+description = "MAX() aggregation applied after a WHERE filter."
+spec_ref = "openCypher 9 §5.2.1 max() — aggregate on filtered set"
+
+cypher = """
+MATCH (n:Employee)
+WHERE n.dept = 'Engineering'
+RETURN max(n.salary) AS top_salary
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Employee"], properties = { name = "Alice", dept = "Engineering", salary = 90000 } },
+    { id = "bob",   labels = ["Employee"], properties = { name = "Bob",   dept = "Engineering", salary = 85000 } },
+    { id = "carol", labels = ["Employee"], properties = { name = "Carol", dept = "Marketing",   salary = 95000 } },
+]
+edges = []
+
+[expected]
+columns = ["top_salary"]
+# Only Engineering: Alice(90000), Bob(85000) → max = 90000.
+rows = [[90000]]
+order = "bag"

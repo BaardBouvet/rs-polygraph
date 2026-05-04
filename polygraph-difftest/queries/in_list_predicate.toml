@@ -1,0 +1,22 @@
+name = "in_list_predicate"
+description = "WHERE x IN [...] filters nodes whose property is in the given list."
+spec_ref = "openCypher 9 §3.6.6 IN operator"
+
+cypher = """
+MATCH (n:Person)
+WHERE n.name IN ['Alice', 'Carol']
+RETURN n.name AS name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [["Alice"], ["Carol"]]
+order = "bag"

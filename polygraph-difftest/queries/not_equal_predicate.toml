@@ -1,0 +1,22 @@
+name = "not_equal_predicate"
+description = "NOT negates a boolean predicate; here excludes the named node."
+spec_ref = "openCypher 9 §3.6.1 NOT operator"
+
+cypher = """
+MATCH (n:Person)
+WHERE NOT n.name = 'Alice'
+RETURN n.name AS name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [["Bob"], ["Carol"]]
+order = "bag"

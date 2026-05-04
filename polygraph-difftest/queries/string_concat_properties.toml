@@ -1,0 +1,24 @@
+name = "string_concat_properties"
+description = "Concatenate a string property with a literal suffix using the + operator."
+spec_ref = "openCypher 9 §6.3.1 Arithmetic — + as string concatenation"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.name + '!' AS greeting
+ORDER BY greeting
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob"   } },
+]
+edges = []
+
+[expected]
+columns = ["greeting"]
+rows = [
+    ["Alice!"],
+    ["Bob!"],
+]
+order = "ordered"

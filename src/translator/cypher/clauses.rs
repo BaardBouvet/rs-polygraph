@@ -1466,21 +1466,26 @@ impl TranslationState {
                                 }
                             }
                         }
-                        // Pre-translate ORDER BY edge-property accesses BEFORE the Project
-                        // so that RDF-star reification triples (?reif rdf:reifies << src pred dst >>)
-                        // are emitted inside the sub-SELECT where ?src and ?dst are still in scope.
-                        // The resulting variable is stored in with_prop_subst so that
-                        // apply_order_skip_limit reuses it without re-emitting extra triples.
+                        // Pre-translate ORDER BY property accesses BEFORE the Project so that:
+                        // 1. RDF-star reification triples for edge properties are emitted inside
+                        //    the sub-SELECT where ?src and ?dst are still in scope.
+                        // 2. Regular node-property sort keys are in scope inside the inner Project
+                        //    so that apply_order_skip_limit can reference them without adding
+                        //    OPTIONAL LeftJoins *outside* the Project (which would make ?n
+                        //    unbound and cause the OPTIONAL to fire for all graph nodes).
+                        //
+                        // NORMALIZATION(openCypher 9 §7.1 ORDER BY): ORDER BY may reference
+                        // property expressions not present in the RETURN list; those must be
+                        // bound inside the inner sub-SELECT, not in an outer LeftJoin.
                         let original_vars = vars.clone();
                         if let Some(ob) = r.order_by.as_ref() {
                             for sort_item in &ob.items {
                                 if let Expression::Property(base_expr, key) = &sort_item.expression
                                 {
                                     if let Expression::Variable(var_name) = base_expr.as_ref() {
-                                        if self.edge_map.contains_key(var_name.as_str())
-                                            && !self
-                                                .with_prop_subst
-                                                .contains_key(&(var_name.clone(), key.clone()))
+                                        if !self
+                                            .with_prop_subst
+                                            .contains_key(&(var_name.clone(), key.clone()))
                                         {
                                             let mut ob_extra = Vec::new();
                                             match self.translate_expr(
@@ -1663,13 +1668,12 @@ impl TranslationState {
                         // any result variable — use LEFT JOIN so it doesn't filter rows
                         // when the node hasn't been created yet (or has properties derived
                         // from outer MATCH variables that won't match at SELECT time).
-                        let merge_node_has_var = if let PatternElement::Node(node) =
-                            &m.pattern.elements[0]
-                        {
-                            node.variable.is_some()
-                        } else {
-                            false
-                        };
+                        let merge_node_has_var =
+                            if let PatternElement::Node(node) = &m.pattern.elements[0] {
+                                node.variable.is_some()
+                            } else {
+                                false
+                            };
                         if merge_node_has_var {
                             current = join_patterns(current, match_pattern);
                         } else {
@@ -1759,10 +1763,8 @@ impl TranslationState {
                                 for elem in &mut augmented_elements {
                                     if let PatternElement::Node(n) = elem {
                                         if let Some(v) = &n.variable {
-                                            if let Some(prop_map) = self
-                                                .node_props_from_create
-                                                .get(v.as_str())
-                                                .cloned()
+                                            if let Some(prop_map) =
+                                                self.node_props_from_create.get(v.as_str()).cloned()
                                             {
                                                 let existing =
                                                     n.properties.get_or_insert_with(Vec::new);

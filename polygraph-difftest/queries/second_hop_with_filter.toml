@@ -1,0 +1,36 @@
+name = "second_hop_with_filter"
+description = "Two-hop MATCH with a WHERE filter on the intermediate node."
+spec_ref = "openCypher 9 §3.4.2 Relationship patterns — chained with WHERE on inner node"
+
+cypher = """
+MATCH (a:Person)-[:FOLLOWS]->(b:Person)-[:FOLLOWS]->(c:Person)
+WHERE b.verified = true
+RETURN a.name AS follower, c.name AS followee
+ORDER BY a.name, c.name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", verified = false } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob",   verified = true  } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol", verified = true  } },
+    { id = "dave",  labels = ["Person"], properties = { name = "Dave",  verified = false } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob",   rel_type = "FOLLOWS" },
+    { id = "e2", from = "alice", to = "carol", rel_type = "FOLLOWS" },
+    { id = "e3", from = "bob",   to = "carol", rel_type = "FOLLOWS" },
+    { id = "e4", from = "carol", to = "dave",  rel_type = "FOLLOWS" },
+]
+
+[expected]
+columns = ["follower", "followee"]
+# alice→bob(verified)→carol: valid path, follower=Alice, followee=Carol.
+# alice→carol(verified)→dave: valid path, follower=Alice, followee=Dave.
+# bob→carol(verified)→dave:  valid path, follower=Bob, followee=Dave.
+rows = [
+    ["Alice", "Carol"],
+    ["Alice", "Dave"],
+    ["Bob",   "Dave"],
+]
+order = "ordered"

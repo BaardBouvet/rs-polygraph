@@ -1,0 +1,28 @@
+name = "count_per_label"
+description = "Count nodes grouped by one of their properties acting as a discriminator."
+spec_ref = "openCypher 9 §5.2.2 count() — grouping on property"
+
+cypher = """
+MATCH (n:Animal)
+WITH n.species AS species, count(*) AS cnt
+RETURN species, cnt
+ORDER BY species
+"""
+
+[fixture]
+nodes = [
+    { id = "a1", labels = ["Animal"], properties = { species = "Cat", name = "Whiskers" } },
+    { id = "a2", labels = ["Animal"], properties = { species = "Dog", name = "Rex"      } },
+    { id = "a3", labels = ["Animal"], properties = { species = "Cat", name = "Mittens"  } },
+    { id = "a4", labels = ["Animal"], properties = { species = "Dog", name = "Buddy"    } },
+    { id = "a5", labels = ["Animal"], properties = { species = "Dog", name = "Fido"     } },
+]
+edges = []
+
+[expected]
+columns = ["species", "cnt"]
+rows = [
+    ["Cat", 2],
+    ["Dog", 3],
+]
+order = "ordered"

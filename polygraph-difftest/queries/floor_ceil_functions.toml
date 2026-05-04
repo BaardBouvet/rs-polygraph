@@ -1,0 +1,17 @@
+name = "floor_ceil_functions"
+description = "floor() and ceil() round floats down and up respectively."
+spec_ref = "openCypher 9 §8.3.2 Mathematical functions — floor() and ceil()"
+
+cypher = """
+RETURN floor(3.7) AS f, ceil(3.2) AS c
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["f", "c"]
+# floor(3.7) = 3.0, ceil(3.2) = 4.0 (SPARQL returns double).
+rows = [[3.0, 4.0]]
+order = "bag"

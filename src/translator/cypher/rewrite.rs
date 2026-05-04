@@ -1,8 +1,30 @@
-// ── Peephole optimizations ────────────────────────────────────────────────────
+// ── AST rewrite pass ────────────────────────────────────────────────────────
+//
+// Working agreement (post Phase 0 of plans/spec-first-pivot.md):
+//
+// Anything in this file is a candidate for migration into a typed
+// normalization pass under `src/lqa/normalize.rs` once that module exists
+// (Phase 3). When adding a new transformation here, mark it with one of:
+//
+//  * `// NORMALIZATION(<spec-ref>):` — derivable from the openCypher 9 / GQL
+//    semantic spec. Cite the section. These rules survive the pivot and
+//    migrate to LQA verbatim.
+//  * `// SCENARIO-PATCH(<TCK-ids>):` — empirically required by named TCK
+//    scenarios but not derivable from the spec. These are tracked for Phase 4
+//    audit and either generalized (with a spec citation) or replaced by a
+//    typed `Unsupported` error.
+//
+// Do NOT add untagged transformations. The whole point of the pivot is that
+// every behavior in the translator has a justification visible in the source.
+
+// ── Peephole optimizations ──────────────────────────────────────────────────
 
 /// Detect `WITH … collect(X) AS list … / UNWIND list AS item` pairs and rewrite
 /// them into simple projections (`WITH … X AS item …`).  This eliminates the
 /// need for runtime list iteration which SPARQL 1.1 cannot express.
+//
+// NORMALIZATION(openCypher 9 §collect/§UNWIND): collect-then-unwind round-trips
+// the multiset, so the pair is observably equivalent to the inner projection.
 /// Return `true` if `expr` contains a property access (`x.key`) where `x` is
 /// one of the deleted variables. Used to decide whether a DELETE clause is
 /// safe to skip (when only metadata like `type(r)` is accessed).

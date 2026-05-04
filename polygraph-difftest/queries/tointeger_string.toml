@@ -1,0 +1,16 @@
+name = "tointeger_string"
+description = "toInteger() converts a numeric string to an integer."
+spec_ref = "openCypher 9 §8.5.2 Conversion functions — toInteger()"
+
+cypher = """
+RETURN toInteger('42') AS n
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["n"]
+rows = [[42]]
+order = "bag"

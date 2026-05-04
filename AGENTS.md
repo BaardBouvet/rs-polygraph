@@ -23,6 +23,8 @@ All design documents live in `plans/`. Each file carries a **Status** and **Upda
 | [target-engines.md](plans/target-engines.md) | reference | SPARQL engine capability analysis (`TargetEngine` trait) |
 | [parser-extraction.md](plans/parser-extraction.md) | planned | Extract parser/AST into standalone crate for non-SPARQL reuse |
 | [pg-extension-protocol.md](plans/pg-extension-protocol.md) | planned | Postgres triplestore custom SPARQL functions for path decomposition |
+| [spec-first-pivot.md](plans/spec-first-pivot.md) | in progress | Pivot from TCK-driven patches to spec-anchored LQA + differential testing; supersedes brute-force methodology |
+| [scenario-debt.md](plans/scenario-debt.md) | in progress | Inventory of `examples/debug_*` / `check_*` / `test_*` probes with deletion / promotion plan |
 
 **Status values**: `complete` — implemented and stable; `in progress` — actively being built; `planned` — future work, not yet started; `reference` — living document with no discrete completion state.
 

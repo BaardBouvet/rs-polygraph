@@ -1,0 +1,25 @@
+name = "is_not_null_property"
+description = "IS NOT NULL on a property returns only nodes that have the property set."
+spec_ref = "openCypher 9 §3.6.7 null handling; §IS NOT NULL predicate"
+
+cypher = """
+MATCH (n:Person)
+WHERE n.nickname IS NOT NULL
+RETURN n.name AS name, n.nickname AS nick
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", nickname = "Ali"  } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob"                      } },
+    { id = "c", labels = ["Person"], properties = { name = "Charlie", nickname = "CJ" } },
+]
+edges = []
+
+[expected]
+columns = ["name", "nick"]
+rows = [
+    ["Alice",   "Ali"],
+    ["Charlie", "CJ"],
+]
+order = "bag"

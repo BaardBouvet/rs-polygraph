@@ -1,0 +1,28 @@
+name = "where_string_greater_than"
+description = "String ordering comparison > in WHERE clause (lexicographic)."
+spec_ref = "openCypher 9 §6.4.1 Comparison — string ordering"
+
+cypher = """
+MATCH (n:Letter)
+WHERE n.val > 'C'
+RETURN n.val AS val
+ORDER BY n.val
+"""
+
+[fixture]
+nodes = [
+    { id = "l1", labels = ["Letter"], properties = { val = "A" } },
+    { id = "l2", labels = ["Letter"], properties = { val = "C" } },
+    { id = "l3", labels = ["Letter"], properties = { val = "D" } },
+    { id = "l4", labels = ["Letter"], properties = { val = "Z" } },
+]
+edges = []
+
+[expected]
+columns = ["val"]
+# Lexicographically > 'C': D and Z (not C itself, not A).
+rows = [
+    ["D"],
+    ["Z"],
+]
+order = "ordered"
