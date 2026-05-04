@@ -4,7 +4,7 @@
 
 **Purpose**: `rs-polygraph` transpiles openCypher and ISO GQL property graph queries into SPARQL 1.1 (and SPARQL-star) algebra. The output targets any SPARQL-compliant engine without modifying those engines. This roadmap tracks the phased delivery as a series of 0.x releases.
 
-See [plans/implementation-plan.md](plans/implementation-plan.md) for design details, [plans/final-mile.md](plans/final-mile.md) for the final 84 remaining scenarios across Tiers F–K, and [AGENTS.md](AGENTS.md) for project governance and skill areas.
+See [plans/](plans/) for design documents and [AGENTS.md](AGENTS.md) for project governance.
 
 ---
 
@@ -46,4 +46,20 @@ See [plans/implementation-plan.md](plans/implementation-plan.md) for design deta
 
 | Version | Release | Accomplishment | Size | Plan |
 |---------|---------|----------------|------|------|
-| **v0.7.0** | 🔜 Planned | **Stable Public API**: Stabilize the public surface — `transpile_cypher`, `transpile_gql`, `TranspileOptions`, `TranspileOutput`, `TargetEngine`, `PolygraphError` — with semver guarantees. Publish the `Unsupported` construct catalog so callers can distinguish transpiler bugs from semantically infeasible SPARQL patterns. Delete the legacy translator once `is_lqa_safe()` returns `true` for ≥ 99 % of the TCK corpus. Ship an integration example against a second SPARQL engine (Apache Jena or Stardog via `TargetEngine`). Clean docs build, CHANGELOG entry. | Medium | [plans/spec-first-pivot.md](plans/spec-first-pivot.md) |
+| **v0.7.0** | 🔜 Planned | **Stable Public API + First crates.io Release**: Stabilize the public surface — `transpile_cypher`, `transpile_gql`, `TranspileOptions`, `TranspileOutput`, `TargetEngine`, `PolygraphError` — with semver guarantees. Publish the `Unsupported` construct catalog so callers can distinguish transpiler bugs from semantically infeasible SPARQL patterns. Delete the legacy translator once `is_lqa_safe()` returns `true` for ≥ 99 % of the TCK corpus. Wire up GitHub Actions CI (test / TCK / difftest / clippy / fmt / doc jobs on stable + beta) and an automated `release.yml` that publishes to crates.io on `v*` tag push. Add `[package.metadata.docs.rs]` for full-feature docs builds. Add `keywords`, `categories`, `readme`, and `exclude` metadata so the crate is discoverable and the download is small. Ship an integration example against a second SPARQL engine (Apache Jena or Stardog via `TargetEngine`). | Large | [plans/release.md](plans/release.md), [plans/spec-first-pivot.md](plans/spec-first-pivot.md) |
+
+
+### Result Mapping & L2 Runtime (v0.8.x)
+
+| Version | Release | Accomplishment | Size | Plan |
+|---------|---------|----------------|------|------|
+| **v0.8.0** | 🔜 Planned | **Result Hydration**: Ship `src/result_mapping/` — the SPARQL-results-to-openCypher bridge. The transpiler returns a `TranspileOutput` carrying both the SPARQL string and a `ProjectionSchema` that maps SPARQL binding names back to Cypher columns (nodes, relationships, scalars, lists). Callers pass their raw SPARQL result rows to `output.map_results()` and receive `Vec<CypherRow>`. Enables full openCypher-on-triplestore end-to-end without any SPARQL knowledge in calling code. | Medium | [plans/result-mapping.md](plans/result-mapping.md) |
+| **v0.8.1** | 🔜 Planned | **L2 Runtime Support**: Introduce `TranspileOutput::Continuation` for multi-phase queries that cannot be expressed in a single SPARQL round-trip. Phase 1 SPARQL runs first; the engine's results are fed back to the transpiler to generate Phase 2. Closes the remaining TCK failures that are L2-bounded: runtime-list quantifiers (Quantifier9–12), duration arithmetic (Temporal8), list comprehension / `properties()` / `relationships(p)` projection (List12, Graph9, Path2), and query-parameter binding (~80 skipped scenarios). Target: ≥ 99 % TCK pass rate. | Large | [plans/l2-runtime-support.md](plans/l2-runtime-support.md) |
+
+
+### Standalone Parser Crate & Postgres Extensions (v0.9.x)
+
+| Version | Release | Accomplishment | Size | Plan |
+|---------|---------|----------------|------|------|
+| **v0.9.0** | 🔜 Planned | **Standalone Parser**: Extract the parser and AST layers (`grammars/`, `src/ast/`, `src/parser/`, the parse-error subset of `src/error.rs`) into a standalone `opencypher-parser` crate. Zero SPARQL coupling — depends only on `pest`, `pest_derive`, and `thiserror`. Lets graph analytics tools, linters, migration utilities, and alternative backends parse openCypher/GQL without pulling in the SPARQL machinery. The `polygraph` crate becomes a thin translation layer on top. | Medium | [plans/parser-extraction.md](plans/parser-extraction.md) |
+| **v0.9.1** | 🔜 Planned | **Postgres Path Extensions**: For the Postgres-backed triplestore target, implement the two custom SPARQL functions — `pg:followEdges` (walk a runtime edge list) and `pg:pathEdges` (bind intermediate edges in property-path traversal) — and a `pg:edgeAggregate` custom aggregate. Gated behind `TargetEngine::supports_path_decomposition()`. Unlocks `nodes(p)`, `relationships(p)`, per-hop property filters on unbounded paths, and the last structural TCK ceiling (Match4[8] runtime edge list). | Medium | [plans/pg-extension-protocol.md](plans/pg-extension-protocol.md) |

@@ -1,12 +1,14 @@
 # Scenario-Debt Inventory
 
-**Status**: in progress
+**Status**: complete
 **Updated**: 2026-05-04
 
-This file tracks ad-hoc one-off probes accumulated under [examples/](../examples/)
-during the TCK-driven development phase. Each entry is a candidate for
-**deletion** (covered by an existing test) or **promotion** to a proper unit /
-integration / regression test under [tests/](../tests/).
+The `examples/` directory was deleted in full. All ad-hoc probe files
+(`debug_*`, `check_*`, `test_*`, `diagnose_*`) were either already covered
+by the TCK / integration test suite or had no lasting value. No promotions
+to `tests/` were required.
+
+The inventory below is preserved for historical reference.
 
 The file is created as a Phase 0 deliverable of [spec-first-pivot.md](spec-first-pivot.md).
 It will be drained as part of Phase 4 (audit & delete scenario patches) and

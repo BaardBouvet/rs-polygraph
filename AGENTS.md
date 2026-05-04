@@ -4,31 +4,21 @@
 
 `rs-polygraph` is a Rust library that transpiles **openCypher** and **ISO GQL** property graph queries into **SPARQL 1.1** (and SPARQL-star) algebra. The output targets any SPARQL-compliant engine without modifying those engines.
 
-See [plans/implementation-plan.md](plans/implementation-plan.md) for detailed design decisions and [ROADMAP.md](ROADMAP.md) for phased delivery.
+See [ROADMAP.md](ROADMAP.md) for phased delivery. Design documents live in `plans/`; each carries a **Status** and **Updated** date.
 
 ## Plans Index
-
-All design documents live in `plans/`. Each file carries a **Status** and **Updated** date in its header. Consult status before acting on a plan's content.
 
 | File | Status | Purpose |
 |------|--------|---------|
 | [implementation-plan.md](plans/implementation-plan.md) | complete | Module layout, crate structure, initial design decisions |
 | [fundamental-limitations.md](plans/fundamental-limitations.md) | reference | Hard limits of the static transpiler; L1/L2/L3 mitigation levels |
-| [result-mapping.md](plans/result-mapping.md) | in progress | SPARQL results → openCypher values hydration API |
-| [tck-full-plan.md](plans/tck-full-plan.md) | in progress | Full 3,650-scenario TCK expansion (Phases A–D) |
-| [remaining-failures.md](plans/remaining-failures.md) | in progress | Triage of remaining TCK failures + architecture improvements to speed iteration |
-| [remaining-work.md](plans/remaining-work.md) | in progress | Phased plan that drove Tier A (3558→3704); superseded by final-mile.md for the remaining gaps |
-| [final-mile.md](plans/final-mile.md) | planned | Post-Tier-A plan covering the last 84 failures, 1 skip, and 8 parse errors (Tiers F–K) with week-by-week order |
-| [l2-runtime-support.md](plans/l2-runtime-support.md) | planned | Multi-phase (L2) runtime API to close remaining failures + skipped scenarios; `TranspileOutput::Continuation` design |
 | [target-engines.md](plans/target-engines.md) | reference | SPARQL engine capability analysis (`TargetEngine` trait) |
-| [parser-extraction.md](plans/parser-extraction.md) | planned | Extract parser/AST into standalone crate for non-SPARQL reuse |
-| [pg-extension-protocol.md](plans/pg-extension-protocol.md) | planned | Postgres triplestore custom SPARQL functions for path decomposition |
-| [spec-first-pivot.md](plans/spec-first-pivot.md) | in progress | Pivot from TCK-driven patches to spec-anchored LQA + differential testing; supersedes brute-force methodology |
-| [scenario-debt.md](plans/scenario-debt.md) | in progress | Inventory of `examples/debug_*` / `check_*` / `test_*` probes with deletion / promotion plan |
-
-**Status values**: `complete` — implemented and stable; `in progress` — actively being built; `planned` — future work, not yet started; `reference` — living document with no discrete completion state.
-
-When updating a plan, bump its **Updated** date. When finishing a plan, change status to `complete`.
+| [spec-first-pivot.md](plans/spec-first-pivot.md) | in progress | Active: spec-anchored LQA + differential testing pivot (v0.6.0) |
+| [release.md](plans/release.md) | planned | CI workflows, crates.io publishing, docs.rs, GitHub Pages (v0.7.0) |
+| [result-mapping.md](plans/result-mapping.md) | planned | SPARQL results → openCypher values hydration API (v0.8.0) |
+| [l2-runtime-support.md](plans/l2-runtime-support.md) | planned | Multi-phase (L2) runtime API; `TranspileOutput::Continuation` design (v0.8.1) |
+| [parser-extraction.md](plans/parser-extraction.md) | planned | Extract parser/AST into standalone `opencypher-parser` crate (v0.9.0) |
+| [pg-extension-protocol.md](plans/pg-extension-protocol.md) | planned | Postgres triplestore custom SPARQL functions for path decomposition (v0.9.1) |
 
 ## Architecture
 

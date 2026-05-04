@@ -1,5 +1,1 @@
 target/
-examples/debug_*.rs
-examples/diagnose_*.rs
-examples/test_*.rs
-examples/check_*.rs
