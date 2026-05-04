@@ -9,6 +9,20 @@ pub enum PolygraphError {
     #[error("Unsupported feature: {feature}")]
     UnsupportedFeature { feature: String },
 
+    /// The query uses a construct that is semantically infeasible to transpile
+    /// to static SPARQL 1.1. Unlike `UnsupportedFeature` (which covers gaps the
+    /// transpiler could eventually close), this variant marks hard limits
+    /// documented in `plans/fundamental-limitations.md`.
+    ///
+    /// `spec_ref` is a citation of the openCypher / GQL spec section that
+    /// defines the semantics, so callers can report a meaningful error.
+    #[error("Unsupported construct '{construct}' ({spec_ref}): {reason}")]
+    Unsupported {
+        construct: String,
+        spec_ref: String,
+        reason: String,
+    },
+
     /// An error occurred during translation from the AST to SPARQL algebra.
     #[error("Translation error: {message}")]
     Translation { message: String },

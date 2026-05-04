@@ -87,7 +87,9 @@ pub fn project<T, U, F: Fn(&T) -> U>(bag: &[T], f: F) -> Bag<U> {
 /// Rows for which `predicate` returns `false` OR whose evaluation would
 /// return `null` are discarded (Cypher three-valued logic filter).
 pub fn select<T, F: Fn(&T) -> Option<bool>>(bag: Bag<T>, predicate: F) -> Bag<T> {
-    bag.into_iter().filter(|row| predicate(row) == Some(true)).collect()
+    bag.into_iter()
+        .filter(|row| predicate(row) == Some(true))
+        .collect()
 }
 
 /// Group rows by a key function.

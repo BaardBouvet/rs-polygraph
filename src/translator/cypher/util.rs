@@ -1,21 +1,15 @@
-// ── AST rewrite pass ────────────────────────────────────────────────────────
+// ── Translator utilities ─────────────────────────────────────────────────────
 //
-// Working agreement (post Phase 0 of plans/spec-first-pivot.md):
+// Low-level helpers shared by clauses.rs, mod.rs, patterns.rs, return_proj.rs,
+// functions.rs, and temporal.rs. All functions live at module level within the
+// `translator::cypher` module (included via `include!("util.rs")`).
 //
-// Anything in this file is a candidate for migration into a typed
-// normalization pass under `src/lqa/normalize.rs` once that module exists
-// (Phase 3). When adding a new transformation here, mark it with one of:
+// Tagging conventions (post Phase 4 of plans/spec-first-pivot.md):
 //
 //  * `// NORMALIZATION(<spec-ref>):` — derivable from the openCypher 9 / GQL
-//    semantic spec. Cite the section. These rules survive the pivot and
-//    migrate to LQA verbatim.
-//  * `// SCENARIO-PATCH(<TCK-ids>):` — empirically required by named TCK
-//    scenarios but not derivable from the spec. These are tracked for Phase 4
-//    audit and either generalized (with a spec citation) or replaced by a
-//    typed `Unsupported` error.
+//    semantic spec. Cite the section.
 //
-// Do NOT add untagged transformations. The whole point of the pivot is that
-// every behavior in the translator has a justification visible in the source.
+// There are no SCENARIO-PATCH rules in this file; those were resolved in Phase 4.
 
 // ── Peephole optimizations ──────────────────────────────────────────────────
 
@@ -25,6 +19,34 @@
 //
 // NORMALIZATION(openCypher 9 §collect/§UNWIND): collect-then-unwind round-trips
 // the multiset, so the pair is observably equivalent to the inner projection.
+
+/// Returns true if the Cypher expression statically contains a `null` literal
+/// anywhere in its tree. Used to detect guaranteed null-propagation cases,
+/// e.g. `5 ^ (6 % null)` where the `^` result is always null.
+fn cypher_expr_contains_null(expr: &Expression) -> bool {
+    match expr {
+        Expression::Literal(crate::ast::cypher::Literal::Null) => true,
+        Expression::Not(e) | Expression::Negate(e) | Expression::IsNull(e) | Expression::IsNotNull(e) => {
+            cypher_expr_contains_null(e)
+        }
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Xor(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b)
+        | Expression::Modulo(a, b)
+        | Expression::Power(a, b)
+        | Expression::Comparison(a, _, b) => {
+            cypher_expr_contains_null(a) || cypher_expr_contains_null(b)
+        }
+        Expression::List(items) => items.iter().any(cypher_expr_contains_null),
+        Expression::FunctionCall { args, .. } => args.iter().any(cypher_expr_contains_null),
+        _ => false,
+    }
+}
+
 /// Return `true` if `expr` contains a property access (`x.key`) where `x` is
 /// one of the deleted variables. Used to decide whether a DELETE clause is
 /// safe to skip (when only metadata like `type(r)` is accessed).

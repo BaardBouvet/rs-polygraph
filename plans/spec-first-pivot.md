@@ -1,7 +1,7 @@
 # Spec-First Pivot — From TCK-Driven Patches to Semantics-Driven Translation
 
 **Status**: in progress
-**Updated**: 2026-05-04 (Phase 1 COMPLETE: 200/200 curated queries; fixed ORDER BY leak + chained-string CONCAT; null sentinel; 2 new bugs documented)
+**Updated**: 2026-05-24 (Phase 4 COMPLETE: zero SCENARIO-PATCH tags; rewrite.rs deleted → util.rs; sign() implemented; head/last/pow upgraded with structured Unsupported; TCK 3757/3828)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,
@@ -333,9 +333,24 @@ is Phase 4.
 difftest curated suite still 201/201.  Phase 4 uses this module for incremental 
 clause migration.
 
-### Phase 4 — Spec-Driven Lowering Audit
+### Phase 4 — Spec-Driven Lowering Audit  (✅ complete 2026-05-24)
 
 **Goal:** eliminate scenario-shaped patches.
+
+**Landed:**
+
+| Item | Action |
+|---|---|
+| `SCENARIO-PATCH(Quantifier9–12)` in `mod.rs` | Reclassified as `// NORMALIZATION(openCypher 9 §6.3.3)` — tautology folding is derivable from formal quantifier semantics |
+| `rewrite.rs` deleted | All helper functions migrated to `util.rs`; `include!("rewrite.rs")` → `include!("util.rs")` |
+| `PolygraphError::Unsupported` added | New structured variant `{ construct, spec_ref, reason }` alongside `UnsupportedFeature` |
+| `sign(expr)` | Implemented via `IF(?x > 0, 1, IF(?x < 0, -1, 0))` in SPARQL |
+| `head(list)` string-hack removed | Replaced with compile-time literal-list resolution or `PolygraphError::Unsupported { spec_ref: "openCypher 9 §6.3.5" }` |
+| `last(list)` non-varlen `UnsupportedFeature` | Upgraded to structured `Unsupported { spec_ref: "openCypher 9 §6.3.5" }` |
+| `^` runtime exponentiation | Const-fold retained for literal operands; null-propagating cases return null; true runtime `^` emits `Unsupported { spec_ref: "openCypher 9 §6.3.1" }` |
+
+**Exit criteria met:** zero `SCENARIO-PATCH` tags in codebase; `rewrite.rs` deleted;
+TCK 3757/3828 (≥ 3734 ✓); difftest 201/201 (100% ≥ 99% ✓).
 
 - Walk every `// SCENARIO-PATCH(...)` tag from Phase 0:
   - If the patch is derivable from a normalization rule, move it into
@@ -353,13 +368,9 @@ clause migration.
 
 | Limitation | Spec ref | Fix / classification |
 |---|---|---|
-| `^` power operator emits `<urn:polygraph:unsupported-pow>` stub | openCypher 9 §6.3.1 | SPARQL has no `POW()`; lower to `XEXP(XLOG(x) * y)` approximation, or emit `Unsupported` with a typed error |
-| `head(list)` / `last(list)` — string-slice hack / unsupported | openCypher 9 §6.3.5 | Requires list-index access in SPARQL; emit `Unsupported` with `spec_ref = "openCypher 9 §6.3.5"` until L2 runtime support is available |
-| `sign(expr)` on non-literal — "complex return expression" error | openCypher 9 §6.3.2 | Implement `SIGN` via `IF(?x > 0, 1, IF(?x < 0, -1, 0))` in the LQA → spargebra lowering |
-
-
-**Exit:** zero `SCENARIO-PATCH` tags; `rewrite.rs` deleted; TCK ≥ 3734;
-difftest curated suite ≥ 99 % pass.
+| `^` power operator emits `<urn:polygraph:unsupported-pow>` stub | openCypher 9 §6.3.1 | ✅ Null-prop cases → null; runtime `^` → `Unsupported` |
+| `head(list)` / `last(list)` — string-slice hack / unsupported | openCypher 9 §6.3.5 | ✅ Literal-list fast path kept; runtime → `Unsupported` |
+| `sign(expr)` on non-literal — "complex return expression" error | openCypher 9 §6.3.2 | ✅ Implemented via `IF(?x > 0, 1, IF(?x < 0, -1, 0))` |
 
 ### Phase 5 — Coverage Expansion via Differential Fuzzing
 

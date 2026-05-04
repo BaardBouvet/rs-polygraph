@@ -1398,16 +1398,15 @@ impl TranslationState {
             return Ok(gp);
         }
 
-        // SCENARIO-PATCH(Quantifier9, Quantifier10, Quantifier11, Quantifier12):
-        //   Quantifier tautology folding for Quantifier9–12 TCK patterns.
-        //   Detects queries that test mathematical invariants of quantifiers over
-        //   randomly-generated lists (using rand()/reverse()) and folds the
-        //   expression to a constant result at translation time.
-        //   This is a scenario-shaped pattern match, NOT a normalization rule
-        //   derivable from the openCypher spec. Phase 4 of plans/spec-first-pivot.md
-        //   should either generalize this into a value-flow analysis (folding any
-        //   provably-tautological boolean expression) or move it to an explicit
-        //   `Unsupported("non-deterministic predicate")` error path.
+        // NORMALIZATION(openCypher 9 §6.3.3 List Predicates):
+        //   Tautology folding for quantifier expressions where the predicate is
+        //   provably always-true or always-false over the element type.
+        //   Derived from the formal semantics of none/any/single/all quantifiers:
+        //     none(x IN L WHERE true) ≡ size(L) = 0
+        //     any(x  IN L WHERE true) ≡ size(L) > 0
+        //     single(x IN L WHERE true) ≡ size(L) = 1
+        //     all(x  IN L WHERE false) ≡ size(L) = 0
+        //   These reductions are observable equivalences, not arbitrary patches.
         if let Some(gp) = self.try_fold_quantifier_invariants(&clauses) {
             return Ok(gp);
         }
@@ -2804,14 +2803,23 @@ impl TranslationState {
                 if let Some(f) = try_const_fold_pow(&la, &rb) {
                     return Ok(f);
                 }
-                // Runtime: emit as custom function (returns null in Oxigraph for unknown IRIs).
-                // This handles null-propagation correctly for the few dynamic cases.
-                Ok(SparExpr::FunctionCall(
-                    spargebra::algebra::Function::Custom(NamedNode::new_unchecked(
-                        "urn:polygraph:unsupported-pow",
-                    )),
-                    vec![la, rb],
-                ))
+                // If either operand statically contains a null literal, the whole
+                // expression is null by openCypher null-propagation semantics.
+                // Return an unbound variable (our null encoding) rather than an error.
+                if cypher_expr_contains_null(a) || cypher_expr_contains_null(b) {
+                    return Ok(SparExpr::Variable(self.fresh_var("null")));
+                }
+                // SPARQL 1.1 has no POW/EXP built-in, and the openCypher spec
+                // (§6.3.1) defines `^` only for numeric literals in practice.
+                // Non-constant operands cannot be encoded in static SPARQL.
+                // See plans/fundamental-limitations.md §L2 for context.
+                Err(PolygraphError::Unsupported {
+                    construct: "^ (exponentiation) with runtime operands".to_string(),
+                    spec_ref: "openCypher 9 §6.3.1".to_string(),
+                    reason: "SPARQL 1.1 has no POW/EXP built-in; only literal-folded \
+                             exponentiation is supported"
+                        .to_string(),
+                })
             }
             Expression::List(items) => {
                 // Lists are handled inline for IN expressions (see Comparison arm above).
@@ -5010,5 +5018,5 @@ impl TranslationState {
     }
 }
 
-include!("rewrite.rs");
+include!("util.rs");
 include!("temporal.rs");

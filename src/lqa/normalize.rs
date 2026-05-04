@@ -52,17 +52,17 @@ use crate::lqa::op::{Op, ProjItem};
 /// →
 /// CASE WHEN n.status = 'a' THEN 1 WHEN n.status = 'b' THEN 2 ELSE 0 END
 /// ```
-pub fn simple_case_to_searched(subject: Expr, branches: Vec<(Expr, Expr)>, else_expr: Option<Expr>) -> Expr {
+pub fn simple_case_to_searched(
+    subject: Expr,
+    branches: Vec<(Expr, Expr)>,
+    else_expr: Option<Expr>,
+) -> Expr {
     // NORMALIZATION(openCypher 9 §6.2.1): expand each branch to a
     // `subject = value` comparison.  The subject is cloned once per branch.
     let searched_branches = branches
         .into_iter()
         .map(|(when_val, then_expr)| {
-            let cond = Expr::Comparison(
-                CmpOp::Eq,
-                Box::new(subject.clone()),
-                Box::new(when_val),
-            );
+            let cond = Expr::Comparison(CmpOp::Eq, Box::new(subject.clone()), Box::new(when_val));
             (cond, then_expr)
         })
         .collect();
@@ -118,7 +118,10 @@ impl Default for AliasGen {
 ///
 /// Items that already have an alias are returned unchanged.
 /// Items without an alias receive a fresh `?gen_N` alias from `gen`.
-pub fn desugar_implicit_alias(items: Vec<(Expr, Option<String>)>, gen: &mut AliasGen) -> Vec<ProjItem> {
+pub fn desugar_implicit_alias(
+    items: Vec<(Expr, Option<String>)>,
+    gen: &mut AliasGen,
+) -> Vec<ProjItem> {
     // NORMALIZATION(openCypher 9 §4.5.1): assign a stable generated name to
     // any projection item that does not carry an explicit user-visible alias.
     items
@@ -212,12 +215,23 @@ pub fn normalize_op(op: Op) -> Op {
             inner,
             predicate: normalize_expr(predicate),
         },
-        Op::Projection { inner, items, distinct } => {
+        Op::Projection {
+            inner,
+            items,
+            distinct,
+        } => {
             let items = items
                 .into_iter()
-                .map(|pi| ProjItem { expr: normalize_expr(pi.expr), alias: pi.alias })
+                .map(|pi| ProjItem {
+                    expr: normalize_expr(pi.expr),
+                    alias: pi.alias,
+                })
                 .collect();
-            Op::Projection { inner, items, distinct }
+            Op::Projection {
+                inner,
+                items,
+                distinct,
+            }
         }
         other => other,
     }
@@ -228,7 +242,7 @@ pub fn normalize_op(op: Op) -> Op {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lqa::expr::{Expr, Literal, CmpOp};
+    use crate::lqa::expr::{CmpOp, Expr, Literal};
 
     #[test]
     fn simple_case_one_branch() {
@@ -237,7 +251,10 @@ mod tests {
         let branches = vec![(Expr::int(1), Expr::str("a"))];
         let result = simple_case_to_searched(subject, branches, None);
         match result {
-            Expr::CaseSearched { branches, else_expr } => {
+            Expr::CaseSearched {
+                branches,
+                else_expr,
+            } => {
                 assert_eq!(branches.len(), 1);
                 assert!(else_expr.is_none());
                 assert!(matches!(branches[0].0, Expr::Comparison(CmpOp::Eq, _, _)));
@@ -256,7 +273,10 @@ mod tests {
         ];
         let result = simple_case_to_searched(subject, branches, Some(Expr::int(-1)));
         match result {
-            Expr::CaseSearched { branches, else_expr } => {
+            Expr::CaseSearched {
+                branches,
+                else_expr,
+            } => {
                 assert_eq!(branches.len(), 2);
                 assert!(else_expr.is_some());
                 // Each branch should compare subject = value
@@ -395,9 +415,9 @@ mod tests {
     #[test]
     fn normalize_op_selection_normalises_predicate() {
         // NOT(NOT(IS NULL(?n))) in a Selection should be folded.
-        let predicate = Expr::Not(Box::new(Expr::Not(Box::new(
-            Expr::IsNull(Box::new(Expr::Literal(Literal::Null))),
-        ))));
+        let predicate = Expr::Not(Box::new(Expr::Not(Box::new(Expr::IsNull(Box::new(
+            Expr::Literal(Literal::Null),
+        ))))));
         let op = Op::Selection {
             inner: Box::new(Op::Unit),
             predicate,
@@ -417,7 +437,11 @@ mod tests {
             expr: Expr::Not(Box::new(Expr::Not(Box::new(Expr::bool(false))))),
             alias: "x".into(),
         }];
-        let op = Op::Projection { inner: Box::new(Op::Unit), items, distinct: false };
+        let op = Op::Projection {
+            inner: Box::new(Op::Unit),
+            items,
+            distinct: false,
+        };
         let normalised = normalize_op(op);
         if let Op::Projection { items, .. } = normalised {
             assert_eq!(items[0].expr, Expr::bool(false));

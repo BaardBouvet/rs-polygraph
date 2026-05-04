@@ -1,11 +1,8 @@
 // ── Semantic checks and scope analysis on the Cypher AST ────────────────────
 //
-// Working agreement (post Phase 0 of plans/spec-first-pivot.md):
-//
-// Same convention as `rewrite.rs`: every nontrivial transformation must carry
-// either a `// NORMALIZATION(<spec-ref>):` or `// SCENARIO-PATCH(<TCK-ids>):`
-// marker. Phase 4 audits and migrates these into the typed LQA normalization
-// pass.
+// Post Phase 4 of plans/spec-first-pivot.md: SCENARIO-PATCH rules have been
+// eliminated. Every nontrivial transformation must carry:
+//   `// NORMALIZATION(<spec-ref>):` — derivable from the openCypher 9 / GQL spec.
 
 /// Extract the column names from a segment's final RETURN or WITH clause.
 fn segment_columns(seg: &[Clause]) -> Option<Vec<String>> {

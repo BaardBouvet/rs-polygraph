@@ -126,6 +126,41 @@ impl TranslationState {
                 )?;
                 Ok(SparExpr::FunctionCall(Function::Round, vec![arg]))
             }
+            // sign(x) → IF(x > 0, 1, IF(x < 0, -1, 0))
+            // openCypher 9 §6.3.1 (Scalar functions)
+            "sign" => {
+                let arg = self.translate_expr(
+                    args.first()
+                        .ok_or_else(|| PolygraphError::UnsupportedFeature {
+                            feature: "sign() requires an argument".to_string(),
+                        })?,
+                    extra,
+                )?;
+                let zero = SparExpr::Literal(SparLit::new_typed_literal(
+                    "0",
+                    NamedNode::new_unchecked(XSD_INTEGER),
+                ));
+                let one = SparExpr::Literal(SparLit::new_typed_literal(
+                    "1",
+                    NamedNode::new_unchecked(XSD_INTEGER),
+                ));
+                let minus_one = SparExpr::Literal(SparLit::new_typed_literal(
+                    "-1",
+                    NamedNode::new_unchecked(XSD_INTEGER),
+                ));
+                Ok(SparExpr::If(
+                    Box::new(SparExpr::Greater(
+                        Box::new(arg.clone()),
+                        Box::new(zero.clone()),
+                    )),
+                    Box::new(one),
+                    Box::new(SparExpr::If(
+                        Box::new(SparExpr::Less(Box::new(arg), Box::new(zero.clone()))),
+                        Box::new(minus_one),
+                        Box::new(zero),
+                    )),
+                ))
+            }
             "tostring" | "str" | "tostr" => {
                 let arg = self.translate_expr(
                     args.first()
@@ -605,20 +640,29 @@ impl TranslationState {
                         }
                     }
                 }
-                // head(list) → first element. For collected lists (GROUP_CONCAT),
-                // extract substring before first separator.
+                // head(list) → first element.
+                // Static list literals resolved at compile time; runtime lists require
+                // L2 support (see plans/l2-runtime-support.md & plans/fundamental-limitations.md).
                 if let Some(arg) = args.first() {
-                    let translated = self.translate_expr(arg, extra)?;
-                    let sep = SparExpr::Literal(SparLit::new_simple_literal(" "));
-                    Ok(SparExpr::FunctionCall(
-                        Function::StrBefore,
-                        vec![translated, sep],
-                    ))
-                } else {
-                    Err(PolygraphError::UnsupportedFeature {
-                        feature: "head() requires an argument".to_string(),
-                    })
+                    // Compile-time: resolve literal list and return first element.
+                    if let Some(items) = self.resolve_literal_list(arg) {
+                        if items.is_empty() {
+                            return Ok(SparExpr::Literal(SparLit::new_simple_literal("null")));
+                        }
+                        return self.translate_expr(&items[0], extra);
+                    }
+                    // Runtime list → cannot index in static SPARQL 1.1.
+                    return Err(PolygraphError::Unsupported {
+                        construct: "head(list) with runtime list operand".to_string(),
+                        spec_ref: "openCypher 9 §6.3.5".to_string(),
+                        reason: "SPARQL 1.1 cannot index into a runtime list; \
+                                 only compile-time literal lists are supported"
+                            .to_string(),
+                    });
                 }
+                Err(PolygraphError::UnsupportedFeature {
+                    feature: "head() requires an argument".to_string(),
+                })
             }
             "tail" => {
                 // tail(list) → all but first element.
@@ -1219,8 +1263,12 @@ impl TranslationState {
                         }
                     }
                 }
-                Err(PolygraphError::UnsupportedFeature {
-                    feature: format!("function call: {name}()"),
+                Err(PolygraphError::Unsupported {
+                    construct: "last(list) with runtime list operand".to_string(),
+                    spec_ref: "openCypher 9 §6.3.5".to_string(),
+                    reason: "SPARQL 1.1 cannot index into a runtime list; \
+                             only varlen-rel bounded patterns are supported"
+                        .to_string(),
                 })
             }
             // ── Temporal constructors ──────────────────────────────────────────
