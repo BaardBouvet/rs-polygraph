@@ -25,7 +25,8 @@
 use std::collections::{HashMap, HashSet};
 
 use spargebra::algebra::{
-    AggregateExpression, AggregateFunction, Expression as SparExpr, GraphPattern, OrderExpression,
+    AggregateExpression, AggregateFunction, Expression as SparExpr, Function, GraphPattern,
+    OrderExpression,
 };
 use spargebra::term::{
     Literal as SparLit, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable,
@@ -70,6 +71,9 @@ struct Compiler {
     counter: u32,
     /// Property-access triple patterns accumulated while lowering an expression.
     pending_triples: Vec<TriplePattern>,
+    /// Property-access triple patterns that must be emitted as OPTIONAL { } blocks
+    /// (e.g. arguments to coalesce() where the property may be absent).
+    pending_optional_triples: Vec<TriplePattern>,
     /// Variables that may be null (produced by OPTIONAL MATCH).
     #[allow(dead_code)]
     nullable: HashSet<String>,
@@ -87,6 +91,7 @@ impl Compiler {
             base_iri,
             counter: 0,
             pending_triples: Vec::new(),
+            pending_optional_triples: Vec::new(),
             nullable: HashSet::new(),
             edge_types: HashMap::new(),
             projected_columns: Vec::new(),
@@ -142,13 +147,24 @@ impl Compiler {
     // ── Pending triple flush ──────────────────────────────────────────────────
 
     /// Take all pending BGP triples and join them into `pat` as a BGP.
+    /// Any pending *optional* triples (from coalesce args, etc.) are appended
+    /// as `OPTIONAL { }` blocks via LEFT JOIN.
     fn flush_pending(&mut self, pat: GraphPattern) -> GraphPattern {
-        if self.pending_triples.is_empty() {
-            return pat;
-        }
         let triples = std::mem::take(&mut self.pending_triples);
-        let bgp = GraphPattern::Bgp { patterns: triples };
-        join(pat, bgp)
+        let opt_triples = std::mem::take(&mut self.pending_optional_triples);
+        let mut result = if triples.is_empty() {
+            pat
+        } else {
+            join(pat, GraphPattern::Bgp { patterns: triples })
+        };
+        for ot in opt_triples {
+            result = GraphPattern::LeftJoin {
+                left: Box::new(result),
+                right: Box::new(GraphPattern::Bgp { patterns: vec![ot] }),
+                expression: None,
+            };
+        }
+        result
     }
 
     // ── Op lowering ───────────────────────────────────────────────────────────
@@ -179,9 +195,19 @@ impl Compiler {
             Op::Limit { inner, count } => {
                 let length = expr_to_usize(count)?;
                 let inner_pat = self.lower_op_as_query(inner)?;
-                let start = query_slice_start(&inner_pat);
+                // If the direct inner is a SKIP-only Slice (from Op::Skip), merge it
+                // with this LIMIT into a single Slice rather than creating nested
+                // Slices that spargebra cannot always flatten into one OFFSET+LIMIT.
+                let (start, unwrapped) = match inner_pat {
+                    GraphPattern::Slice {
+                        inner: skip_inner,
+                        start: skip_start,
+                        length: None,
+                    } => (skip_start, *skip_inner),
+                    other => (0, other),
+                };
                 Ok(GraphPattern::Slice {
-                    inner: Box::new(inner_pat),
+                    inner: Box::new(unwrapped),
                     start,
                     length: Some(length),
                 })
@@ -196,6 +222,119 @@ impl Compiler {
                 })
             }
             Op::OrderBy { inner, keys } => {
+                // When ORDER BY wraps a Projection (RETURN clause), flatten the
+                // projected body so that sort-key property triples live in the
+                // same WHERE scope as the MATCH patterns.  Creating a nested
+                // sub-SELECT here would hide ?node variables from sort triples
+                // added after the sub-SELECT boundary.
+                if let Op::Projection {
+                    inner: proj_inner,
+                    items,
+                    distinct,
+                } = inner.as_ref()
+                {
+                    // 1. Lower sort-key expressions first; capture any property
+                    //    triples they generate.
+                    //
+                    //    If the sort key is a variable alias from the RETURN clause:
+                    //    - If it's a GROUP BY key or aggregate output, use the
+                    //      variable directly (it's already bound by the Group).
+                    //    - If it's a computed expression alias (e.g. n.name + '!'),
+                    //      inline the underlying expression so ORDER BY doesn't
+                    //      reference a SELECT-clause alias that may be unbound at
+                    //      sort time in some SPARQL engines.
+                    let agg_alias_set: std::collections::HashSet<&str> =
+                        if let Op::GroupBy { agg_items, .. } = proj_inner.as_ref() {
+                            agg_items.iter().map(|a| a.alias.as_str()).collect()
+                        } else {
+                            std::collections::HashSet::new()
+                        };
+                    // GROUP BY key aliases are also "already bound" after evaluation
+                    // of the Group pattern — no need to expand them to property exprs.
+                    let group_key_aliases: std::collections::HashSet<&str> =
+                        if let Op::GroupBy { group_keys, .. } = proj_inner.as_ref() {
+                            group_keys.iter().map(|k| k.as_str()).collect()
+                        } else {
+                            std::collections::HashSet::new()
+                        };
+                    let sort_exprs = keys
+                        .iter()
+                        .map(|sk| {
+                            // Expand alias reference to underlying expression when
+                            // the alias refers to a computed (non-variable) RETURN
+                            // expression and is not a GROUP BY key or aggregate alias.
+                            let effective = if let Expr::Variable { name, .. } = &sk.expr {
+                                let is_agg = agg_alias_set.contains(name.as_str());
+                                let is_gk = group_key_aliases.contains(name.as_str());
+                                if !is_agg && !is_gk {
+                                    items
+                                        .iter()
+                                        .find(|pi| {
+                                            pi.alias == *name
+                                                && !matches!(pi.expr, Expr::Variable { .. })
+                                        })
+                                        .map(|pi| &pi.expr)
+                                        .unwrap_or(&sk.expr)
+                                } else {
+                                    &sk.expr
+                                }
+                            } else {
+                                &sk.expr
+                            };
+                            let sparql_expr = self.lower_expr(effective)?;
+                            Ok(match sk.dir {
+                                SortDir::Asc => OrderExpression::Asc(sparql_expr),
+                                SortDir::Desc => OrderExpression::Desc(sparql_expr),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let sort_req = std::mem::take(&mut self.pending_triples);
+                    let sort_opt = std::mem::take(&mut self.pending_optional_triples);
+
+                    // 2. Flatten the Projection body (handles GroupBy etc.).
+                    let (proj_gp, _agg_vars) =
+                        self.lower_projection_inner(proj_inner, items)?;
+                    let project_vars = self.build_project_vars(items)?;
+
+                    // 3. Flush projection's own pending triples.
+                    let mut flat = self.flush_pending(proj_gp);
+
+                    // 4. Inject sort-key triples into the same flat scope.
+                    if !sort_req.is_empty() {
+                        flat = join(flat, GraphPattern::Bgp { patterns: sort_req });
+                    }
+                    for ot in sort_opt {
+                        flat = GraphPattern::LeftJoin {
+                            left: Box::new(flat),
+                            right: Box::new(GraphPattern::Bgp { patterns: vec![ot] }),
+                            expression: None,
+                        };
+                    }
+
+                    // 5. Wrap: OrderBy → Project → (Distinct if needed).
+                    let ordered = GraphPattern::OrderBy {
+                        inner: Box::new(flat),
+                        expression: sort_exprs,
+                    };
+                    let projected = if project_vars.is_empty() {
+                        ordered
+                    } else {
+                        GraphPattern::Project {
+                            inner: Box::new(ordered),
+                            variables: project_vars,
+                        }
+                    };
+                    return Ok(if *distinct {
+                        GraphPattern::Distinct {
+                            inner: Box::new(projected),
+                        }
+                    } else {
+                        projected
+                    });
+                }
+
+                // Default path: inner is not a Projection (e.g. mid-pipeline
+                // OrderBy from a WITH clause).
                 let inner_pat = self.lower_op_as_query(inner)?;
                 let expressions = keys
                     .iter()
@@ -257,23 +396,93 @@ impl Compiler {
             let inner_gp = self.lower_op(gb_inner)?;
             let flushed = self.flush_pending(inner_gp);
 
-            let group_vars: Vec<Variable> = group_keys.iter().map(|k| Self::var(k)).collect();
+            let group_key_set: std::collections::HashSet<&str> =
+                group_keys.iter().map(|s| s.as_str()).collect();
 
+            // Group variables from keys; start collecting them.
+            let mut group_vars: Vec<Variable> = Vec::new();
+
+            // For GROUP BY key expressions that are Property accesses
+            // (e.g. `n.city AS city`), generate the property triple
+            // inside the Group inner using the alias variable directly —
+            // no fresh intermediate variable.  That way the GROUP BY
+            // variable is the same as the output alias.
+            for pi in proj_items {
+                if !group_key_set.contains(pi.alias.as_str()) {
+                    continue; // aggregate output or wildcard, skip
+                }
+                let alias_var = Self::var(&pi.alias);
+                match &pi.expr {
+                    Expr::Variable { name, .. } => {
+                        // Pre-bound variable — just track it as a group var.
+                        group_vars.push(Self::var(name));
+                    }
+                    Expr::Property(node_expr, prop_key) => {
+                        // Property access: produce ?node :prop ?alias triple inside
+                        // the Group inner, using the alias variable directly.
+                        let node_var = match node_expr.as_ref() {
+                            Expr::Variable { name, .. } => Self::var(name),
+                            other => {
+                                return Err(PolygraphError::Unsupported {
+                                    construct: format!("complex GROUP BY key expr {:?}", other),
+                                    spec_ref: "openCypher 9 §3.4".into(),
+                                    reason: "non-variable base in property GROUP BY key"
+                                        .into(),
+                                })
+                            }
+                        };
+                        let pred = NamedNodePattern::NamedNode(self.prop_iri(prop_key));
+                        self.pending_triples.push(TriplePattern {
+                            subject: TermPattern::Variable(node_var),
+                            predicate: pred,
+                            object: TermPattern::Variable(alias_var.clone()),
+                        });
+                        group_vars.push(alias_var.clone());
+                        self.projected_columns.push(scalar_col(&pi.alias));
+                    }
+                    _ => {
+                        // Other expressions (e.g. function calls) — fall back to
+                        // generic lowering so the result variable ends up in the
+                        // inner pattern via BIND/Extend.
+                        let e = self.lower_expr(&pi.expr)?;
+                        group_vars.push(alias_var.clone());
+                        let _ = e; // expression result used as group var
+                        self.projected_columns.push(scalar_col(&pi.alias));
+                    }
+                }
+            }
+
+            // Lower aggregates — this may add property-access triples to
+            // `pending_triples` (e.g. AVG(n.age) → fresh ?_age_0 + pending triple).
+            // Those triples must live INSIDE the Group inner, not outside it.
             let aggregates = agg_items
                 .iter()
                 .map(|ai| self.lower_agg_item(ai))
                 .collect::<Result<Vec<_>, _>>()?;
 
+            // Flush all pending triples (group-key property triples +
+            // agg-arg property triples) into the inner pattern.
+            let group_inner = self.flush_pending(flushed);
+
             let group_pattern = GraphPattern::Group {
-                inner: Box::new(flushed),
+                inner: Box::new(group_inner),
                 variables: group_vars.clone(),
                 aggregates,
             };
 
+            // Emit any remaining non-group, non-agg proj items as Extends
+            // (aggregate output aliases need no Extend; they're bound by the Group).
+            let agg_alias_set: std::collections::HashSet<&str> =
+                agg_items.iter().map(|a| a.alias.as_str()).collect();
             let mut extended = group_pattern;
             for pi in proj_items {
-                if let Expr::Variable { name, .. } = &pi.expr {
-                    self.projected_columns.push(scalar_col(name.clone()));
+                if agg_alias_set.contains(pi.alias.as_str()) {
+                    // Aggregate output: variable bound by the Group pattern.
+                    self.projected_columns.push(scalar_col(&pi.alias));
+                    continue;
+                }
+                if group_key_set.contains(pi.alias.as_str()) {
+                    // Already handled above (property triple or variable passthrough).
                     continue;
                 }
                 let sparql_expr = self.lower_expr(&pi.expr)?;
@@ -305,10 +514,10 @@ impl Compiler {
                     }
                 }
                 let sparql_expr = self.lower_expr(&pi.expr)?;
-                let flush = std::mem::take(&mut self.pending_triples);
-                if !flush.is_empty() {
-                    extended = join(extended, GraphPattern::Bgp { patterns: flush });
-                }
+                // Flush required and optional pending triples BEFORE wrapping in
+                // Extend, so that OPTIONAL { } blocks appear BEFORE the BIND and
+                // the bound variables are in scope when BIND executes.
+                extended = self.flush_pending(extended);
                 let alias_var = Self::var(&pi.alias);
                 extended = GraphPattern::Extend {
                     inner: Box::new(extended),
@@ -366,13 +575,17 @@ impl Compiler {
                     expr: self.lower_expr(arg.as_deref().unwrap())?,
                     distinct: *distinct,
                 },
-                AggKind::Collect => AggregateExpression::FunctionCall {
-                    name: AggregateFunction::GroupConcat {
-                        separator: Some(" ".into()),
-                    },
-                    expr: self.lower_expr(arg.as_deref().unwrap())?,
-                    distinct: *distinct,
-                },
+                AggKind::Collect => {
+                    // collect() maps to SPARQL GROUP_CONCAT which serialises to a
+                    // string, not a list.  Cypher `collect()` semantics require a
+                    // true list type which the LQA path doesn't yet encode; fall
+                    // back to the legacy translator for any query using collect().
+                    return Err(PolygraphError::Unsupported {
+                        construct: "collect() aggregate".into(),
+                        spec_ref: "openCypher 9 §3.4.6".into(),
+                        reason: "collect() requires list encoding not yet in LQA path; legacy fallback applies".into(),
+                    });
+                }
                 AggKind::CountStar => AggregateExpression::CountSolutions {
                     distinct: *distinct,
                 },
@@ -829,7 +1042,11 @@ impl Compiler {
                     }
                 };
                 let prop_var = self.fresh(key);
-                self.pending_triples.push(TriplePattern {
+                // In openCypher, accessing an absent property returns null rather
+                // than excluding the row.  Use OPTIONAL so a missing property
+                // leaves the variable unbound (≡ null) rather than dropping the
+                // solution — matching openCypher null-propagation semantics.
+                self.pending_optional_triples.push(TriplePattern {
                     subject: TermPattern::Variable(base_var),
                     predicate: NamedNodePattern::NamedNode(self.prop_iri(key)),
                     object: TermPattern::Variable(prop_var.clone()),
@@ -837,10 +1054,18 @@ impl Compiler {
                 Ok(SparExpr::Variable(prop_var))
             }
 
-            Expr::Add(a, b) => Ok(SparExpr::Add(
-                Box::new(self.lower_expr(a)?),
-                Box::new(self.lower_expr(b)?),
-            )),
+            Expr::Add(a, b) => {
+                // In openCypher, `+` is overloaded: arithmetic for numbers,
+                // string concatenation when either operand is a string.
+                // SPARQL `+` is arithmetic-only; strings must use CONCAT().
+                let la = self.lower_expr(a)?;
+                let lb = self.lower_expr(b)?;
+                if lqa_expr_is_string(a) || lqa_expr_is_string(b) {
+                    Ok(SparExpr::FunctionCall(Function::Concat, vec![la, lb]))
+                } else {
+                    Ok(SparExpr::Add(Box::new(la), Box::new(lb)))
+                }
+            }
             Expr::Sub(a, b) => Ok(SparExpr::Subtract(
                 Box::new(self.lower_expr(a)?),
                 Box::new(self.lower_expr(b)?),
@@ -1142,7 +1367,10 @@ impl Compiler {
             }
             "substring" | "substr" => {
                 let a0 = self.lower_expr(args.first().ok_or_else(|| arg_err(name))?)?;
-                let a1 = self.lower_expr(args.get(1).ok_or_else(|| arg_err(name))?)?;
+                let raw_start = self.lower_expr(args.get(1).ok_or_else(|| arg_err(name))?)?;
+                // Cypher substring() uses 0-based start index; SPARQL SUBSTR()
+                // uses 1-based → add 1 to the start argument.
+                let a1 = SparExpr::Add(Box::new(raw_start), Box::new(Self::lit_integer(1)));
                 let mut sargs = vec![a0, a1];
                 if let Some(a2) = args.get(2) {
                     sargs.push(self.lower_expr(a2)?);
@@ -1188,9 +1416,19 @@ impl Compiler {
                 Ok(SparExpr::FunctionCall(Function::Str, vec![a]))
             }
             "coalesce" => {
+                // Property-access triples generated inside coalesce() arguments
+                // must be OPTIONAL in SPARQL — the whole point of coalesce is
+                // to handle absent/null properties gracefully.
                 let largs = args
                     .iter()
-                    .map(|a| self.lower_expr(a))
+                    .map(|a| {
+                        let before = self.pending_triples.len();
+                        let expr = self.lower_expr(a)?;
+                        // Promote any new required triples to optional triples.
+                        let new_triples: Vec<_> = self.pending_triples.drain(before..).collect();
+                        self.pending_optional_triples.extend(new_triples);
+                        Ok(expr)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(SparExpr::Coalesce(largs))
             }
@@ -1295,6 +1533,37 @@ fn expr_type_name(expr: &Expr) -> &'static str {
         Expr::Exists(_) => "Exists",
         Expr::Parameter(_) => "Parameter",
         Expr::Xor(_, _) => "Xor",
+    }
+}
+
+/// Returns `true` if `e` is guaranteed to produce a string value.
+///
+/// Used by the `+` operator handler to decide between SPARQL arithmetic `+`
+/// and `CONCAT()`.  A conservative check: only literal strings and
+/// string-producing function calls / Add-chains are detected; property
+/// accesses are treated as unknown (numeric `+` will be attempted, and callers
+/// relying on string concat must include at least one literal string argument).
+fn lqa_expr_is_string(e: &Expr) -> bool {
+    match e {
+        Expr::Literal(lit) => matches!(lit, Literal::String(_)),
+        Expr::Add(a, b) => lqa_expr_is_string(a) || lqa_expr_is_string(b),
+        Expr::FunctionCall { name, .. } => matches!(
+            name.as_str(),
+            "toString"
+                | "toLower"
+                | "toUpper"
+                | "trim"
+                | "ltrim"
+                | "rtrim"
+                | "replace"
+                | "substring"
+                | "left"
+                | "right"
+                | "reverse"
+                | "split"
+                | "tostring"
+        ),
+        _ => false,
     }
 }
 

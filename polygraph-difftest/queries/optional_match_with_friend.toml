@@ -1,0 +1,29 @@
+name = "optional_match_null_flag"
+description = "OPTIONAL MATCH returns null for unmatched nodes; IS NULL detects absence."
+spec_ref = "openCypher 9 §4.3 OPTIONAL MATCH"
+
+cypher = """
+MATCH (n:Person)
+OPTIONAL MATCH (n)-[:KNOWS]->(m:Person)
+RETURN n.name AS name, m IS NULL AS no_friend
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = [
+    { id = "e1", from = "a", to = "b", rel_type = "KNOWS" },
+]
+
+[expected]
+columns = ["name", "no_friend"]
+rows = [
+    ["Alice", false],
+    ["Bob",   true],
+    ["Carol", true],
+]
+order = "ordered"

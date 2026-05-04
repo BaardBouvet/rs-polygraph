@@ -192,25 +192,22 @@ fn try_lqa_path(
 /// path matures.
 fn is_lqa_safe(ast: &ast::CypherQuery) -> bool {
     use ast::cypher::{Clause, PatternElement};
+    use std::collections::HashSet;
 
     // Require exactly one MATCH clause followed by exactly one RETURN clause.
     let mut clause_kinds: Vec<&str> = Vec::new();
     for c in &ast.clauses {
         match c {
             Clause::Match(m) => {
-                if m.optional {
-                    return false; // No OPTIONAL MATCH yet
-                }
                 clause_kinds.push("match");
+                // Check for unsupported rel-var and varlen in OPTIONAL MATCH too
+                if m.optional {
+                    clause_kinds.push("optional_match");
+                }
             }
             Clause::Return(r) => {
-                // ORDER BY expressions can generate pending property-access
-                // triples that get joined OUTSIDE the SELECT scope, causing
-                // wrong results. Fall back to legacy for any RETURN with ORDER BY.
-                if r.order_by.is_some() {
-                    return false;
-                }
                 clause_kinds.push("return");
+                let _ = r; // ORDER BY is handled correctly in the LQA SPARQL lowerer
             }
             Clause::With(_w) => {
                 // WITH generates mid-pipeline Projection ops that can create
@@ -235,17 +232,30 @@ fn is_lqa_safe(ast: &ast::CypherQuery) -> bool {
     }
 
     // Every MATCH pattern element must:
-    // - Have labeled nodes (all nodes in a MATCH must have ≥1 label)
+    // - Have labeled nodes UNLESS the variable is already bound from a prior MATCH
     // - Have no named relationship variables
     // - Have no variable-length paths
+    //
+    // Track bound node variables across clauses so re-used vars in OPTIONAL MATCH
+    // (e.g. `MATCH (n:P) OPTIONAL MATCH (n)-[:K]->(m:P)`) are not rejected.
+    let mut bound_vars: HashSet<&str> = HashSet::new();
     for c in &ast.clauses {
         if let Clause::Match(m) = c {
             for pattern in &m.pattern.0 {
                 for elem in &pattern.elements {
                     match elem {
                         PatternElement::Node(n) => {
-                            if n.labels.is_empty() {
-                                return false; // Unlabeled node — complex to scan
+                            let already_bound = n
+                                .variable
+                                .as_deref()
+                                .map(|v| bound_vars.contains(v))
+                                .unwrap_or(false);
+                            if n.labels.is_empty() && !already_bound {
+                                return false; // Unlabeled unbound node — complex to scan
+                            }
+                            // Mark this variable as bound for subsequent clauses.
+                            if let Some(v) = n.variable.as_deref() {
+                                bound_vars.insert(v);
                             }
                         }
                         PatternElement::Relationship(r) => {

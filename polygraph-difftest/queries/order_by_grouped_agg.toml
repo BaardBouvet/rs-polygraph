@@ -1,0 +1,27 @@
+name = "order_by_grouped_agg"
+description = "ORDER BY on implicit GROUP BY key — aggregate output sorted by group key in DESC order."
+spec_ref = "openCypher 9 §7.1 ORDER BY with grouping"
+
+cypher = """
+MATCH (n:Employee)
+RETURN n.dept AS dept, count(*) AS cnt
+ORDER BY cnt DESC
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Employee"], properties = { dept = "Eng" } },
+    { id = "b", labels = ["Employee"], properties = { dept = "Eng" } },
+    { id = "c", labels = ["Employee"], properties = { dept = "HR"  } },
+    { id = "d", labels = ["Employee"], properties = { dept = "Eng" } },
+    { id = "e", labels = ["Employee"], properties = { dept = "HR"  } },
+]
+edges = []
+
+[expected]
+columns = ["dept", "cnt"]
+rows = [
+    ["Eng", 3],
+    ["HR",  2],
+]
+order = "ordered"

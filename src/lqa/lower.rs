@@ -414,8 +414,8 @@ impl AstLowerer {
         let (proj_items, agg_items) = self.lower_return_items(&w.items)?;
 
         let projected = if !agg_items.is_empty() {
-            // Determine the non-aggregate group keys from the projection list.
-            let group_keys = proj_cols_keys(&proj_items);
+            let agg_aliases: Vec<String> = agg_items.iter().map(|a| a.alias.clone()).collect();
+            let group_keys = proj_cols_keys(&proj_items, &agg_aliases);
             let grouped = Op::GroupBy {
                 inner: Box::new(inner),
                 group_keys,
@@ -456,7 +456,8 @@ impl AstLowerer {
         let (proj_items, agg_items) = self.lower_return_items(&r.items)?;
 
         let projected = if !agg_items.is_empty() {
-            let group_keys = proj_cols_keys(&proj_items);
+            let agg_aliases: Vec<String> = agg_items.iter().map(|a| a.alias.clone()).collect();
+            let group_keys = proj_cols_keys(&proj_items, &agg_aliases);
             let grouped = Op::GroupBy {
                 inner: Box::new(inner),
                 group_keys,
@@ -1050,13 +1051,27 @@ fn lower_literal(l: &ast::Literal) -> Literal {
     }
 }
 
-/// Extract the group-by keys from a projection list: the alias of any item
-/// whose expression is not an aggregate.
-fn proj_cols_keys(items: &[ProjItem]) -> Vec<String> {
+/// Extract GROUP BY keys from a projection list: variables that are NOT
+/// themselves aggregate-output aliases.
+///
+/// After `lower_return_items`, every aggregate `AGG(x) AS alias` produces:
+///   - an `AggItem { alias: "alias", … }` in the agg list
+///   - a `ProjItem { expr: Var("alias"), alias: "alias" }` in the proj list
+///
+/// Those proj-list entries must NOT become GROUP BY keys — the alias is the
+/// aggregate output, not an input column.
+fn proj_cols_keys(items: &[ProjItem], agg_aliases: &[String]) -> Vec<String> {
+    let agg_set: std::collections::HashSet<&str> =
+        agg_aliases.iter().map(|s| s.as_str()).collect();
     items
         .iter()
         .filter_map(|pi| {
-            if matches!(pi.expr, Expr::Variable { .. }) {
+            // Every non-aggregate, non-wildcard projection item is a GROUP BY key.
+            // This includes both Variable references (already-bound vars) and
+            // Property-access expressions (e.g. `n.city AS city`) — the property
+            // triple for property-access keys is generated inside the Group inner
+            // by the SPARQL lowerer.
+            if pi.alias != "*" && !agg_set.contains(pi.alias.as_str()) {
                 Some(pi.alias.clone())
             } else {
                 None

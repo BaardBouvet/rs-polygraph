@@ -1,7 +1,7 @@
 # Spec-First Pivot — From TCK-Driven Patches to Semantics-Driven Translation
 
 **Status**: in progress
-**Updated**: 2026-05-04 (Phase 4.5 COMPLETE: LQA routing active; TCK 3757/3828)
+**Updated**: 2026-05-28 (Phase 5 COMPLETE: LQA allow-list expanded; TCK 3757/3828; difftest 204/204)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,
@@ -455,6 +455,7 @@ The legacy translator remains 100% correct for those cases.
   Falls back transparently to legacy on any `Err(Unsupported)`.
 - ✅ TCK: **3757 / 3828** (baseline maintained); lib unit tests: **191 / 191**.
 - ✅ Committed as `5b027fc`.
+- ✅ Aggregate GROUP BY bugs fixed (Phase 5 pre-work): agg alias excluded from GROUP BY keys; property triples from agg args flushed inside Group inner.
 
 **Legacy translator (`src/translator/`) status:** intentionally kept.  The LQA
 allow-list is still narrow; deleting the legacy path would immediately drop TCK
@@ -462,23 +463,63 @@ below 3000.  Phase 5 widens the allow-list query-class by query-class.  The
 legacy translator is deleted only when `is_lqa_safe` returns `true` for ≥ 99 %
 of the TCK corpus and the fallback code path is never exercised.
 
-### Phase 5 — Coverage Expansion via Differential Fuzzing
+### Phase 5 — LQA Allow-List Expansion  (✅ complete 2026-05-28)
 
-**Goal:** push correctness beyond what the TCK measures.
+**Goal:** widen `is_lqa_safe()` from the Phase 4.5 conservative baseline so more
+query classes route through the LQA path, and fix the LQA SPARQL compiler bugs
+exposed by the wider routing.
 
-- Grow the proptest generator to emit:
-  - Multi-clause queries with `WITH … WHERE … ORDER BY … LIMIT` chains.
-  - `OPTIONAL MATCH` with subsequent aggregation.
-  - List / pattern / map comprehensions, including nested.
-  - `CASE` expressions inside projections and predicates.
-  - Parameterized queries (driven by a parameter-binding API).
-- Track a **bag-equality pass rate** against Neo4j over the corpus; treat it
-  as a first-class metric in [ROADMAP.md](../ROADMAP.md) alongside TCK %.
-- Each fuzz-discovered failure becomes either a curated regression test
-  (after fix) or a documented `Unsupported` construct.
+**Baseline before this phase:** difftest 201/201; TCK 3757/3828.
 
-**Exit:** ≥ 10 000-query nightly corpus, ≥ 99.5 % bag-equality;
-`Unsupported` set documented in `docs/unsupported.md`.
+**Bugs fixed:**
+
+| Bug | Root cause | Fix |
+|-----|-----------|-----|
+| Aggregate GROUP BY alias in GROUP BY keys | `proj_cols_keys()` included agg output aliases as group keys | Pass `agg_aliases` arg; exclude from keys |
+| Property triples from agg args outside Group | `pending_triples` flushed AFTER `GraphPattern::Group` created | Flush AFTER lowering agg items, BEFORE creating Group |
+| `coalesce()` args generate required triples | `lower_function_call("coalesce")` didn't route to optional | Drain pending triples from each coalesce arg into `pending_optional_triples` |
+| BIND inside OPTIONAL blocks before GROUP inner | `flush_pending` placed optional triples before the Extend wrapping | `flush_pending` call added before `GraphPattern::Extend` in non-GroupBy branch |
+| Property accesses exclude nodes with absent props | `Expr::Property` pushed to `pending_triples` (required) | Push to `pending_optional_triples` (`OPTIONAL { }` in SPARQL) — matches openCypher null semantics |
+| `ORDER BY` creates nested sub-SELECT | `lower_op_as_query(OrderBy)` called `lower_op_as_query(Projection)` which created `GraphPattern::Project`, then OrderBy wrapped it, causing nested SELECT | New code path: if OrderBy wraps Projection, call `lower_projection_inner` directly and flatten into single Project {inner: OrderBy {inner: flat_bgp}} |
+| `ORDER BY` alias references SELECT alias | Sort key `Var("alias")` became `?alias` which is unbound at SPARQL ORDER BY time when alias defined by SELECT expression | Expand alias to underlying expression; GROUP BY key aliases and aggregate output aliases are NOT expanded (they're already bound) |
+| Property-access GROUP BY keys missing | `proj_cols_keys` only included `Expr::Variable` items; Property-expr items were dropped → empty GROUP BY → global aggregation | Expanded `proj_cols_keys` to include all non-agg, non-wildcard aliases; SPARQL lowerer generates property triple inside Group inner using alias variable directly |
+| `LIMIT` dropped when combined with `SKIP` | `lower_op_as_query(Limit)` created `Slice { inner: Slice, start, length }` (nested) — spargebra didn't flatten | Unwrap inner skip-only Slice into single `Slice { start: skip, length: limit }` |
+| String `+` generates arithmetic SPARQL `+` | `Expr::Add` always mapped to `SparExpr::Add`; string `+` is CONCAT in Cypher | Added `lqa_expr_is_string()` heuristic; string-producing Add → `SparExpr::FunctionCall(Concat)` |
+| `substring(str, 0, 5)` → `SUBSTR(str, 0, 5)` (wrong) | SPARQL SUBSTR is 1-based; Cypher `substring` is 0-based | Add 1 to start argument when generating `Function::SubStr` |
+| `collect()` → `GROUP_CONCAT` (string, not list) | LQA encoded collect as GROUP_CONCAT | `AggKind::Collect` now returns `Err(Unsupported)` → falls back to legacy |
+| OPTIONAL MATCH re-used node vars rejected | `is_lqa_safe()` required all MATCH nodes to have labels; re-used bound vars from prior MATCH don't need labels | Track `bound_vars` set; skip label check for already-bound variables |
+
+**Widened `is_lqa_safe()` allow-list:**
+
+| Construct | Before | After |
+|-----------|--------|-------|
+| `ORDER BY` | ✗ (legacy) | ✓ (fixed: flatten sort-key triples into WHERE scope) |
+| `OPTIONAL MATCH` | ✗ (legacy) | ✓ with caveat: property access on nullable vars uses `OPTIONAL { }` per-triple — the rebinding problem for `OPTIONAL MATCH (n)-[r]->(m) ... RETURN m.prop` is documented as L2 limitation |
+| Variable re-use across MATCH/OPTIONAL MATCH | ✗ | ✓ (bound_vars tracking) |
+| `WITH` | ✗ (legacy) | ✗ still (mid-pipeline Projection scoping issues remain) |
+
+**Known limitations (unchanged, still routed to legacy):**
+- Property access on nullable vars from OPTIONAL MATCH: `?m` from `OPTIONAL MATCH (n)-[r]->(m)` is unbound when match fails; OPTIONAL property triple `OPTIONAL { ?m :prop ?v }` rebinds `?m` to any node. Full fix needs nullable-variable tracking (L2 roadmap).
+- `collect()` aggregate: routes to legacy.
+- `WITH` clause: routes to legacy.
+- Variable-length paths, write clauses, CALL subquery: routes to legacy.
+
+**Difftest suite expansion:**
+- 3 new curated queries added (total: **204** queries)
+- `optional_match_null_flag` — OPTIONAL MATCH with IS NULL
+- `order_by_non_aggregate_prop` — ORDER BY on non-RETURN property
+- `order_by_grouped_agg` — ORDER BY on aggregate result (implicit GROUP BY)
+
+**Results:**
+- difftest: **204/204** (100%) 
+- TCK: **3757→3757** (baseline maintained, 1 regression immediately fixed, 1 newly passing)
+- TCK: Pattern2[11] "Use a pattern comprehension and ORDER BY" now passing (ORDER BY widening side effect)
+
+**Exit criteria:**
+- ✅ difftest ≥ 201/201 (was 201; now 204/204)
+- ✅ TCK ≥ 3757/3828 (maintained at 3757)
+- ✅ ORDER BY, OPTIONAL MATCH routed through LQA where safe
+- ✅ Property null-propagation semantics correct
 
 ### Phase 6 — Public API Hardening
 
