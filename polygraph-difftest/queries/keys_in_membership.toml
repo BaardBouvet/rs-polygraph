@@ -1,0 +1,20 @@
+name = "keys_in_membership"
+description = "'key' IN keys(n) checks property existence in LQA path via EXISTS pattern."
+spec_ref = "openCypher 9 §6.3.2 — keys() IN"
+
+cypher = """
+MATCH (n:Person)
+RETURN 'name' IN keys(n) AS has_name,
+       'missing' IN keys(n) AS has_missing
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+]
+edges = []
+
+[expected]
+columns = ["has_name", "has_missing"]
+rows = [[true, false]]
+order = "bag"

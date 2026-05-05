@@ -1,7 +1,7 @@
 # Spec-First Pivot — From TCK-Driven Patches to Semantics-Driven Translation
 
 **Status**: in progress
-**Updated**: 2026-05-11 (Phase 7 in progress: Bucket 4 temporal constructors done, Bucket 7 range() done; TCK 3757/3828; difftest 213/213; read fallbacks 743 — see Phase 7 progress)
+**Updated**: 2026-05-11 (Phase 7 in progress: Bucket 4 temporal constructors done, Bucket 7 range() done, keys() UNWIND + IN done; TCK 3757/3828; difftest 220/220; read fallbacks 604 lqa_compile=Unsupported — see Phase 7 progress)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,
@@ -563,124 +563,171 @@ well-formed read queries covered by the current TCK.
 
 ### Phase 7 — Read-Fallback Bucket Drain  (🚧 in progress)
 
-**Goal:** drive read-query legacy fallbacks from ~951 to ~0 by attacking
-five well-defined buckets, each implementable as an independent PR with
-zero TCK risk (every targeted query already passes via legacy).
+**Goal:** drive read-query legacy fallbacks from ~951 to 0 by porting each
+construct from the legacy translator into `src/lqa/sparql.rs`, one bucket
+at a time.
 
-**Baseline (2026-05-05, captured via `POLYGRAPH_TRACE_LEGACY=1 cargo test --test tck`):**
+**The fundamental rule:** if the legacy translator handles it and TCK passes,
+it is portable to LQA. Full stop. There are only two real categories:
 
-Total legacy fallbacks: **1229** across the TCK corpus.
+| Category | What to do |
+|---|---|
+| Legacy translator emits SPARQL for it → TCK passes | **Port it. Do not add `Unsupported`. Do not label it "L2 territory".** |
+| The construct is in `fundamental-limitations.md` AND in the 71 *failing* TCK scenarios | `Unsupported` is correct. |
 
-| # | Bucket | Count | Where it short-circuits | Read/Write |
-|---|--------|------:|-------------------------|------------|
-| W | Write clauses (CREATE, MERGE, SET, DELETE, REMOVE, CALL) | 278 | [src/lib.rs](../src/lib.rs#L247) `lqa_safe_reason` `write_*` arms | **write** — Phase 8 |
-| 1 | `Expr::List` literal lowering | 155 | [src/lqa/sparql.rs](../src/lqa/sparql.rs) `lower_expr` `Expr::List` arm — currently `Err(Unsupported { construct: "expression type List…" })` | read |
-| 2 | `Expr::Map` literal lowering | 117 | same site, `Expr::Map` arm | read |
-| 3 | UNWIND of non-literal list / variable / range | 116 | [src/lqa/sparql.rs](../src/lqa/sparql.rs#L1706) UNWIND op + `non-literal value (List)` | read |
-| 4 | Temporal constructors `datetime` / `localdatetime` / `date` / `time` / `localtime` / `duration` | 199 | [src/lqa/sparql.rs](../src/lqa/sparql.rs) `lower_function_call` — falls through | read |
-| 5 | Named path `MATCH p = (a)-[…]->(b)` | 87 | [src/lib.rs](../src/lib.rs#L470) `named_path` guard | read |
-| 6 | `collect()` aggregate | 57 | LQA aggregate kind currently returns `Unsupported` | read (limitation, see below) |
-| 7 | `range(start, end[, step])` builtin | 53 | `lower_function_call` fallthrough | read |
-| 8 | `relvar_after_with` / varlen named relvar / unbounded varlen unlabeled | 41 | `is_lqa_safe` guards | read |
-| 9 | `ListComprehension` / `PatternComprehension` / `ListSlice` | 40 | `lower_expr` arms | read |
-| 10 | `Quantifier` over non-constant list | 24 | `lower_expr` arm | read (L2 territory) |
-| 11 | `keys()` / `properties()` / `labels()` | 20 | `lower_function_call` fallthrough | read |
-| 12 | scalar-var property access, `Exists`, `type(r)`, `rand()`, `^`, `Subscript`, `with_orderby_shadow_alias`, `Aggregate` | 42 | misc | read (long tail) |
+Everything else is a missing match arm. The legacy translator is the reference
+implementation. The LQA does not need to produce better SPARQL — it just needs
+to produce equivalent SPARQL so the legacy translator can eventually be deleted.
 
-**Progress (2026-05-11):**
+**What "L2" does NOT mean for Phase 7:**
+"L2" in `fundamental-limitations.md` describes limits on *semantic quality*
+(e.g. `collect()` returns a serialized string, not a typed list). It does **not**
+mean the construct cannot be lowered. The legacy translator already lowers it
+to a working-but-limited form. Port that form. Improving the semantics is
+out of scope — that is Phase L2 (a completely separate future work item).
 
-| Bucket | Status | Result |
-|--------|--------|--------|
-| 4 — temporal constructors | ✅ DONE | 199 → 14 (−185); 6 difftest queries added |
-| 7 — range() | ✅ DONE | 53 → 26 (−27); 3 difftest queries added |
-| 5 — named path length (fixed-hop) | 🔴 ATTEMPTED, REVERTED | Anonymous rel uniqueness prevents safe routing; `path_lengths` infrastructure added but guard kept |
-| 8 — relvar_after_with | 🔴 ATTEMPTED, REVERTED | Same rel uniqueness issue; guard kept |
-| 8 — with_orderby_shadow_alias | 🔴 ATTEMPTED, REVERTED | 3 SPARQL scoping failures when guard removed |
-| 1+2 — List/Map literals | 🟡 DEFERRED | Null propagation in list equality breaks semantics |
-| 3+6+9 — UNWIND var / collect / ListComp | 🔴 BLOCKED | Requires L2 list type support |
+**Concretely:**
+- `collect()` → legacy emits `GROUP_CONCAT` → LQA should emit `GROUP_CONCAT`. Not blocked.
+- `Expr::List` → legacy serializes `[1,2,3]` as a string literal → LQA does the same. Not blocked.
+- `ListComprehension` → legacy emits a SPARQL sub-SELECT → LQA does the same. Not blocked.
+- `PatternComprehension` → same. Not blocked.
+- `named_path` → legacy emits a BGP-chain and tracks the binding → LQA does the same. Not blocked.
+- `Quantifier over non-constant list` (24) → these are in the **71 failing** TCK scenarios → leave as `Unsupported`.
+- Truly unbounded varlen path decomposition (`relationships(p)` on `[r*]`) → also in failing set → `Unsupported`.
 
-**Current state (2026-05-11):**
+**Baseline (2026-05-05):**
 
 ```
-Read fallbacks:   743  (was 951; −208 achieved)
+Read fallbacks:   951  (743 after initial Phase 7 PRs — see progress below)
 Write fallbacks:  278  (Phase 8)
-TCK pass rate:    3757/3828  (floor maintained)
-Difftest:         213/213  (floor maintained; 9+ queries added in Phase 7)
+TCK pass rate:    3757/3828
+Difftest:         213/213
 ```
 
-**Root cause of remaining read fallbacks:**
+**Bucket table (full baseline, 2026-05-05):**
 
-| Category | Count | Reason blocked |
-|----------|------:|----------------|
-| List/Map/UNWIND-var/collect/ListComp/Quantifier | 475 | SPARQL has no list type; L2 required |
-| Named path (length/nodes/relationships) | 87 | Anonymous rel uniqueness in LQA |
-| relvar_after_with / unbounded_varlen | 28 | Same rel uniqueness issue |
-| Property access on runtime temporal | 21 | Needs SPARQL YEAR/MONTH/DAY functions + complex date arithmetic |
-| spec-anchored guards (keys/properties/labels/Exists/etc.) | 132 | Various: enumeration, correlated subquery, engine extensions |
-| **Total** | **743** | |
+| # | Bucket | Baseline count | Current count | Legacy location | Portability |
+|---|--------|------:|------:|---|---|
+| W | Writes (CREATE/MERGE/SET/DELETE/REMOVE/CALL) | 278 | 278 | `src/translator/cypher/clauses.rs` (write lowering) | Phase 8 |
+| 1 | `Expr::List` literal | 155 | 155 | `lower_expr` in `mod.rs` — serialises `[a,b,c]` to string `"[a, b, c]"` | ✅ portable (string serialisation) |
+| 2 | `Expr::Map` literal | 117 | 117 | same — serialises `{k: v}` to string | ✅ portable |
+| 3 | UNWIND of non-literal / variable list | 116 | 116 | `clauses.rs` UNWIND lowering | ✅ portable (needs bucket 1+2 first) |
+| 4 | Temporal constructors (datetime/localdatetime/date/time/localtime/duration) | 199 | 14 | `temporal.rs` | ✅ DONE (−185) |
+| 5 | Named path `MATCH p = …` | 87 | 87 | `patterns.rs` — emits BGP chain, records path variable | ✅ portable |
+| 6 | `collect()` aggregate | 57 | 57 | `return_proj.rs` — emits `GROUP_CONCAT` | ✅ portable (GROUP_CONCAT, same lossy semantics as legacy) |
+| 7 | `range(start, end[, step])` | 53 | 26 | `mod.rs` function dispatch | ✅ DONE for literal args (−27); 26 non-literal remain |
+| 8 | `relvar_after_with` / varlen named relvar / unbounded varlen unlabeled | 41 | 41 | `is_lqa_safe` guards | ✅ portable for relvar_after_with (port leg. treatment); `unbounded_varlen_unlabeled` (9) in failing set → keep guard |
+| 9 | `ListComprehension` / `PatternComprehension` / `ListSlice` | 40 | 40 | `mod.rs` lower_expr branches | ✅ portable (correlated sub-SELECT, same as legacy) |
+| 10 | `Quantifier over non-constant list` | 24 | 24 | — | ❌ genuinely not portable: these 24 map to failing TCK scenarios; leave `Unsupported` |
+| 11 | `keys()` / `properties()` / `labels()` | 20 | 20 | `mod.rs` function dispatch | ✅ portable |
+| 12 | scalar-var property access, `Exists`, `type(r)`, `rand()`, `^`, `Subscript`, `with_orderby_shadow_alias`, misc | 42 | 42 | various | mostly portable; check legacy per-item |
 
-**Infrastructure added in Phase 7:**
-- `path_lengths: HashMap<String, usize>` in `Compiler` — tracks static hop count for fixed-hop named paths; varlen paths get `usize::MAX` sentinel; ready for future unconditional routing once anonymous rel uniqueness is fixed
-- `weekDay` synonym, `epochSeconds`, `epochMillis` in `lqa_scalar_temporal_prop` — correct for compile-time scalar temporals
-- `computed_lit_val` tracking in `Op::Projection` flat path — populates `scalar_lit_vals` when `lower_expr` returns a typed literal (e.g. from temporal constructors)
-- ORDER BY rel-property alias expansion fix (prevents double-emission of property triples)
+**Progress log:**
 
-**Phase 7 exit criterion revised:** given the L2 nature of list type support, the original "≤50 read fallbacks" target requires a separate L2 runtime API phase. The achievable Phase 7 goal is **~700-750 read fallbacks** (the L2-independent fraction). Bullets 1+2+6+9+10 are reclassified to Phase 8 / L2.
+| Date | Bucket | Δ | Notes |
+|------|--------|---|-------|
+| 2026-05-05 | 4 — temporal constructors | −185 | 6 difftest queries added |
+| 2026-05-05 | 7 — range() literal args | −27 | 3 difftest queries added |
 
-**Why this drains without TCK risk:** every fallback in the table above
-already produces correct SPARQL via the legacy path (otherwise it would
-appear in the 71 TCK failures). Routing it through LQA only changes
-*which code emits the SPARQL*, not the SPARQL itself. TCK is the floor;
-difftest curated queries are the equivalence oracle.
+**Ordered queue (next-up first):**
 
-**Re-baselined metrics (replaces the single "legacy count" headline):**
+1. **Buckets 1+2 — `Expr::List` and `Expr::Map`** (272). Port the string-serialisation
+   that legacy uses. `[1, 2, 3]` → SPARQL string `"[1, 2, 3]"`;
+   `{k: v}` → `"{ k: v }"`. Find the exact format in
+   [src/translator/cypher/mod.rs](../src/translator/cypher/mod.rs) `lower_expr`
+   and replicate it in `lqa::sparql::Compiler::lower_expr`. Add 4 difftest TOMLs
+   (list literal in WHERE, list literal in RETURN, map literal, list IN list).
+2. **Bucket 3 — UNWIND non-literal** (116). Unblocked by 1+2.
+3. **Bucket 6 — `collect()`** (57). Emit `GROUP_CONCAT` from `AggKind::Collect`,
+   exactly as [src/translator/cypher/return_proj.rs](../src/translator/cypher/return_proj.rs) does.
+4. **Bucket 9 — `ListComprehension` / `PatternComprehension` / `ListSlice`** (40).
+   Read the legacy sub-SELECT shape from `mod.rs`, replicate in `lower_expr`.
+5. **Bucket 5 — named path** (87). Read [src/translator/cypher/patterns.rs](../src/translator/cypher/patterns.rs)
+   path tracking. Remove the `named_path` guard in `lqa_safe_reason` and
+   teach `lower_op(Scan/Expand)` to record the path variable binding.
+6. **Bucket 11 — `keys()`, `properties()`, `labels()`** (20). Port from
+   `mod.rs` function dispatch.
+7. **Bucket 8 — `relvar_after_with`** (19). Port legacy's treatment of
+   relationship variables that cross a WITH boundary. The `varlen_named_relvar` (12)
+   and `unbounded_varlen_unlabeled` (9) sub-buckets map to failing scenarios — keep those guards.
+8. **Bucket 7 remainder — `range()` with non-literal args** (26). See how legacy handles it.
+9. **Bucket 12 — long tail** (42). Port individually; check legacy per-item.
+10. **Bucket 10 — `Quantifier` over non-constant list** (24). These are in the failing set;
+    confirm each is in the 71 failures. Keep `Unsupported`.
 
-The autopilot session **must** publish all three numbers per iteration:
+**Correctness model — read this before touching any code:**
+
+The LQA does **not** need to emit the same SPARQL as the legacy translator.
+It only needs to emit SPARQL that produces the **same result rows** when
+executed on the same RDF graph. Different syntax is fine — difftest is the
+oracle, not string comparison.
+
+The legacy translator is the safety net: if the LQA compiler returns
+`Err(Unsupported)` for any reason, execution silently falls back to legacy
+([src/lib.rs `try_lqa_path`](../src/lib.rs)) and the TCK/difftest result is
+correct regardless. This means **adding a new lowering arm can never make a
+previously-passing query wrong** — the worst case is still "falls back to
+legacy". The only risk direction is: a new arm fires but emits semantically
+wrong SPARQL *and* difftest doesn't cover that shape. Prevent this with
+step 2 of the loop below.
+
+**Mechanical loop for every bucket (repeat until bucket count = 0):**
 
 ```
-Read fallbacks:   N₁ → N₂   (Phase 7 target: → 0)
-Write fallbacks:  N₃        (Phase 8 target: → 0)
-TCK pass rate:    K/3828    (floor: 3757; do not regress)
-Difftest:         M/204     (floor: 204; do not regress)
+1. Pick the top unfinished bucket from the queue above.
+
+2. ADD A DIFFTEST QUERY FIRST.
+   Create a new TOML under polygraph-difftest/queries/ that exercises the
+   construct. Run `cargo test -p polygraph-difftest` — it should PASS
+   because the legacy fallback still handles it. This establishes the
+   equivalence oracle before any code changes.
+
+3. Find the legacy implementation.
+   The legacy lowering lives in src/translator/cypher/:
+     - temporal functions  → temporal.rs
+     - list/range/unwind   → clauses.rs
+     - expression lowering → mod.rs (lower_expr / lower_function_call)
+     - named paths         → patterns.rs
+     - aggregates/collect  → return_proj.rs
+   Read what the legacy code emits. The goal is to emit the same semantics
+   (and same lossy trade-offs), not to improve on them.
+
+4. ADD THE MATCH ARM in src/lqa/sparql.rs.
+   - For a function: add a case in `Compiler::lower_function_call`.
+   - For an expression type: add a case in `Compiler::lower_expr`.
+   - For an Op variant: add a case in `Compiler::lower_op`.
+   Do not touch any other file. Do not modify the legacy translator.
+   Do NOT add `Err(Unsupported)` unless the construct is in the genuinely
+   impossible set (bucket 10 / `fundamental-limitations.md` L2 category AND
+   already a failing TCK scenario).
+
+5. VERIFY.
+   a. `cargo test -p polygraph-difftest` — must still pass (all queries).
+   b. `cargo test --test tck` — must stay at ≥ 3757.
+   c. `POLYGRAPH_TRACE_LEGACY=1 cargo test --test tck 2>/tmp/trace.txt &&
+       grep -oE 'construct=.*$|reason=[a-z_]+' /tmp/trace.txt |
+       sort | uniq -c | sort -rn | head -20`
+      The target construct's line must show count = 0 (or be absent).
+
+6. COMMIT. Update the "Current count" column in the bucket table above,
+   and add a row to the progress log.
+   Commit message format:
+   "lqa: bucket 1+2 — List/Map literal lowering (272→0)"
 ```
 
-The pre-Phase-7 split is **951 read / 278 write / 3757 TCK / 204 difftest**.
+**When step 4 is hard — use the legacy code as a template:**
 
-**Per-bucket exit criterion:** for bucket *N*, the legacy trace
-(`POLYGRAPH_TRACE_LEGACY=1`) must show **0** entries matching that bucket's
-construct/reason string after the PR lands, and TCK + difftest unchanged.
+If you don't know what SPARQL to emit, `grep` for the construct name in
+`src/translator/cypher/` and read the exact spargebra nodes it builds.
+Copy the structure. The legacy translator has already solved the hard
+semantic questions; Phase 7 is a mechanical port, not a re-design.
 
-**Suggested PR ordering** (highest leverage / lowest risk first):
+**The only time `Err(Unsupported)` is correct in Phase 7:**
+A construct that (a) is listed in `fundamental-limitations.md` as L2/L3
+**and** (b) maps to a scenario in the **71 failing** TCK scenarios.
+If it's in a *passing* scenario, it's portable.
 
-1. **Bucket 4 — temporal constructors** (199, single PR). ✅ DONE
-2. **Bucket 7 — `range(start, end[, step])`** (53). ✅ DONE (−27; 26 remain with non-constant args)
-3. **Bucket 1+2 — `Expr::List` and `Expr::Map` literal lowering** (272). 🟡 DEFERRED — null propagation and list concatenation semantics make safe implementation complex; requires L2 list type support
-4. **Bucket 3 — UNWIND of variable / non-literal list** (116). 🔴 BLOCKED — requires List serialization from buckets 1+2
-5. **Bucket 5 — named path `MATCH p = …`** (87). 🔴 BLOCKED — `path_lengths` infrastructure in place; needs anonymous rel uniqueness fix (L2 territory) before the `named_path` guard can be safely removed
-6. **Bucket 8 — guards** (41). 🔴 BLOCKED — relvar_after_with causes cross-product issues; with_orderby_shadow_alias causes SPARQL scoping errors
-7. **Bucket 11 — `keys()` / `properties()` / `labels()`** (20). Still addressable if needed
-8. **Bucket 6 — `collect()` aggregate** (57). 🔴 BLOCKED — SPARQL has no list aggregate returning a typed list
-9. **Bucket 9 — list / pattern comprehension** (40). 🔴 BLOCKED — requires list support
-10. **Bucket 10 — `Quantifier` over non-constant list** (24). 🔴 L2 territory
-11. **Bucket 12 — long tail** (42). Sweep individually
-
-**Working agreement for the autopilot session:**
-
-- One bucket per PR. Do not bundle. Each PR's commit message names the
-  bucket number and shows the before/after fallback count for that bucket.
-- Add a difftest query for *every* construct touched, before the
-  implementation. Difftest is the LQA equivalence oracle.
-- TCK floor (3757) and difftest floor (204) are non-negotiable. CI must
-  fail the PR on regression of either.
-- The legacy translator is **not** modified in Phase 7. It remains the
-  ground-truth fallback until Phase 8 proves we can delete it.
-- After each PR, run `POLYGRAPH_TRACE_LEGACY=1 cargo test --test tck 2>/tmp/trace.txt`
-  and append `grep -oE 'construct=.*$|reason=[a-z_]+' /tmp/trace.txt | sort | uniq -c | sort -rn`
-  output to the PR description. This is the dashboard.
-
-**Exit:** read fallbacks ≤ 50 (long tail only); TCK ≥ 3757; difftest ≥ 213.
-At Phase 7 exit, every legacy fallback is either a write clause (Phase 8)
-or a documented `Unsupported` case with a spec citation.
+**Exit:** read fallbacks ≤ 25 (bucket 10 Quantifier only); TCK ≥ 3757; difftest ≥ 213.
 
 ### Phase 8 — Write-Clause LQA + Legacy Translator Deletion  (planned)
 

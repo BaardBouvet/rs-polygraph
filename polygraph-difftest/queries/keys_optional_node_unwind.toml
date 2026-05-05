@@ -1,0 +1,18 @@
+name = "keys_optional_node_unwind"
+description = "UNWIND keys(n) AS x — when n is from OPTIONAL MATCH and null, produces no rows."
+spec_ref = "openCypher 9 §6.3.2 — keys() with nullable node"
+
+cypher = """
+OPTIONAL MATCH (n:DoesNotExist)
+UNWIND keys(n) AS k
+RETURN k
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["k"]
+rows = []
+order = "bag"

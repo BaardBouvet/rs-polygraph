@@ -1,0 +1,21 @@
+name = "keys_node_unwind"
+description = "UNWIND keys(n) AS x expands property keys of a node as rows."
+spec_ref = "openCypher 9 §6.3.2 — keys()"
+
+cypher = """
+MATCH (n:Person)
+UNWIND keys(n) AS k
+RETURN DISTINCT k AS key
+ORDER BY key
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", age = 30 } },
+]
+edges = []
+
+[expected]
+columns = ["key"]
+rows = [["age"], ["name"]]
+order = "ordered"
