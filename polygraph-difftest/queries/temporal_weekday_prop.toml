@@ -1,0 +1,17 @@
+name = "temporal_weekday_prop"
+description = "weekDay property accessor on a compile-time date literal returns ISO weekday (1=Mon…7=Sun)."
+spec_ref = "openCypher 9 §3.5 — temporal component access"
+
+cypher = """
+WITH date({year: 1984, month: 10, day: 11}) AS d
+RETURN d.weekDay AS wd
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["wd"]
+rows = [[4]]
+order = "bag"

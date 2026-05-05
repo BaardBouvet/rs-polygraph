@@ -1,0 +1,17 @@
+name = "temporal_epoch_millis"
+description = "epochMillis property on 1970-01-02 returns 86400000 (one day after Unix epoch)."
+spec_ref = "openCypher 9 §3.5 — temporal component access"
+
+cypher = """
+WITH date({year: 1970, month: 1, day: 2}) AS d
+RETURN d.epochMillis AS em
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["em"]
+rows = [[86400000]]
+order = "bag"

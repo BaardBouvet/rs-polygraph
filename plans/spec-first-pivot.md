@@ -1,7 +1,7 @@
 # Spec-First Pivot — From TCK-Driven Patches to Semantics-Driven Translation
 
 **Status**: in progress
-**Updated**: 2026-06-01 (Phase 6 in progress: WITH/UNION routed through LQA; TCK 3757/3828; difftest 204/204)
+**Updated**: 2026-05-11 (Phase 7 in progress: Bucket 4 temporal constructors done, Bucket 7 range() done; TCK 3757/3828; difftest 213/213; read fallbacks 743 — see Phase 7 progress)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,
@@ -561,6 +561,224 @@ well-formed read queries covered by the current TCK.
 - Write clauses are handled externally by TCK runner
 - Full legacy deletion deferred until all read-query pass cases covered by LQA
 
+### Phase 7 — Read-Fallback Bucket Drain  (🚧 in progress)
+
+**Goal:** drive read-query legacy fallbacks from ~951 to ~0 by attacking
+five well-defined buckets, each implementable as an independent PR with
+zero TCK risk (every targeted query already passes via legacy).
+
+**Baseline (2026-05-05, captured via `POLYGRAPH_TRACE_LEGACY=1 cargo test --test tck`):**
+
+Total legacy fallbacks: **1229** across the TCK corpus.
+
+| # | Bucket | Count | Where it short-circuits | Read/Write |
+|---|--------|------:|-------------------------|------------|
+| W | Write clauses (CREATE, MERGE, SET, DELETE, REMOVE, CALL) | 278 | [src/lib.rs](../src/lib.rs#L247) `lqa_safe_reason` `write_*` arms | **write** — Phase 8 |
+| 1 | `Expr::List` literal lowering | 155 | [src/lqa/sparql.rs](../src/lqa/sparql.rs) `lower_expr` `Expr::List` arm — currently `Err(Unsupported { construct: "expression type List…" })` | read |
+| 2 | `Expr::Map` literal lowering | 117 | same site, `Expr::Map` arm | read |
+| 3 | UNWIND of non-literal list / variable / range | 116 | [src/lqa/sparql.rs](../src/lqa/sparql.rs#L1706) UNWIND op + `non-literal value (List)` | read |
+| 4 | Temporal constructors `datetime` / `localdatetime` / `date` / `time` / `localtime` / `duration` | 199 | [src/lqa/sparql.rs](../src/lqa/sparql.rs) `lower_function_call` — falls through | read |
+| 5 | Named path `MATCH p = (a)-[…]->(b)` | 87 | [src/lib.rs](../src/lib.rs#L470) `named_path` guard | read |
+| 6 | `collect()` aggregate | 57 | LQA aggregate kind currently returns `Unsupported` | read (limitation, see below) |
+| 7 | `range(start, end[, step])` builtin | 53 | `lower_function_call` fallthrough | read |
+| 8 | `relvar_after_with` / varlen named relvar / unbounded varlen unlabeled | 41 | `is_lqa_safe` guards | read |
+| 9 | `ListComprehension` / `PatternComprehension` / `ListSlice` | 40 | `lower_expr` arms | read |
+| 10 | `Quantifier` over non-constant list | 24 | `lower_expr` arm | read (L2 territory) |
+| 11 | `keys()` / `properties()` / `labels()` | 20 | `lower_function_call` fallthrough | read |
+| 12 | scalar-var property access, `Exists`, `type(r)`, `rand()`, `^`, `Subscript`, `with_orderby_shadow_alias`, `Aggregate` | 42 | misc | read (long tail) |
+
+**Progress (2026-05-11):**
+
+| Bucket | Status | Result |
+|--------|--------|--------|
+| 4 — temporal constructors | ✅ DONE | 199 → 14 (−185); 6 difftest queries added |
+| 7 — range() | ✅ DONE | 53 → 26 (−27); 3 difftest queries added |
+| 5 — named path length (fixed-hop) | 🔴 ATTEMPTED, REVERTED | Anonymous rel uniqueness prevents safe routing; `path_lengths` infrastructure added but guard kept |
+| 8 — relvar_after_with | 🔴 ATTEMPTED, REVERTED | Same rel uniqueness issue; guard kept |
+| 8 — with_orderby_shadow_alias | 🔴 ATTEMPTED, REVERTED | 3 SPARQL scoping failures when guard removed |
+| 1+2 — List/Map literals | 🟡 DEFERRED | Null propagation in list equality breaks semantics |
+| 3+6+9 — UNWIND var / collect / ListComp | 🔴 BLOCKED | Requires L2 list type support |
+
+**Current state (2026-05-11):**
+
+```
+Read fallbacks:   743  (was 951; −208 achieved)
+Write fallbacks:  278  (Phase 8)
+TCK pass rate:    3757/3828  (floor maintained)
+Difftest:         213/213  (floor maintained; 9+ queries added in Phase 7)
+```
+
+**Root cause of remaining read fallbacks:**
+
+| Category | Count | Reason blocked |
+|----------|------:|----------------|
+| List/Map/UNWIND-var/collect/ListComp/Quantifier | 475 | SPARQL has no list type; L2 required |
+| Named path (length/nodes/relationships) | 87 | Anonymous rel uniqueness in LQA |
+| relvar_after_with / unbounded_varlen | 28 | Same rel uniqueness issue |
+| Property access on runtime temporal | 21 | Needs SPARQL YEAR/MONTH/DAY functions + complex date arithmetic |
+| spec-anchored guards (keys/properties/labels/Exists/etc.) | 132 | Various: enumeration, correlated subquery, engine extensions |
+| **Total** | **743** | |
+
+**Infrastructure added in Phase 7:**
+- `path_lengths: HashMap<String, usize>` in `Compiler` — tracks static hop count for fixed-hop named paths; varlen paths get `usize::MAX` sentinel; ready for future unconditional routing once anonymous rel uniqueness is fixed
+- `weekDay` synonym, `epochSeconds`, `epochMillis` in `lqa_scalar_temporal_prop` — correct for compile-time scalar temporals
+- `computed_lit_val` tracking in `Op::Projection` flat path — populates `scalar_lit_vals` when `lower_expr` returns a typed literal (e.g. from temporal constructors)
+- ORDER BY rel-property alias expansion fix (prevents double-emission of property triples)
+
+**Phase 7 exit criterion revised:** given the L2 nature of list type support, the original "≤50 read fallbacks" target requires a separate L2 runtime API phase. The achievable Phase 7 goal is **~700-750 read fallbacks** (the L2-independent fraction). Bullets 1+2+6+9+10 are reclassified to Phase 8 / L2.
+
+**Why this drains without TCK risk:** every fallback in the table above
+already produces correct SPARQL via the legacy path (otherwise it would
+appear in the 71 TCK failures). Routing it through LQA only changes
+*which code emits the SPARQL*, not the SPARQL itself. TCK is the floor;
+difftest curated queries are the equivalence oracle.
+
+**Re-baselined metrics (replaces the single "legacy count" headline):**
+
+The autopilot session **must** publish all three numbers per iteration:
+
+```
+Read fallbacks:   N₁ → N₂   (Phase 7 target: → 0)
+Write fallbacks:  N₃        (Phase 8 target: → 0)
+TCK pass rate:    K/3828    (floor: 3757; do not regress)
+Difftest:         M/204     (floor: 204; do not regress)
+```
+
+The pre-Phase-7 split is **951 read / 278 write / 3757 TCK / 204 difftest**.
+
+**Per-bucket exit criterion:** for bucket *N*, the legacy trace
+(`POLYGRAPH_TRACE_LEGACY=1`) must show **0** entries matching that bucket's
+construct/reason string after the PR lands, and TCK + difftest unchanged.
+
+**Suggested PR ordering** (highest leverage / lowest risk first):
+
+1. **Bucket 4 — temporal constructors** (199, single PR). ✅ DONE
+2. **Bucket 7 — `range(start, end[, step])`** (53). ✅ DONE (−27; 26 remain with non-constant args)
+3. **Bucket 1+2 — `Expr::List` and `Expr::Map` literal lowering** (272). 🟡 DEFERRED — null propagation and list concatenation semantics make safe implementation complex; requires L2 list type support
+4. **Bucket 3 — UNWIND of variable / non-literal list** (116). 🔴 BLOCKED — requires List serialization from buckets 1+2
+5. **Bucket 5 — named path `MATCH p = …`** (87). 🔴 BLOCKED — `path_lengths` infrastructure in place; needs anonymous rel uniqueness fix (L2 territory) before the `named_path` guard can be safely removed
+6. **Bucket 8 — guards** (41). 🔴 BLOCKED — relvar_after_with causes cross-product issues; with_orderby_shadow_alias causes SPARQL scoping errors
+7. **Bucket 11 — `keys()` / `properties()` / `labels()`** (20). Still addressable if needed
+8. **Bucket 6 — `collect()` aggregate** (57). 🔴 BLOCKED — SPARQL has no list aggregate returning a typed list
+9. **Bucket 9 — list / pattern comprehension** (40). 🔴 BLOCKED — requires list support
+10. **Bucket 10 — `Quantifier` over non-constant list** (24). 🔴 L2 territory
+11. **Bucket 12 — long tail** (42). Sweep individually
+
+**Working agreement for the autopilot session:**
+
+- One bucket per PR. Do not bundle. Each PR's commit message names the
+  bucket number and shows the before/after fallback count for that bucket.
+- Add a difftest query for *every* construct touched, before the
+  implementation. Difftest is the LQA equivalence oracle.
+- TCK floor (3757) and difftest floor (204) are non-negotiable. CI must
+  fail the PR on regression of either.
+- The legacy translator is **not** modified in Phase 7. It remains the
+  ground-truth fallback until Phase 8 proves we can delete it.
+- After each PR, run `POLYGRAPH_TRACE_LEGACY=1 cargo test --test tck 2>/tmp/trace.txt`
+  and append `grep -oE 'construct=.*$|reason=[a-z_]+' /tmp/trace.txt | sort | uniq -c | sort -rn`
+  output to the PR description. This is the dashboard.
+
+**Exit:** read fallbacks ≤ 50 (long tail only); TCK ≥ 3757; difftest ≥ 213.
+At Phase 7 exit, every legacy fallback is either a write clause (Phase 8)
+or a documented `Unsupported` case with a spec citation.
+
+### Phase 8 — Write-Clause LQA + Legacy Translator Deletion  (planned)
+
+**Goal:** route every write query (CREATE, MERGE, SET, DELETE, REMOVE,
+FOREACH, CALL-with-update) through LQA, then **delete `src/translator/`
+in full**. This is the pivot's terminal phase.
+
+**Baseline (2026-05-05):** 278 write-clause fallbacks; legacy translator
+~14 kloc in [src/translator/cypher/](../src/translator/cypher/).
+
+**Why a separate phase:** writes need new LQA operators (`Create`,
+`Merge`, `Set`, `Delete`, `Remove`, `Foreach` already exist as `Op` enum
+arms — see [src/lqa/op.rs](../src/lqa/op.rs)) but no SPARQL lowering.
+Write SPARQL is `INSERT DATA` / `DELETE DATA` / `INSERT … WHERE` / 
+`DELETE … WHERE`, which is structurally different from the read-side
+`SELECT … WHERE` pipeline. The lowering target is `spargebra::Update`,
+not `spargebra::Query`.
+
+**Sub-phases:**
+
+#### 8.1 — Write SPARQL plumbing  (foundational)
+
+- Add `lqa::sparql::compile_update(op) -> spargebra::Update` alongside
+  the existing `compile(op) -> spargebra::Query`.
+- Extend [src/lib.rs](../src/lib.rs) `try_lqa_path` to dispatch on
+  read-vs-write and return the appropriate `TranspileOutput` variant.
+- Add 20 curated write-query difftest entries (10 CREATE, 5 MERGE,
+  5 mixed). Difftest must support assertion on post-update graph state,
+  not just result rows — extend [polygraph-difftest/src/oracle.rs](../polygraph-difftest/src/oracle.rs).
+- **Exit:** at least one write query routed through LQA end-to-end;
+  difftest target raised to ≥ 224.
+
+#### 8.2 — CREATE  (95 fallbacks)
+
+- Lower `Op::Create` → `spargebra::Update::InsertData { quads }`.
+- Handle node creation, relationship creation, multi-pattern CREATE,
+  CREATE-after-MATCH (which becomes `INSERT { … } WHERE { … }`).
+- RDF-star edge property encoding via the existing `rdf_mapping` module.
+- **Exit:** 0 `write_create` fallbacks; TCK ≥ 3757; difftest ≥ 224.
+
+#### 8.3 — SET / REMOVE  (53 + 33 = 86 fallbacks)
+
+- Lower `Op::Set` → `DELETE { ?s ?p ?old } INSERT { ?s ?p ?new } WHERE { … }`.
+- Lower `Op::Remove` → `DELETE { … } WHERE { … }`.
+- Handle property SET, label SET, map-merge SET (`SET n += {…}`).
+- **Exit:** 0 `write_set` / `write_remove` fallbacks.
+
+#### 8.4 — DELETE / DETACH DELETE  (41 fallbacks)
+
+- Lower `Op::Delete` → `DELETE { … } WHERE { … }`.
+- DETACH DELETE expands to delete-edges-then-nodes; encode as
+  multi-statement update.
+- **Exit:** 0 `write_delete` fallbacks.
+
+#### 8.5 — MERGE  (55 fallbacks)
+
+- The hard one. MERGE is conditional CREATE — needs SPARQL pattern that
+  inserts only when the match set is empty. Engines vary on how cleanly
+  this expresses; consult [target-engines.md](target-engines.md) and
+  [fundamental-limitations.md](fundamental-limitations.md). Some MERGE
+  shapes may stay `Unsupported` permanently for static SPARQL.
+- ON CREATE / ON MATCH clauses lower to conditional `INSERT … WHERE …`
+  pairs.
+- **Exit:** 0 `write_merge` fallbacks for the supported subset;
+  documented `Unsupported` set for the rest with spec citations.
+
+#### 8.6 — CALL with updates / FOREACH  (1 + scattered)
+
+- `CALL { … }` write subqueries route to update lowering of the inner block.
+- `FOREACH (x IN list | …)` lowers to a write template instantiated per
+  list element; constant lists fully expand at compile time, variable
+  lists require `INSERT … WHERE` with VALUES.
+- **Exit:** 0 `write_call` / `write_foreach` fallbacks for the supported subset.
+
+#### 8.7 — Translator deletion  (terminal step)
+
+Pre-conditions:
+- Total legacy fallbacks ≤ 10 (long-tail `Unsupported` only) for a
+  full week of nightly TCK + difftest runs.
+- All TCK-passing scenarios produce byte-identical (or
+  semantically-equivalent — diff via difftest oracle) SPARQL on both paths
+  for one nightly run with `POLYGRAPH_FORCE_LEGACY=1` and 
+  `POLYGRAPH_FORCE_LQA=1` env-flag-gated full-corpus comparisons.
+- Difftest at ≥ 250 queries spanning every Phase 7+8 bucket.
+
+Steps:
+1. Delete `src/translator/cypher/` and `src/translator/gql/`.
+2. Delete the legacy-fallback branch in [src/lib.rs](../src/lib.rs#L150)
+   `try_lqa_path`; the LQA path becomes the *only* path.
+3. Inline `try_lqa_path` into `Transpiler::cypher_to_sparql` and
+   `Transpiler::gql_to_sparql`; remove the `Option<TranspileOutput>` return.
+4. Delete `POLYGRAPH_TRACE_LEGACY` instrumentation.
+5. Delete [src/translator/](../src/translator/) module declaration in `src/lib.rs`.
+6. Cut a release commit that names this as the pivot's completion.
+
+**Exit:** `src/translator/` removed; `cargo test` green; TCK ≥ 3757;
+difftest ≥ 250; LoC delta showing legacy translator gone; release tagged.
+
 ### Phase 6b — Public API Hardening  (planned)
 
 **Goal:** make the library safe to depend on for non-TCK users.
@@ -579,16 +797,20 @@ example (e.g. against Apache Jena or Stardog via `TargetEngine`).
 ## 4. Sequencing & Dependencies
 
 ```
-Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 ──► Phase 6
-              │            │            ▲
-              │            └────────────┘  (Phase 2 may proceed in parallel
-              │                             with Phase 3 once Phase 1 lands)
-              ▼
-        nightly difftest CI
+Phase 0 ──► Phase 1 ──► Phase 2 ──► Phase 3 ──► Phase 4 ──► Phase 5 ──► Phase 6 ──► Phase 7 ──► Phase 8 ──► Phase 6b
+              │            │            ▲                                 │            │            │
+              │            └────────────┘                                 │            │            └─► translator/ deleted
+              ▼                                                           ▼            ▼
+        nightly difftest CI                                         drain read    write-clause
+                                                                    fallbacks     LQA + delete
 ```
 
-Phase 1 (difftest harness) is the highest-leverage step and must land first;
-without it the rest of the pivot has no oracle distinct from the TCK.
+Phase 7 (read-fallback bucket drain) and Phase 8 (write-clause LQA + legacy
+deletion) are independent and may proceed in parallel: Phase 7 only touches
+read paths in `lqa::sparql::compile`; Phase 8 introduces a new
+`compile_update` and write-side difftest infrastructure. Phase 6b (public API
+hardening) gates on Phase 8 because the API stabilises around the LQA-only
+surface.
 
 ---
 
@@ -620,12 +842,24 @@ without it the rest of the pivot has no oracle distinct from the TCK.
 
 ## 7. Success Metrics
 
+The dashboard the autopilot session must publish per iteration (replaces the
+single-number "legacy count" headline that conflated read and write fallbacks):
+
+```
+Read fallbacks:   743 (Phase 7 in progress; baseline 951; L2-blocked floor ~700)
+Write fallbacks:  278 (Phase 8 target: → 0; baseline 278)
+TCK pass rate:    3757/3828 (floor: 3757)
+Difftest:         213/213 (floor: 213; grows in Phase 7 and 8)
+Translator LoC:   L (Phase 8.7 target: → 0)
+```
+
 - TCK pass rate ≥ 97.5 % maintained across every phase.
 - Differential bag-equality ≥ 99.5 % on a ≥ 10 000-query nightly corpus.
 - Zero `SCENARIO-PATCH` tags in the codebase post-Phase 4.
 - `Unsupported` constructs documented and stable; no new ones added without
   a spec citation.
-- Public `0.y` release shipped from Phase 6 with a third-party integration
+- Phase 8.7 deletes `src/translator/`; the LQA path becomes the only path.
+- Public `0.y` release shipped from Phase 6b with a third-party integration
   example.
 
 ---

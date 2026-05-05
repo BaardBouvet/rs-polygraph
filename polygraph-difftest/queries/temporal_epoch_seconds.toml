@@ -1,0 +1,17 @@
+name = "temporal_epoch_seconds"
+description = "epochSeconds property on the Unix epoch date returns 0."
+spec_ref = "openCypher 9 §3.5 — temporal component access"
+
+cypher = """
+WITH date({year: 1970, month: 1, day: 1}) AS d
+RETURN d.epochSeconds AS es
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["es"]
+rows = [[0]]
+order = "bag"

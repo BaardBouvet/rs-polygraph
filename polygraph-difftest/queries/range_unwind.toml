@@ -1,0 +1,18 @@
+name = "range_unwind"
+description = "UNWIND range(start, end) expands to individual integer rows."
+spec_ref = "openCypher 9 §4.5 — UNWIND with range()"
+
+cypher = """
+UNWIND range(1, 4) AS x
+RETURN x
+ORDER BY x
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["x"]
+rows = [[1], [2], [3], [4]]
+order = "ordered"

@@ -1,0 +1,16 @@
+name = "temporal_date_return"
+description = "date() constructor returned directly in RETURN clause."
+spec_ref = "openCypher 9 §3.5 — date() in RETURN"
+
+cypher = """
+RETURN date({year: 2020, month: 1, day: 1}) AS d
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["d"]
+rows = [["2020-01-01"]]
+order = "bag"

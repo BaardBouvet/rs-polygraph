@@ -1,0 +1,24 @@
+name = "temporal_duration_constructor"
+description = "duration() constructor with map argument returns correct duration string."
+spec_ref = "openCypher 9 §3.5 — duration() constructor"
+
+cypher = """
+MATCH (n:Task)
+RETURN n.name AS name, duration({hours: 2, minutes: 30}) AS budget
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "t1", labels = ["Task"], properties = { name = "Alpha" } },
+    { id = "t2", labels = ["Task"], properties = { name = "Beta"  } },
+]
+edges = []
+
+[expected]
+columns = ["name", "budget"]
+rows = [
+    ["Alpha", "PT2H30M"],
+    ["Beta",  "PT2H30M"],
+]
+order = "ordered"

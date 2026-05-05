@@ -1,0 +1,16 @@
+name = "range_return"
+description = "range() in RETURN returns a serialized list of integers."
+spec_ref = "openCypher 9 §6.3.3 — range() builtin"
+
+cypher = """
+RETURN range(1, 5) AS r
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["r"]
+rows = [["[1, 2, 3, 4, 5]"]]
+order = "bag"

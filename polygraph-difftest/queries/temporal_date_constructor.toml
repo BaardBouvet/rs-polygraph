@@ -1,0 +1,16 @@
+name = "temporal_date_constructor"
+description = "date() constructor with map argument returns correct xsd:date typed literal."
+spec_ref = "openCypher 9 §3.5 — date() constructor"
+
+cypher = """
+RETURN date({year: 2024, month: 6, day: 15}) AS d
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["d"]
+rows = [["2024-06-15"]]
+order = "bag"

@@ -171,7 +171,9 @@ fn try_lqa_path(
     let op = match lowerer.lower_query(ast) {
         Ok(op) => op,
         Err(PolygraphError::Unsupported { ref construct, .. })
-        | Err(PolygraphError::UnsupportedFeature { feature: ref construct }) => {
+        | Err(PolygraphError::UnsupportedFeature {
+            feature: ref construct,
+        }) => {
             if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
                 eprintln!("[LEGACY] lqa_lower=Unsupported construct={construct}");
             }

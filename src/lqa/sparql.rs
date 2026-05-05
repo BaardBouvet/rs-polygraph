@@ -169,6 +169,12 @@ struct Compiler {
     /// Maps variable name → the raw string value (e.g. "2020-01-01", "PT22H").
     /// Used to evaluate property access on scalar temporal/duration variables.
     scalar_lit_vals: HashMap<String, String>,
+    /// Named path variables and their static hop count for fixed-length patterns.
+    /// Set when a non-varlen Op::Expand carries a `path_var`; each expand
+    /// in a chain increments the counter so multi-hop paths record the total length.
+    /// Varlen paths are excluded (their lengths are dynamic and cannot be
+    /// resolved at compile time).
+    path_lengths: HashMap<String, usize>,
 }
 
 impl Compiler {
@@ -192,6 +198,7 @@ impl Compiler {
             anon_edge_info: Vec::new(),
             temporal_type_vars: HashMap::new(),
             scalar_lit_vals: HashMap::new(),
+            path_lengths: HashMap::new(),
         }
     }
 
@@ -413,14 +420,29 @@ impl Compiler {
                                 let is_agg = agg_alias_set.contains(name.as_str());
                                 let is_gk = group_key_aliases.contains(name.as_str());
                                 if !is_agg && !is_gk {
-                                    items
+                                    // Find the underlying expression this alias refers to.
+                                    let underlying = items
                                         .iter()
                                         .find(|pi| {
                                             pi.alias == *name
                                                 && !matches!(pi.expr, Expr::Variable { .. })
                                         })
-                                        .map(|pi| &pi.expr)
-                                        .unwrap_or(&sk.expr)
+                                        .map(|pi| &pi.expr);
+                                    // If the underlying expression is a Property access, do NOT
+                                    // expand it here.  `lower_projection_inner` generates a
+                                    // BIND(prop_var AS alias) for every projection item, so the
+                                    // alias variable is already bound in the WHERE clause by the
+                                    // time ORDER BY is evaluated.  Expanding it here would cause
+                                    // a second (and potentially incorrect) property-triple to be
+                                    // emitted — in particular, relationship properties need
+                                    // RDF-star reification which requires `edge_vars` context
+                                    // that is only populated by `lower_projection_inner` (called
+                                    // after this block).
+                                    match underlying {
+                                        Some(Expr::Property(..)) => &sk.expr,
+                                        Some(other) => other,
+                                        None => &sk.expr,
+                                    }
                                 } else {
                                     &sk.expr
                                 }
@@ -1019,10 +1041,27 @@ impl Compiler {
                 rel_types,
                 direction,
                 range,
-                ..
+                path_var,
             } => {
                 self.scan_vars.insert(from.clone());
                 self.scan_vars.insert(to.clone());
+
+                // For fixed-hop (non-varlen) named paths, record the static hop count.
+                // Each Expand in a chained multi-hop pattern increments the counter, so
+                // after processing the whole chain, path_lengths[pvar] == total hops.
+                // For varlen named paths, record usize::MAX as a sentinel so the path
+                // variable is still tracked (and will fail correctly if used as a value).
+                if let Some(pvar) = path_var.as_deref() {
+                    if range.is_none() {
+                        *self.path_lengths.entry(pvar.to_string()).or_insert(0) += 1;
+                    } else {
+                        // Varlen: mark as dynamic (usize::MAX sentinel).
+                        self.path_lengths
+                            .entry(pvar.to_string())
+                            .or_insert(usize::MAX);
+                    }
+                }
+
                 let inner_pat = self.lower_op(inner)?;
 
                 // If the FROM node may be null (produced by OPTIONAL MATCH or BIND on a
@@ -1487,6 +1526,17 @@ impl Compiler {
                             // Flush both required and optional pending triples BEFORE the BIND
                             // so the OPTIONAL { } blocks that define helper variables appear
                             // in SPARQL order before the BIND that uses them.
+                            // Capture the literal value BEFORE e is moved into Extend.
+                            // This covers temporal constructors (date/datetime/duration/…)
+                            // that lower_expr computes into a typed SPARQL literal at
+                            // compile time but whose AST expression type is FunctionCall,
+                            // not Literal — so the `pi.expr` match below would miss them.
+                            let computed_lit_val: Option<String> =
+                                if let SparExpr::Literal(lit) = &e {
+                                    Some(lit.value().to_string())
+                                } else {
+                                    None
+                                };
                             gp = self.flush_pending(gp);
                             gp = GraphPattern::Extend {
                                 inner: Box::new(gp),
@@ -1502,6 +1552,7 @@ impl Compiler {
                                 }
                             }
                             // Track scalar literal values for temporal/duration property access.
+                            // Primary source: direct AST literals.
                             match &pi.expr {
                                 Expr::Literal(Literal::TypedLiteral(val, _)) => {
                                     self.scalar_lit_vals.insert(pi.alias.clone(), val.clone());
@@ -1510,6 +1561,13 @@ impl Compiler {
                                     self.scalar_lit_vals.insert(pi.alias.clone(), val.clone());
                                 }
                                 _ => {}
+                            }
+                            // Secondary source: value computed by lower_expr (e.g. temporal
+                            // constructors that produce a typed literal at compile time).
+                            if let Some(val) = computed_lit_val {
+                                self.scalar_lit_vals
+                                    .entry(pi.alias.clone())
+                                    .or_insert(val);
                             }
                         }
                     }
@@ -1702,6 +1760,37 @@ impl Compiler {
                         bindings,
                     };
                     Ok(join(inner_pat, values))
+                } else if let Expr::FunctionCall { name, args, .. } = list {
+                    // UNWIND range(start, end [, step]) AS var — expand at compile time.
+                    if name.eq_ignore_ascii_case("range") {
+                        if let Some(items) = eval_range_to_integers(args) {
+                            let inner_pat = self.lower_op(inner)?;
+                            let var = Self::var(variable);
+                            if items.is_empty() {
+                                return Ok(inner_pat);
+                            }
+                            let bindings: Vec<Vec<Option<spargebra::term::GroundTerm>>> =
+                                items.iter().map(|n| {
+                                    vec![Some(spargebra::term::GroundTerm::Literal(
+                                        SparLit::new_typed_literal(
+                                            n.to_string(),
+                                            NamedNode::new_unchecked(XSD_INTEGER),
+                                        ),
+                                    ))]
+                                }).collect();
+                            self.scan_vars.insert(variable.clone());
+                            let values = GraphPattern::Values {
+                                variables: vec![var],
+                                bindings,
+                            };
+                            return Ok(join(inner_pat, values));
+                        }
+                    }
+                    Err(PolygraphError::Unsupported {
+                        construct: "UNWIND with variable/expression list in LQA path".into(),
+                        spec_ref: "openCypher 9 §4.5".into(),
+                        reason: "runtime list UNWIND requires legacy path".into(),
+                    })
                 } else {
                     Err(PolygraphError::Unsupported {
                         construct: "UNWIND with variable/expression list in LQA path".into(),
@@ -2448,7 +2537,22 @@ impl Compiler {
 
     fn lower_expr(&mut self, expr: &Expr) -> Result<SparExpr, PolygraphError> {
         match expr {
-            Expr::Variable { name, .. } => Ok(SparExpr::Variable(Self::var(name))),
+            Expr::Variable { name, .. } => {
+                // Path variables exist only as hop-count metadata; they have no
+                // SPARQL value representation. Direct use outside of length()/size()
+                // must fall back to the legacy translator.
+                if self.path_lengths.contains_key(name.as_str()) {
+                    return Err(PolygraphError::Unsupported {
+                        construct: "path value".into(),
+                        spec_ref: "openCypher 9 §3.7".into(),
+                        reason: format!(
+                            "path variable `{name}` cannot be used as a direct value; \
+                             only length()/ size() is supported in the LQA path"
+                        ),
+                    });
+                }
+                Ok(SparExpr::Variable(Self::var(name)))
+            }
 
             Expr::Literal(lit) => match lit {
                 Literal::Integer(n) => Ok(Self::lit_integer(*n)),
@@ -2831,20 +2935,29 @@ impl Compiler {
                 // For property access: `n.prop IS NULL` → NOT EXISTS { ?n <prop> ?_val }
                 // This avoids adding a required BGP triple that would filter out
                 // rows where the property is absent.
+                // Guard: skip this fast path if the base variable is a scalar (e.g. a
+                // string-serialized map/list from WITH).  Scalar variables can't be RDF
+                // subjects; the EXISTS pattern would always be empty, giving wrong results.
                 if let Expr::Property(base, key) = e.as_ref() {
-                    let base_expr = self.lower_expr(base)?;
-                    if let SparExpr::Variable(base_var) = base_expr {
-                        let val_var = self.fresh(key);
-                        let exists_pat = GraphPattern::Bgp {
-                            patterns: vec![TriplePattern {
-                                subject: TermPattern::Variable(base_var),
-                                predicate: NamedNodePattern::NamedNode(self.prop_iri(key)),
-                                object: TermPattern::Variable(val_var),
-                            }],
-                        };
-                        return Ok(SparExpr::Not(Box::new(SparExpr::Exists(Box::new(
-                            exists_pat,
-                        )))));
+                    let mut base_is_scalar = false;
+                    if let Expr::Variable { name, .. } = base.as_ref() {
+                        base_is_scalar = self.scalar_vars.contains(name.as_str());
+                    }
+                    if !base_is_scalar {
+                        let base_expr = self.lower_expr(base)?;
+                        if let SparExpr::Variable(base_var) = base_expr {
+                            let val_var = self.fresh(key);
+                            let exists_pat = GraphPattern::Bgp {
+                                patterns: vec![TriplePattern {
+                                    subject: TermPattern::Variable(base_var),
+                                    predicate: NamedNodePattern::NamedNode(self.prop_iri(key)),
+                                    object: TermPattern::Variable(val_var),
+                                }],
+                            };
+                            return Ok(SparExpr::Not(Box::new(SparExpr::Exists(Box::new(
+                                exists_pat,
+                            )))));
+                        }
                     }
                 }
                 let inner = self.lower_expr(e)?;
@@ -2862,18 +2975,25 @@ impl Compiler {
             }
             Expr::IsNotNull(e) => {
                 // For property access: `n.prop IS NOT NULL` → EXISTS { ?n <prop> ?_val }
+                // Guard: skip when base is a scalar (can't be an RDF subject).
                 if let Expr::Property(base, key) = e.as_ref() {
-                    let base_expr = self.lower_expr(base)?;
-                    if let SparExpr::Variable(base_var) = base_expr {
-                        let val_var = self.fresh(key);
-                        let exists_pat = GraphPattern::Bgp {
-                            patterns: vec![TriplePattern {
-                                subject: TermPattern::Variable(base_var),
-                                predicate: NamedNodePattern::NamedNode(self.prop_iri(key)),
-                                object: TermPattern::Variable(val_var),
-                            }],
-                        };
-                        return Ok(SparExpr::Exists(Box::new(exists_pat)));
+                    let mut base_is_scalar = false;
+                    if let Expr::Variable { name, .. } = base.as_ref() {
+                        base_is_scalar = self.scalar_vars.contains(name.as_str());
+                    }
+                    if !base_is_scalar {
+                        let base_expr = self.lower_expr(base)?;
+                        if let SparExpr::Variable(base_var) = base_expr {
+                            let val_var = self.fresh(key);
+                            let exists_pat = GraphPattern::Bgp {
+                                patterns: vec![TriplePattern {
+                                    subject: TermPattern::Variable(base_var),
+                                    predicate: NamedNodePattern::NamedNode(self.prop_iri(key)),
+                                    object: TermPattern::Variable(val_var),
+                                }],
+                            };
+                            return Ok(SparExpr::Exists(Box::new(exists_pat)));
+                        }
                     }
                 }
                 let inner = self.lower_expr(e)?;
@@ -3258,6 +3378,23 @@ impl Compiler {
             }),
             "strlen" | "size" => {
                 let arg = args.first().ok_or_else(|| arg_err(name))?;
+                // Special case: if the arg is a named path variable, return
+                // the static hop count (or fail if it's a varlen path).
+                if let Expr::Variable { name: pv, .. } = arg {
+                    if let Some(&hops) = self.path_lengths.get(pv.as_str()) {
+                        if hops == usize::MAX {
+                            return Err(PolygraphError::Unsupported {
+                                construct: "dynamic path length".into(),
+                                spec_ref: "openCypher 9 §3.7".into(),
+                                reason: format!(
+                                    "size/length of variable-length path `{pv}` is dynamic; \
+                                     only fixed-hop paths are supported in the LQA path"
+                                ),
+                            });
+                        }
+                        return Ok(Self::lit_integer(hops as i64));
+                    }
+                }
                 // Special case: if the arg is a compile-time constant list,
                 // return the list length directly as an integer literal.
                 match arg {
@@ -3274,6 +3411,23 @@ impl Compiler {
             }
             "length" => {
                 let arg = args.first().ok_or_else(|| arg_err(name))?;
+                // length() on a named path variable: return the static hop count.
+                // Reject varlen paths (cannot statically compute length).
+                if let Expr::Variable { name: pv, .. } = arg {
+                    if let Some(&hops) = self.path_lengths.get(pv.as_str()) {
+                        if hops == usize::MAX {
+                            return Err(PolygraphError::Unsupported {
+                                construct: "dynamic path length".into(),
+                                spec_ref: "openCypher 9 §3.7".into(),
+                                reason: format!(
+                                    "length() on variable-length path `{pv}` is dynamic; \
+                                     only fixed-hop paths are supported in the LQA path"
+                                ),
+                            });
+                        }
+                        return Ok(Self::lit_integer(hops as i64));
+                    }
+                }
                 // length() on a node or relationship variable must be rejected at
                 // compile time (openCypher InvalidArgumentType).
                 if let Expr::Variable { name: var_name, .. } = arg {
@@ -3577,10 +3731,186 @@ impl Compiler {
                     }
                 }
             }
+            // ── Temporal constructors ──────────────────────────────────────
+            // date(), time(), localtime(), datetime(), localdatetime(), duration()
+            // plus their .transaction/.statement/.realtime variants (current-time stubs).
+            // All calendar arithmetic is performed at translation time using the
+            // same helpers used by the legacy translator path.
+            "date" | "localtime" | "localdatetime" | "time" | "datetime" | "duration"
+            | "date.transaction" | "date.statement" | "date.realtime"
+            | "localtime.transaction" | "localtime.statement" | "localtime.realtime"
+            | "time.transaction" | "time.statement" | "time.realtime"
+            | "localdatetime.transaction" | "localdatetime.statement" | "localdatetime.realtime"
+            | "datetime.transaction" | "datetime.statement" | "datetime.realtime" => {
+                use crate::translator::cypher::{
+                    temporal_date_from_map, temporal_datetime_from_map,
+                    temporal_duration_from_map, temporal_localdatetime_from_map,
+                    temporal_localtime_from_map, temporal_parse_date, temporal_parse_datetime,
+                    temporal_parse_duration, temporal_parse_localdatetime,
+                    temporal_parse_localtime, temporal_parse_time, temporal_time_from_map,
+                    strip_named_tz,
+                };
+                let xsd_date =
+                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#date");
+                let xsd_time =
+                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#time");
+                let xsd_dt =
+                    NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#dateTime");
+                // Strip .transaction/.statement/.realtime suffix for dispatch.
+                let base_func = name_lower
+                    .strip_suffix(".transaction")
+                    .or_else(|| name_lower.strip_suffix(".statement"))
+                    .or_else(|| name_lower.strip_suffix(".realtime"))
+                    .unwrap_or(name_lower.as_str());
+
+                // Zero-arg form: return deterministic fixed timestamp (openCypher §3.5).
+                if args.is_empty() {
+                    let lit = match base_func {
+                        "date" => SparLit::new_typed_literal("2000-01-01".to_owned(), xsd_date),
+                        "localtime" => SparLit::new_typed_literal(
+                            "00:00:00".to_owned(),
+                            xsd_time.clone(),
+                        ),
+                        "time" => {
+                            SparLit::new_typed_literal("00:00:00Z".to_owned(), xsd_time)
+                        }
+                        "localdatetime" => SparLit::new_typed_literal(
+                            "2000-01-01T00:00:00".to_owned(),
+                            xsd_dt.clone(),
+                        ),
+                        "datetime" => SparLit::new_typed_literal(
+                            "2000-01-01T00:00Z".to_owned(),
+                            xsd_dt,
+                        ),
+                        "duration" => SparLit::new_simple_literal("PT0S".to_owned()),
+                        _ => return Ok(SparExpr::Variable(self.fresh("null"))),
+                    };
+                    return Ok(SparExpr::Literal(lit));
+                }
+
+                // Null propagation: temporal_f(null) → null.
+                if matches!(args.first(), Some(Expr::Literal(Literal::Null))) {
+                    return Ok(SparExpr::Variable(self.fresh("null")));
+                }
+
+                // Variable fold: temporal_f(v) where v is a known scalar literal.
+                if let Some(Expr::Variable { name: v_name, .. }) = args.first() {
+                    if let Some(s) = self.scalar_lit_vals.get(v_name.as_str()).cloned() {
+                        let effective_s = if base_func == "time" {
+                            temporal_parse_time(&s)
+                                .map(|t| strip_named_tz(&t))
+                                .unwrap_or(s.clone())
+                        } else {
+                            s.clone()
+                        };
+                        let folded_arg = Expr::Literal(Literal::String(effective_s));
+                        return self.lower_function_call(name, &[folded_arg]);
+                    }
+                }
+
+                // Map argument: date({year: N, month: M, ...}) etc.
+                // Variable values in the map are expanded via scalar_lit_vals (e.g.
+                // `date({date: other, year: 28})` where `other` is a WITH-bound
+                // temporal literal).  If any variable value is not in scalar_lit_vals,
+                // the constructor cannot be computed at compile time — fall through to
+                // Err(Unsupported) which routes to legacy.
+                if let Some(Expr::Map(pairs)) = args.first() {
+                    use crate::ast::cypher::{Expression as AE, Literal as AL};
+                    let mut expanded: Vec<(String, AE)> = Vec::new();
+                    let mut all_resolvable = true;
+                    for (k, v) in pairs {
+                        let ae = match v {
+                            Expr::Literal(Literal::Integer(n)) => AE::Literal(AL::Integer(*n)),
+                            Expr::Literal(Literal::Float(f)) => AE::Literal(AL::Float(*f)),
+                            Expr::Literal(Literal::String(s)) => AE::Literal(AL::String(s.clone())),
+                            Expr::Literal(Literal::Boolean(b)) => AE::Literal(AL::Boolean(*b)),
+                            Expr::Literal(Literal::Null) => AE::Literal(AL::Null),
+                            Expr::Variable { name: vn, .. } => {
+                                if let Some(s) = self.scalar_lit_vals.get(vn.as_str()) {
+                                    AE::Literal(AL::String(s.clone()))
+                                } else {
+                                    all_resolvable = false;
+                                    break;
+                                }
+                            }
+                            _ => { all_resolvable = false; break; }
+                        };
+                        expanded.push((k.clone(), ae));
+                    }
+                    if all_resolvable {
+                        let lit_opt: Option<SparLit> = match base_func {
+                            "date" => temporal_date_from_map(&expanded)
+                                .map(|s| SparLit::new_typed_literal(s, xsd_date.clone())),
+                            "localtime" => temporal_localtime_from_map(&expanded)
+                                .map(|s| SparLit::new_typed_literal(s, xsd_time.clone())),
+                            "time" => temporal_time_from_map(&expanded)
+                                .map(|s| SparLit::new_typed_literal(s, xsd_time.clone())),
+                            "localdatetime" => temporal_localdatetime_from_map(&expanded)
+                                .map(|s| SparLit::new_typed_literal(s, xsd_dt.clone())),
+                            "datetime" => temporal_datetime_from_map(&expanded)
+                                .map(|s| SparLit::new_typed_literal(s, xsd_dt.clone())),
+                            "duration" => temporal_duration_from_map(&expanded)
+                                .map(SparLit::new_simple_literal),
+                            _ => None,
+                        };
+                        if let Some(lit) = lit_opt {
+                            return Ok(SparExpr::Literal(lit));
+                        }
+                    }
+                }
+
+                // String argument: date('2015-07-21') etc.
+                if let Some(Expr::Literal(Literal::String(s))) = args.first() {
+                    let s = s.clone();
+                    let lit_opt: Option<SparLit> = match base_func {
+                        "date" => temporal_parse_date(&s)
+                            .map(|v| SparLit::new_typed_literal(v, xsd_date)),
+                        "localtime" => temporal_parse_localtime(&s)
+                            .map(|v| SparLit::new_typed_literal(v, xsd_time.clone())),
+                        "time" => temporal_parse_time(&s)
+                            .map(|v| SparLit::new_typed_literal(v, xsd_time)),
+                        "localdatetime" => temporal_parse_localdatetime(&s)
+                            .map(|v| SparLit::new_typed_literal(v, xsd_dt.clone())),
+                        "datetime" => temporal_parse_datetime(&s)
+                            .map(|v| SparLit::new_typed_literal(v, xsd_dt)),
+                        "duration" => temporal_parse_duration(&s)
+                            .map(SparLit::new_simple_literal),
+                        _ => None,
+                    };
+                    if let Some(lit) = lit_opt {
+                        return Ok(SparExpr::Literal(lit));
+                    }
+                }
+
+                // Non-literal argument (runtime temporal expression) — fall back to legacy.
+                Err(PolygraphError::Unsupported {
+                    construct: format!("{name}()"),
+                    spec_ref: "openCypher 9 §3.5".into(),
+                    reason: format!(
+                        "Temporal constructor '{name}' with non-literal arguments requires \
+                         legacy path"
+                    ),
+                })
+            }
+            // ── range() builtin ───────────────────────────────────────────
+            // range(start, end [, step]) → list of integers.
+            // When bounds are constant integers, expand to a serialized list
+            // string "[s, s+1, …, e]" matching the legacy translator's output.
+            "range" => {
+                if let Some(items) = eval_range_to_integers(args) {
+                    let parts: Vec<String> = items.iter().map(|n| n.to_string()).collect();
+                    let s = format!("[{}]", parts.join(", "));
+                    return Ok(SparExpr::Literal(SparLit::new_simple_literal(s)));
+                }
+                Err(PolygraphError::Unsupported {
+                    construct: "range()".into(),
+                    spec_ref: "openCypher 9 §6.3.3".into(),
+                    reason: "range() with non-literal arguments requires legacy path".into(),
+                })
+            }
             // Known openCypher functions that are valid but not yet implemented in the
             // LQA SPARQL path — fall through to legacy rather than raising a hard error.
-            "datetime" | "localdatetime" | "date" | "time" | "localtime" | "duration"
-            | "datetime.truncate" | "localdatetime.truncate" | "date.truncate"
+            "datetime.truncate" | "localdatetime.truncate" | "date.truncate"
             | "time.truncate" | "localtime.truncate"
             | "duration.between" | "duration.inmonths" | "duration.indays"
             | "duration.inseconds" | "datetime.fromepoch" | "datetime.fromepochmillis"
@@ -3589,7 +3919,7 @@ impl Compiler {
             | "degrees" | "radians" | "haversin" | "log" | "log10" | "e" | "pi"
             | "reduce" | "any" | "all" | "none" | "single"
             | "nodes" | "relationships" | "shortestpath" | "allshortestpaths"
-            | "range" | "split" | "replace" | "left" | "right"
+            | "split" | "replace" | "left" | "right"
             | "trim" | "ltrim" | "rtrim"
             | "collect" | "percentiledisc" | "percentilecont" | "stdev" | "stdevp" => {
                 Err(PolygraphError::Unsupported {
@@ -4252,13 +4582,98 @@ fn lqa_scalar_temporal_prop(val: &str, component: &str) -> Option<SparExpr> {
             let (iso_year, _, _) = crate::translator::cypher::date_to_iso_week(y, m, d);
             iso_year
         }
-        "offset" | "timezone" | "epochMillis" | "epochSeconds" => return None,
+        // weekDay is a synonym for dayOfWeek (1=Monday … 7=Sunday)
+        "weekDay" => {
+            let y = comps.year?;
+            let m = comps.month?;
+            let d = comps.day?;
+            let (_, _, dow) = crate::translator::cypher::date_to_iso_week(y, m, d);
+            dow
+        }
+        // epochSeconds: seconds since Unix epoch 1970-01-01T00:00:00Z
+        "epochSeconds" => {
+            let y = comps.year?;
+            let mo = comps.month?;
+            let d = comps.day?;
+            // temporal_epoch returns absolute day count from year 1; subtract Unix epoch offset.
+            const UNIX_EPOCH_DAY: i64 = 719163; // temporal_epoch(1970, 1, 1)
+            let epoch_days = crate::translator::cypher::temporal_epoch(y, mo, d) as i64
+                - UNIX_EPOCH_DAY;
+            let h = comps.hour.unwrap_or(0);
+            let mi = comps.minute.unwrap_or(0);
+            let s = comps.second.unwrap_or(0);
+            epoch_days * 86_400 + h * 3600 + mi * 60 + s
+        }
+        // epochMillis: milliseconds since Unix epoch
+        "epochMillis" => {
+            let y = comps.year?;
+            let mo = comps.month?;
+            let d = comps.day?;
+            const UNIX_EPOCH_DAY: i64 = 719163; // temporal_epoch(1970, 1, 1)
+            let epoch_days = crate::translator::cypher::temporal_epoch(y, mo, d) as i64
+                - UNIX_EPOCH_DAY;
+            let h = comps.hour.unwrap_or(0);
+            let mi = comps.minute.unwrap_or(0);
+            let s = comps.second.unwrap_or(0);
+            let ns = comps.ns.unwrap_or(0) as i64;
+            let secs = epoch_days * 86_400 + h * 3600 + mi * 60 + s;
+            secs * 1_000 + ns / 1_000_000
+        }
+        "offset" | "timezone" | "offsetMinutes" | "offsetSeconds" => return None,
         _ => return None,
     };
     Some(SparExpr::Literal(SparLit::new_typed_literal(
         n.to_string(),
         NamedNode::new_unchecked(XSD_INTEGER),
     )))
+}
+
+/// Recursively serialize a fully-literal `Expr` to the Cypher string representation,
+/// e.g. `[1, 'foo', null]` → `"[1, 'foo', null]"` and `{a: 1}` → `"{a: 1}"`.
+/// Returns `None` if any sub-expression is not a compile-time literal.
+fn lqa_serialize_literal(e: &Expr) -> Option<String> {
+    match e {
+        Expr::List(items) => {
+            let parts: Vec<String> = items.iter().map(lqa_serialize_literal).collect::<Option<_>>()?;
+            Some(format!("[{}]", parts.join(", ")))
+        }
+        Expr::Map(pairs) => {
+            let entries: Vec<String> = pairs
+                .iter()
+                .map(|(k, v)| lqa_serialize_literal(v).map(|s| format!("{k}: {s}")))
+                .collect::<Option<_>>()?;
+            Some(format!("{{{}}}", entries.join(", ")))
+        }
+        _ => lqa_lit_elem_str(e),
+    }
+}
+
+/// Evaluate `range(start, end [, step])` arguments to a `Vec<i64>`, returning
+/// `None` if any argument is not a statically-evaluable integer constant.
+/// Mirrors the logic in the legacy translator's `range()` implementation.
+fn eval_range_to_integers(args: &[Expr]) -> Option<Vec<i64>> {
+    let start = const_eval_integer(args.first()?)?;
+    let end_val = const_eval_integer(args.get(1)?)?;
+    let step: i64 = if let Some(step_arg) = args.get(2) {
+        let s = const_eval_integer(step_arg)?;
+        if s == 0 {
+            return None; // step=0 is invalid; let legacy raise the error
+        }
+        s
+    } else {
+        1
+    };
+    let mut items = Vec::new();
+    let mut i = start;
+    // Guard: cap at 100_000 elements to avoid memory bombs on large ranges.
+    while (step > 0 && i <= end_val) || (step < 0 && i >= end_val) {
+        items.push(i);
+        i += step;
+        if items.len() > 100_000 {
+            return None; // too large; let legacy handle
+        }
+    }
+    Some(items)
 }
 
 fn lqa_lit_elem_str(e: &Expr) -> Option<String> {

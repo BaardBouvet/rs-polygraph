@@ -1,0 +1,16 @@
+name = "temporal_localtime_constructor"
+description = "localtime() constructor with string argument returns correct xsd:time literal."
+spec_ref = "openCypher 9 §3.5 — localtime() constructor"
+
+cypher = """
+RETURN localtime('09:00:00') AS lt
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["lt"]
+rows = [["09:00:00"]]
+order = "bag"

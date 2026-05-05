@@ -1,0 +1,16 @@
+name = "temporal_datetime_constructor"
+description = "datetime() constructor with string argument returns correct xsd:dateTime literal."
+spec_ref = "openCypher 9 §3.5 — datetime() constructor"
+
+cypher = """
+RETURN datetime('2024-01-15T10:30:00Z') AS dt
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["dt"]
+rows = [["2024-01-15T10:30:00Z"]]
+order = "bag"

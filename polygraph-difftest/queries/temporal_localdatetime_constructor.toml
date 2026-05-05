@@ -1,0 +1,16 @@
+name = "temporal_localdatetime_constructor"
+description = "localdatetime() constructor with map argument returns correct xsd:dateTime literal."
+spec_ref = "openCypher 9 §3.5 — localdatetime() constructor"
+
+cypher = """
+RETURN localdatetime({year: 2025, month: 3, day: 10, hour: 14, minute: 0}) AS ldt
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["ldt"]
+rows = [["2025-03-10T14:00"]]
+order = "bag"
