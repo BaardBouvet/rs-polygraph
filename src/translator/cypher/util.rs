@@ -871,7 +871,7 @@ fn try_const_fold_pow(base: &SparExpr, exp: &SparExpr) -> Option<SparExpr> {
 
 /// Returns true if `s` looks like a compile-time temporal value string:
 /// a date (`YYYY-…`) or a time/localtime (`HH:…`).
-fn is_temporal_lit_str(s: &str) -> bool {
+pub(crate) fn is_temporal_lit_str(s: &str) -> bool {
     let b = s.as_bytes();
     // Date: 4-digit year followed by '-'
     if b.len() >= 5 && b[4] == b'-' && b[..4].iter().all(|c| c.is_ascii_digit()) {
@@ -885,7 +885,7 @@ fn is_temporal_lit_str(s: &str) -> bool {
 }
 
 /// Returns true if `s` is a plain date string (exactly `YYYY-MM-DD`, length 10).
-fn is_date_only_lit_str(s: &str) -> bool {
+pub(crate) fn is_date_only_lit_str(s: &str) -> bool {
     s.len() == 10 && s.as_bytes().get(4) == Some(&b'-')
 }
 
@@ -905,12 +905,12 @@ fn is_date_only_lit_str(s: &str) -> bool {
 /// three independent components: (1) yearMonth, (2) day-only, (3) time-only.
 /// Each is applied with a COALESCE so that inapplicable components (e.g. months
 /// on a localtime, or hours on a date) are silently skipped.
-fn temporal_subtract_sparql(temporal: SparExpr, dur: SparExpr, is_date: bool) -> SparExpr {
+pub(crate) fn temporal_subtract_sparql(temporal: SparExpr, dur: SparExpr, is_date: bool) -> SparExpr {
     temporal_arith_sparql(temporal, dur, true, is_date)
 }
 
 /// Counterpart of `temporal_subtract_sparql` for addition.
-pub(super) fn temporal_add_sparql(temporal: SparExpr, dur: SparExpr, is_date: bool) -> SparExpr {
+pub(crate) fn temporal_add_sparql(temporal: SparExpr, dur: SparExpr, is_date: bool) -> SparExpr {
     temporal_arith_sparql(temporal, dur, false, is_date)
 }
 

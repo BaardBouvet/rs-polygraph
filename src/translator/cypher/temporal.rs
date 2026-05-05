@@ -2,26 +2,106 @@
 
 /// Decomposed temporal components used during truncation.
 #[derive(Clone, Debug, Default)]
-struct TcComponents {
-    year: Option<i64>,
-    month: Option<i64>,
-    day: Option<i64>,
-    hour: Option<i64>,
-    minute: Option<i64>,
-    second: Option<i64>,
+pub(crate) struct TcComponents {
+    pub(crate) year: Option<i64>,
+    pub(crate) month: Option<i64>,
+    pub(crate) day: Option<i64>,
+    pub(crate) hour: Option<i64>,
+    pub(crate) minute: Option<i64>,
+    pub(crate) second: Option<i64>,
     /// Combined nanosecond within second (0..=999_999_999). None = not specified.
-    ns: Option<i64>,
+    pub(crate) ns: Option<i64>,
     /// Full timezone suffix appended to output, e.g. "Z", "+01:00",
     /// "+01:00[Europe/Stockholm]". None = local/no-timezone.
-    tz: Option<String>,
+    pub(crate) tz: Option<String>,
     /// True when the source temporal expression was `localdatetime()` or `localtime()`.
     /// Drives the Z-suffix rule for `localdatetime.truncate` at time-granularity units.
     #[allow(dead_code)]
-    is_localdatetime: bool,
+    pub(crate) is_localdatetime: bool,
+}
+
+/// Parse a TcComponents from an ISO-8601 temporal string value.
+/// Used by the LQA truncation path where the temporal value was already
+/// folded to a typed SPARQL literal string.
+pub(crate) fn tc_from_iso_string(s: &str) -> Option<TcComponents> {
+    if let Some(t_pos) = s.find('T') {
+        // DateTime or LocalDateTime: YYYY-MM-DDTHH:MM:SS[.frac][tz]
+        let date_part = &s[..t_pos];
+        let rest = &s[t_pos + 1..];
+        let y: i64 = date_part.get(0..4)?.parse().ok()?;
+        let m: i64 = date_part.get(5..7)?.parse().ok()?;
+        let d: i64 = date_part.get(8..10)?.parse().ok()?;
+        let h: i64 = rest.get(0..2)?.parse().ok()?;
+        let min: i64 = rest.get(3..5)?.parse().ok()?;
+        let sec: i64 = rest.get(6..8)?.parse().ok()?;
+        // Nanoseconds and trailing timezone
+        let (ns_opt, tz_opt) = tc_parse_sub_second_and_tz(rest.get(8..)?);
+        Some(TcComponents {
+            year: Some(y),
+            month: Some(m),
+            day: Some(d),
+            hour: Some(h),
+            minute: Some(min),
+            second: Some(sec),
+            ns: ns_opt,
+            tz: tz_opt,
+            ..Default::default()
+        })
+    } else if s.len() >= 8 && s.as_bytes().get(2) == Some(&b':') {
+        // Time only: HH:MM:SS[.frac][tz]
+        let h: i64 = s.get(0..2)?.parse().ok()?;
+        let min: i64 = s.get(3..5)?.parse().ok()?;
+        let sec: i64 = s.get(6..8)?.parse().ok()?;
+        let (ns_opt, tz_opt) = tc_parse_sub_second_and_tz(s.get(8..)?);
+        Some(TcComponents {
+            hour: Some(h),
+            minute: Some(min),
+            second: Some(sec),
+            ns: ns_opt,
+            tz: tz_opt,
+            ..Default::default()
+        })
+    } else {
+        // Date: YYYY-MM-DD
+        let y: i64 = s.get(0..4)?.parse().ok()?;
+        let m: i64 = s.get(5..7)?.parse().ok()?;
+        let d: i64 = s.get(8..10)?.parse().ok()?;
+        Some(TcComponents {
+            year: Some(y),
+            month: Some(m),
+            day: Some(d),
+            ..Default::default()
+        })
+    }
+}
+
+/// Parse optional fractional-seconds and timezone from the tail of a time string.
+/// The `tail` starts right after `HH:MM:SS` (e.g. `".123456789Z"` or `"+05:30"`).
+fn tc_parse_sub_second_and_tz(tail: &str) -> (Option<i64>, Option<String>) {
+    if tail.is_empty() {
+        return (None, None);
+    }
+    if tail.starts_with('.') {
+        // Find end of digit run after the dot
+        let frac_end = 1 + tail[1..].find(|c: char| !c.is_ascii_digit()).unwrap_or(tail.len() - 1);
+        let frac = &tail[1..frac_end];
+        let mut buf = frac.to_string();
+        while buf.len() < 9 {
+            buf.push('0');
+        }
+        let ns: i64 = buf[..9].parse().unwrap_or(0);
+        let tz = {
+            let after = &tail[frac_end..];
+            if after.is_empty() { None } else { Some(after.to_string()) }
+        };
+        (Some(ns), tz)
+    } else {
+        (None, Some(tail.to_string()))
+    }
 }
 
 /// Extract TcComponents from a literal temporal function-call expression.
-fn tc_from_expr(expr: &Expression) -> Option<TcComponents> {
+pub(crate) fn tc_from_expr(expr: &Expression) -> Option<TcComponents> {
     let Expression::FunctionCall { name, args, .. } = expr else {
         return None;
     };
@@ -239,7 +319,7 @@ fn tc_iso_week_year(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// Apply unit-based truncation to a TcComponents in-place.
-fn tc_apply_truncation(unit: &str, comps: &mut TcComponents) {
+pub(crate) fn tc_apply_truncation(unit: &str, comps: &mut TcComponents) {
     match unit {
         "millennium" => {
             if let Some(y) = comps.year {
@@ -378,7 +458,7 @@ fn tc_get_override_i(v: &Expression) -> Option<i64> {
 }
 
 /// Apply map override values to TcComponents.
-fn tc_apply_overrides(overrides: &[(String, Expression)], comps: &mut TcComponents) {
+pub(crate) fn tc_apply_overrides(overrides: &[(String, Expression)], comps: &mut TcComponents) {
     for (k, v) in overrides {
         match k.to_ascii_lowercase().as_str() {
             "year" => {
@@ -466,7 +546,7 @@ fn tc_fmt_frac(ns: i64) -> String {
 }
 
 /// Format a time part "HH:MM" or "HH:MM:SS[.frac]" from components.
-fn tc_fmt_time(h: i64, min: i64, sec: i64, ns: i64) -> String {
+pub(crate) fn tc_fmt_time(h: i64, min: i64, sec: i64, ns: i64) -> String {
     let frac = tc_fmt_frac(ns);
     if sec == 0 && ns == 0 {
         format!("{h:02}:{min:02}")
@@ -481,7 +561,7 @@ fn temporal_is_leap(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
 }
 
-fn temporal_dim(y: i64, m: i64) -> i64 {
+pub(crate) fn temporal_dim(y: i64, m: i64) -> i64 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -497,7 +577,7 @@ fn temporal_dim(y: i64, m: i64) -> i64 {
 }
 
 /// Days since proleptic Gregorian epoch (Jan 1 year 1 = day 1).
-fn temporal_epoch(y: i64, m: i64, d: i64) -> i64 {
+pub(crate) fn temporal_epoch(y: i64, m: i64, d: i64) -> i64 {
     let y1 = y - 1;
     let mut n = 365 * y1 + y1 / 4 - y1 / 100 + y1 / 400;
     for mo in 1..m {
@@ -693,7 +773,7 @@ fn temporal_sub_second(pairs: &[(String, Expression)]) -> String {
 
 /// Compute ISO week components (iso_year, week 1-53, day_of_week 1=Mon..7=Sun)
 /// from a calendar date (y, m, d).
-fn date_to_iso_week(y: i64, m: i64, d: i64) -> (i64, i64, i64) {
+pub(crate) fn date_to_iso_week(y: i64, m: i64, d: i64) -> (i64, i64, i64) {
     let epoch = temporal_epoch(y, m, d);
     let dow = ((epoch - 1) % 7 + 7) % 7 + 1; // 1=Mon, 7=Sun
                                              // Thursday of the current ISO week
@@ -749,7 +829,7 @@ fn extract_base_date_ymd(v: &Expression) -> Option<(i64, i64, i64)> {
 
 /// Construct a `date` literal from a map.  Returns `None` if the map is
 /// incomplete or contains runtime-variable references (e.g. `date: otherVar`).
-fn temporal_date_from_map(pairs: &[(String, Expression)]) -> Option<String> {
+pub(crate) fn temporal_date_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     // Check for a `date` key providing a base date for week-based construction.
     let base_ymd: Option<(i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
         if k.eq_ignore_ascii_case("date") {
@@ -980,7 +1060,7 @@ fn parse_tz_offset_s(tz: &str) -> Option<i64> {
     None
 }
 
-fn temporal_localtime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
+pub(crate) fn temporal_localtime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     // Check for a `time` key providing base time components.
     let base_time: Option<(i64, i64, i64, i64)> = pairs.iter().find_map(|(k, v)| {
         if k.eq_ignore_ascii_case("time") {
@@ -1027,7 +1107,7 @@ fn temporal_localtime_from_map(pairs: &[(String, Expression)]) -> Option<String>
 }
 
 /// Construct a `time` literal from a map.
-fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
+pub(crate) fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     // Check for a `time` key providing a base time.
     // Returns (time_string, original_had_tz): the bool indicates if the source had a TZ.
     // Local times (no TZ) should NOT be converted when a new timezone is specified;
@@ -1195,7 +1275,7 @@ fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<String> {
 }
 
 /// Construct a `localdatetime` literal from a map.
-fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
+pub(crate) fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     // Check for a `datetime` key providing both date+time from an existing datetime/localdatetime.
     if let Some(dt_expr) = pairs.iter().find_map(|(k, v)| {
         if k.eq_ignore_ascii_case("datetime") {
@@ -1341,7 +1421,7 @@ fn temporal_localdatetime_from_map(pairs: &[(String, Expression)]) -> Option<Str
 }
 
 /// Construct a `datetime` literal from a map.
-fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
+pub(crate) fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     // Check for a `datetime` key providing both date+time from an existing datetime/localdatetime.
     if let Some(dt_expr) = pairs.iter().find_map(|(k, v)| {
         if k.eq_ignore_ascii_case("datetime") {
@@ -1654,7 +1734,7 @@ fn parse_duration_components(s: &str) -> Option<ParsedDuration> {
         subsec_ns,
     })
 }
-fn duration_get_component(dur_str: &str, component: &str) -> Option<String> {
+pub(crate) fn duration_get_component(dur_str: &str, component: &str) -> Option<String> {
     let d = parse_duration_components(dur_str)?;
     let neg = dur_str.starts_with('-');
     let sign = if neg { -1 } else { 1 };
@@ -1696,7 +1776,7 @@ fn duration_get_component(dur_str: &str, component: &str) -> Option<String> {
 /// All fields are optional and can be integers or floats.
 /// Fractional values cascade down: frac(weeks)*7→days, frac(days)*24→hours,
 /// frac(hours)*60→minutes, frac(minutes)*60→seconds.
-fn temporal_duration_from_map(pairs: &[(String, Expression)]) -> Option<String> {
+pub(crate) fn temporal_duration_from_map(pairs: &[(String, Expression)]) -> Option<String> {
     // Date components
     let years = temporal_get_f(pairs, "years").or_else(|| temporal_get_f(pairs, "year"));
     let months = temporal_get_f(pairs, "months").or_else(|| temporal_get_f(pairs, "month"));
@@ -1877,7 +1957,7 @@ fn format_duration_seconds(s: f64) -> String {
 
 /// Parse an ISO 8601 date string to canonical "YYYY-MM-DD".
 /// Also handles datetime strings by stripping the time part.
-fn temporal_parse_date(s: &str) -> Option<String> {
+pub(crate) fn temporal_parse_date(s: &str) -> Option<String> {
     let s = s.trim();
     // If string contains 'T', strip the time part (accepts datetime strings).
     let s = if let Some(t_pos) = s.find('T') {
@@ -1977,7 +2057,7 @@ fn temporal_parse_date(s: &str) -> Option<String> {
 }
 
 /// Parse an ISO 8601 local time string (no timezone).
-fn temporal_parse_localtime(s: &str) -> Option<String> {
+pub(crate) fn temporal_parse_localtime(s: &str) -> Option<String> {
     let s = s.trim();
     // If string contains 'T', extract the time part only (from datetime/localdatetime strings).
     let s = if let Some(t_pos) = s.find('T') {
@@ -2043,7 +2123,7 @@ fn temporal_parse_localtime(s: &str) -> Option<String> {
 }
 
 /// Parse an ISO 8601 time string (with timezone).
-fn temporal_parse_time(s: &str) -> Option<String> {
+pub(crate) fn temporal_parse_time(s: &str) -> Option<String> {
     let s = s.trim();
     // If string contains 'T', extract the time part only.
     let s = if let Some(t_pos) = s.find('T') {
@@ -2079,7 +2159,7 @@ fn split_tz_owned(s: &str) -> (String, String) {
 /// "+01:00[Europe/Stockholm]" → "+01:00"
 /// "[Europe/London]" → "Z"
 /// "+05:00" → "+05:00"  (unchanged)
-fn strip_named_tz(tz: &str) -> String {
+pub(crate) fn strip_named_tz(tz: &str) -> String {
     if let Some(brk) = tz.find('[') {
         let offset = &tz[..brk];
         if offset.is_empty() || offset == "Z" {
@@ -2181,7 +2261,7 @@ fn normalize_tz(tz: &str) -> String {
 }
 
 /// Parse an ISO 8601 localdatetime string (no timezone).
-fn temporal_parse_localdatetime(s: &str) -> Option<String> {
+pub(crate) fn temporal_parse_localdatetime(s: &str) -> Option<String> {
     if let Some(t_pos) = s.find(['T', 't']) {
         let date_s = temporal_parse_date(&s[..t_pos])?;
         // Strip any timezone suffix for localdatetime
@@ -2197,7 +2277,7 @@ fn temporal_parse_localdatetime(s: &str) -> Option<String> {
 }
 
 /// Parse an ISO 8601 datetime string (with timezone).
-fn temporal_parse_datetime(s: &str) -> Option<String> {
+pub(crate) fn temporal_parse_datetime(s: &str) -> Option<String> {
     let t_pos = s.find(['T', 't'])?;
     let date_s = temporal_parse_date(&s[..t_pos])?;
     let rest = &s[t_pos + 1..];
@@ -2210,7 +2290,7 @@ fn temporal_parse_datetime(s: &str) -> Option<String> {
 /// Parse an ISO 8601 duration string.  We convert
 /// "alternative" format P2012-02-02T... to the standard form, and
 /// normalize fractional components (e.g. P0.75M → P22DT19H51M49.5S).
-fn temporal_parse_duration(s: &str) -> Option<String> {
+pub(crate) fn temporal_parse_duration(s: &str) -> Option<String> {
     if !s.starts_with('P') {
         return None;
     }
@@ -3187,7 +3267,7 @@ fn calendar_diff_pos(y1: i64, m1: i64, d1: i64, y2: i64, m2: i64, d2: i64) -> (i
 }
 
 /// Compute `duration.between(lhs, rhs)`.
-fn temporal_duration_between(lhs: &str, rhs: &str) -> Option<String> {
+pub(crate) fn temporal_duration_between(lhs: &str, rhs: &str) -> Option<String> {
     let l = temporal_to_val(lhs)?;
     let r = temporal_to_val(rhs)?;
     let use_utc = l.has_tz && r.has_tz;
@@ -3254,7 +3334,7 @@ fn temporal_duration_between(lhs: &str, rhs: &str) -> Option<String> {
 }
 
 /// Compute `duration.inMonths(lhs, rhs)`.
-fn temporal_duration_in_months(lhs: &str, rhs: &str) -> Option<String> {
+pub(crate) fn temporal_duration_in_months(lhs: &str, rhs: &str) -> Option<String> {
     let l = temporal_to_val(lhs)?;
     let r = temporal_to_val(rhs)?;
     if !l.has_date || !r.has_date {
@@ -3295,7 +3375,7 @@ fn temporal_duration_in_months(lhs: &str, rhs: &str) -> Option<String> {
 
 /// Compute `duration.inDays(lhs, rhs)`.
 /// Returns the truncated whole-day difference, accounting for time-of-day.
-fn temporal_duration_in_days(lhs: &str, rhs: &str) -> Option<String> {
+pub(crate) fn temporal_duration_in_days(lhs: &str, rhs: &str) -> Option<String> {
     let l = temporal_to_val(lhs)?;
     let r = temporal_to_val(rhs)?;
     if !l.has_date || !r.has_date {
@@ -3324,7 +3404,7 @@ fn temporal_duration_in_days(lhs: &str, rhs: &str) -> Option<String> {
 }
 
 /// Compute `duration.inSeconds(lhs, rhs)`.
-fn temporal_duration_in_seconds(lhs: &str, rhs: &str) -> Option<String> {
+pub(crate) fn temporal_duration_in_seconds(lhs: &str, rhs: &str) -> Option<String> {
     let l = temporal_to_val(lhs)?;
     let r = temporal_to_val(rhs)?;
     let use_utc = l.has_tz && r.has_tz;

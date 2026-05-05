@@ -178,6 +178,10 @@ pub enum Literal {
     String(std::string::String),
     Boolean(bool),
     Null,
+    /// A compile-time-folded SPARQL typed literal: `"value"^^<xsd_type_uri>`.
+    /// Used to represent temporal values (date, datetime, duration, etc.) that
+    /// were constant-folded during AST→LQA lowering.
+    TypedLiteral(std::string::String, std::string::String),
 }
 
 impl Literal {
@@ -189,6 +193,7 @@ impl Literal {
             Literal::String(_) => Type::String,
             Literal::Boolean(_) => Type::Boolean,
             Literal::Null => Type::Null,
+            Literal::TypedLiteral(_, _) => Type::String, // temporal → closest Cypher type
         }
     }
 }

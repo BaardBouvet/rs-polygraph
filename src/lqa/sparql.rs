@@ -34,7 +34,7 @@ use spargebra::term::{
 use spargebra::Query;
 
 use crate::error::PolygraphError;
-use crate::lqa::expr::{AggKind, CmpOp, Expr, Literal, SortDir, UnaryOp};
+use crate::lqa::expr::{AggKind, CmpOp, Expr, Literal, QuantKind, SortDir, UnaryOp};
 use crate::lqa::op::{AggItem, Direction, Op, ProjItem, SortKey};
 use crate::result_mapping::schema::{ColumnKind, ProjectedColumn, ProjectionSchema};
 
@@ -54,7 +54,9 @@ fn scalar_col(name: impl Into<String>) -> ProjectedColumn {
 fn named_col(sparql_var: impl Into<String>, cypher_name: impl Into<String>) -> ProjectedColumn {
     ProjectedColumn {
         name: cypher_name.into(),
-        kind: ColumnKind::Scalar { var: sparql_var.into() },
+        kind: ColumnKind::Scalar {
+            var: sparql_var.into(),
+        },
     }
 }
 
@@ -75,6 +77,9 @@ const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
 const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 #[allow(dead_code)]
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+const XSD_DATE: &str = "http://www.w3.org/2001/XMLSchema#date";
+const XSD_TIME: &str = "http://www.w3.org/2001/XMLSchema#time";
+const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 const DEFAULT_BASE: &str = "http://polygraph.example/";
 
 // ── Public result type ────────────────────────────────────────────────────────
@@ -155,6 +160,15 @@ struct Compiler {
     /// Anonymous edge hops in the current MATCH pattern, tracked for relationship-uniqueness
     /// filtering.  Each entry is (from_var_name, predicate_info, to_var_name) for one hop.
     anon_edge_info: Vec<(String, EdgePred, String)>,
+    /// Variables in the current scope that are bound to temporal typed literals.
+    /// Maps variable name → XSD type URI ("http://www.w3.org/2001/XMLSchema#date" etc.).
+    /// Populated when a WITH clause binds a variable to a TypedLiteral.
+    /// Used to apply temporal arithmetic (date + duration) correctly.
+    temporal_type_vars: HashMap<String, String>,
+    /// Variables in the current scope bound to known constant literal values.
+    /// Maps variable name → the raw string value (e.g. "2020-01-01", "PT22H").
+    /// Used to evaluate property access on scalar temporal/duration variables.
+    scalar_lit_vals: HashMap<String, String>,
 }
 
 impl Compiler {
@@ -176,6 +190,8 @@ impl Compiler {
             unwind_null_vars: HashSet::new(),
             pending_binds: Vec::new(),
             anon_edge_info: Vec::new(),
+            temporal_type_vars: HashMap::new(),
+            scalar_lit_vals: HashMap::new(),
         }
     }
 
@@ -1478,6 +1494,23 @@ impl Compiler {
                                 expression: e,
                             };
                             self.scalar_vars.insert(pi.alias.clone());
+                            // Track temporal-typed variables for date/time arithmetic.
+                            if let Expr::Literal(Literal::TypedLiteral(_, xsd_type)) = &pi.expr {
+                                if !xsd_type.is_empty() {
+                                    self.temporal_type_vars
+                                        .insert(pi.alias.clone(), xsd_type.clone());
+                                }
+                            }
+                            // Track scalar literal values for temporal/duration property access.
+                            match &pi.expr {
+                                Expr::Literal(Literal::TypedLiteral(val, _)) => {
+                                    self.scalar_lit_vals.insert(pi.alias.clone(), val.clone());
+                                }
+                                Expr::Literal(Literal::String(val)) => {
+                                    self.scalar_lit_vals.insert(pi.alias.clone(), val.clone());
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -1646,7 +1679,9 @@ impl Compiler {
                 if let Expr::List(items) = list {
                     let inner_pat = self.lower_op(inner)?;
                     let var = Self::var(variable);
-                    let has_null = items.iter().any(|i| matches!(i, Expr::Literal(crate::lqa::expr::Literal::Null)));
+                    let has_null = items
+                        .iter()
+                        .any(|i| matches!(i, Expr::Literal(crate::lqa::expr::Literal::Null)));
                     let bindings = items
                         .iter()
                         .map(|item| literal_to_ground(item).map(|g| vec![g]))
@@ -2420,6 +2455,17 @@ impl Compiler {
                     let null_var = self.fresh("null");
                     Ok(SparExpr::Variable(null_var))
                 }
+                Literal::TypedLiteral(value, datatype) => {
+                    if datatype.is_empty() {
+                        // Duration and similar are stored as plain string literals
+                        Ok(Self::lit_str(value))
+                    } else {
+                        Ok(SparExpr::Literal(SparLit::new_typed_literal(
+                            value.clone(),
+                            NamedNode::new_unchecked(datatype.clone()),
+                        )))
+                    }
+                }
             },
 
             Expr::Property(base, key) => {
@@ -2517,9 +2563,16 @@ impl Compiler {
 
                 // If the base is a scalar variable (bound via BIND/Extend, not Scan),
                 // it holds an RDF literal and cannot be the subject of a triple.
-                // Fall back to the legacy translator for these cases.
+                // Special case: if the scalar is a temporal or duration literal with a
+                // known compile-time value, extract the property at compile time.
                 if let Expr::Variable { name, .. } = base.as_ref() {
                     if self.scalar_vars.contains(name) {
+                        if let Some(lit_val) = self.scalar_lit_vals.get(name.as_str()).cloned() {
+                            let extracted = lqa_scalar_temporal_prop(&lit_val, key);
+                            if let Some(spar) = extracted {
+                                return Ok(spar);
+                            }
+                        }
                         return Err(PolygraphError::Unsupported {
                             construct: "property access on scalar variable".into(),
                             spec_ref: "openCypher 9 §6.1".into(),
@@ -2559,6 +2612,19 @@ impl Compiler {
                 // string concatenation when either operand is a string, and
                 // list concatenation when both operands are list-typed.
                 // SPARQL `+` is arithmetic-only; strings must use CONCAT().
+
+                // Temporal arithmetic: date/time + duration needs special SPARQL.
+                if let Expr::Variable { name, .. } = a.as_ref() {
+                    if let Some(xsd_type) = self.temporal_type_vars.get(name.as_str()).cloned() {
+                        let la = self.lower_expr(a)?;
+                        let lb = self.lower_expr(b)?;
+                        let is_date = xsd_type.as_str() == XSD_DATE;
+                        return Ok(
+                            crate::translator::cypher::temporal_add_sparql(la, lb, is_date)
+                        );
+                    }
+                }
+
                 let la = self.lower_expr(a)?;
                 let lb = self.lower_expr(b)?;
                 if lqa_expr_is_string(a) || lqa_expr_is_string(b) {
@@ -2603,6 +2669,17 @@ impl Compiler {
                 }
             }
             Expr::Sub(a, b) => {
+                // Temporal arithmetic: date/time - duration needs special SPARQL.
+                if let Expr::Variable { name, .. } = a.as_ref() {
+                    if let Some(xsd_type) = self.temporal_type_vars.get(name.as_str()).cloned() {
+                        let la = self.lower_expr(a)?;
+                        let rb = self.lower_expr(b)?;
+                        let is_date = xsd_type.as_str() == XSD_DATE;
+                        return Ok(
+                            crate::translator::cypher::temporal_subtract_sparql(la, rb, is_date)
+                        );
+                    }
+                }
                 let la = self.lower_expr(a)?;
                 let rb = self.lower_expr(b)?;
                 if let Some(folded) = fold_numeric_binop('-', &la, &rb) {
@@ -2904,11 +2981,110 @@ impl Compiler {
                     })
             }
 
+            Expr::Quantifier {
+                kind,
+                variable,
+                list,
+                predicate,
+            } => {
+                // Expand quantifiers over compile-time constant lists.
+                // For runtime lists (properties, variables) fall back to legacy.
+                let items = match list.as_ref() {
+                    Expr::List(items) => items,
+                    _ => {
+                        return Err(PolygraphError::Unsupported {
+                            construct: "Quantifier over non-constant list".into(),
+                            spec_ref: "openCypher 9 §6.3.4".into(),
+                            reason: "list must be a compile-time constant for LQA expansion; legacy fallback applies".into(),
+                        })
+                    }
+                };
+
+                if items.is_empty() {
+                    // ALL(empty)  = true,  NONE(empty)   = true
+                    // ANY(empty)  = false, SINGLE(empty) = false
+                    return Ok(match kind {
+                        QuantKind::All | QuantKind::None => Self::lit_bool(true),
+                        QuantKind::Any | QuantKind::Single => Self::lit_bool(false),
+                    });
+                }
+
+                // Type-check: detect non-numeric list elements used with arithmetic
+                // predicates (e.g. `none(x IN ['str'] WHERE x % 2 = 0)`).
+                // openCypher requires a compile-time SyntaxError (InvalidArgumentType)
+                // for these patterns.
+                let any_non_numeric = items.iter().any(|item| {
+                    matches!(
+                        item,
+                        Expr::Literal(Literal::String(_)) | Expr::Literal(Literal::Boolean(_))
+                    )
+                });
+                if any_non_numeric && quant_pred_uses_arithmetic(predicate, variable.as_str()) {
+                    return Err(PolygraphError::Translation {
+                        message: format!(
+                            "Type mismatch: arithmetic predicate applied to non-numeric elements in {kind:?} quantifier over '{variable}'"
+                        ),
+                    });
+                }
+
+                // Evaluate pred[x←item] for each item.
+                let preds = items
+                    .iter()
+                    .map(|item| {
+                        let subst = subst_var(predicate, variable.as_str(), item);
+                        self.lower_expr(&subst)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                match kind {
+                    QuantKind::All => Ok(preds
+                        .into_iter()
+                        .reduce(|a, b| SparExpr::And(Box::new(a), Box::new(b)))
+                        .unwrap()),
+                    QuantKind::Any => Ok(preds
+                        .into_iter()
+                        .reduce(|a, b| SparExpr::Or(Box::new(a), Box::new(b)))
+                        .unwrap()),
+                    QuantKind::None => Ok(preds
+                        .into_iter()
+                        .map(|p| SparExpr::Not(Box::new(p)))
+                        .reduce(|a, b| SparExpr::And(Box::new(a), Box::new(b)))
+                        .unwrap()),
+                    QuantKind::Single => {
+                        // any_true AND NOT(two_or_more_true)
+                        let any_true = preds
+                            .iter()
+                            .cloned()
+                            .reduce(|a, b| SparExpr::Or(Box::new(a), Box::new(b)))
+                            .unwrap();
+                        if preds.len() == 1 {
+                            return Ok(any_true);
+                        }
+                        let mut pair_exprs = Vec::new();
+                        for i in 0..preds.len() {
+                            for j in (i + 1)..preds.len() {
+                                pair_exprs.push(SparExpr::And(
+                                    Box::new(preds[i].clone()),
+                                    Box::new(preds[j].clone()),
+                                ));
+                            }
+                        }
+                        let two_or_more = pair_exprs
+                            .into_iter()
+                            .reduce(|a, b| SparExpr::Or(Box::new(a), Box::new(b)))
+                            .unwrap();
+                        Ok(SparExpr::And(
+                            Box::new(any_true),
+                            Box::new(SparExpr::Not(Box::new(two_or_more))),
+                        ))
+                    }
+                }
+            }
+
             Expr::List(_)
             | Expr::Map(_)
             | Expr::Subscript(_, _)
             | Expr::ListSlice { .. }
-            | Expr::Quantifier { .. }
             | Expr::ListComprehension { .. }
             | Expr::PatternComprehension { .. }
             | Expr::Reduce { .. }
@@ -2930,6 +3106,38 @@ impl Compiler {
                 reason: "parameterized queries not yet supported in LQA path".into(),
             }),
         }
+    }
+
+    /// Lower `expr` to a SPARQL expression that produces a plain string value
+    /// suitable for use as an element inside a CONCAT-based list/map serialization.
+    /// Constant literals are serialized directly; everything else is wrapped in
+    /// `COALESCE(STR(?x), "?")` to protect against unbound variables.
+    fn lower_expr_as_concat_piece(
+        &mut self,
+        expr: &Expr,
+    ) -> Result<SparExpr, PolygraphError> {
+        // Fast path: constant literals.
+        if let Some(s) = lqa_lit_elem_str(expr) {
+            return Ok(Self::lit_str(&s));
+        }
+        // For nested list/map, recurse through lower_expr (which will produce
+        // a string or CONCAT expression), then wrap in STR() to guarantee a string.
+        match expr {
+            Expr::List(_) | Expr::Map(_) => {
+                let e = self.lower_expr(expr)?;
+                return Ok(SparExpr::FunctionCall(
+                    spargebra::algebra::Function::Str,
+                    vec![e],
+                ));
+            }
+            _ => {}
+        }
+        // Dynamic: lower to SPARQL and wrap in COALESCE(STR(...), "?").
+        let e = self.lower_expr(expr)?;
+        Ok(SparExpr::Coalesce(vec![
+            SparExpr::FunctionCall(spargebra::algebra::Function::Str, vec![e]),
+            Self::lit_str("?"),
+        ]))
     }
 
     fn lower_function_call(
@@ -3180,6 +3388,158 @@ impl Compiler {
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
 
+/// Returns `true` if `var` appears as a direct operand to an arithmetic
+/// operator (`%`, `/`, `*`, `-`, `^`) anywhere in `expr`.
+/// Used to detect type-mismatch quantifiers at compile time.
+fn quant_pred_uses_arithmetic(expr: &Expr, var: &str) -> bool {
+    use crate::lqa::expr::Expr as E;
+    match expr {
+        E::Mod(a, b) | E::Div(a, b) | E::Mul(a, b) | E::Sub(a, b) | E::Pow(a, b) => {
+            expr_contains_var(a, var) || expr_contains_var(b, var)
+                || quant_pred_uses_arithmetic(a, var) || quant_pred_uses_arithmetic(b, var)
+        }
+        E::Unary(UnaryOp::Neg, a) => expr_contains_var(a, var) || quant_pred_uses_arithmetic(a, var),
+        E::And(a, b) | E::Or(a, b) | E::Xor(a, b) => {
+            quant_pred_uses_arithmetic(a, var) || quant_pred_uses_arithmetic(b, var)
+        }
+        E::Not(a) | E::IsNull(a) | E::IsNotNull(a) => quant_pred_uses_arithmetic(a, var),
+        E::Comparison(_, a, b) => {
+            quant_pred_uses_arithmetic(a, var) || quant_pred_uses_arithmetic(b, var)
+        }
+        _ => false,
+    }
+}
+
+fn expr_contains_var(expr: &Expr, var: &str) -> bool {
+    matches!(expr, Expr::Variable { name, .. } if name.as_str() == var)
+}
+
+/// Convert LQA map pairs (with only literal values, at the LQA IR level) into
+/// AST `(String, Expression)` pairs so that the pub(crate) temporal helpers in
+/// `translator::cypher` can be called from the LQA path.
+///
+/// Pairs whose value is not a ground literal are omitted (the helper functions
+/// gracefully return `None` when required keys are absent).
+fn lqa_map_to_ast_pairs(pairs: &[(String, Expr)]) -> Vec<(String, crate::ast::cypher::Expression)> {
+    use crate::ast::cypher::{Expression as AE, Literal as AL};
+    pairs
+        .iter()
+        .filter_map(|(k, v)| {
+            let ae = match v {
+                Expr::Literal(Literal::Integer(n)) => AE::Literal(AL::Integer(*n)),
+                Expr::Literal(Literal::Float(f)) => AE::Literal(AL::Float(*f)),
+                Expr::Literal(Literal::String(s)) => AE::Literal(AL::String(s.clone())),
+                Expr::Literal(Literal::Boolean(b)) => AE::Literal(AL::Boolean(*b)),
+                Expr::Literal(Literal::Null) => AE::Literal(AL::Null),
+                _ => return None,
+            };
+            Some((k.clone(), ae))
+        })
+        .collect()
+}
+
+/// Recursively substitute a single variable name with a replacement expression
+/// in an LQA `Expr` tree.  Used for quantifier expansion.
+fn subst_var(expr: &Expr, var: &str, val: &Expr) -> Expr {
+    use crate::lqa::expr::Expr as E;
+    match expr {
+        E::Variable { name, .. } if name == var => val.clone(),
+        E::Add(a, b) => E::Add(
+            Box::new(subst_var(a, var, val)),
+            Box::new(subst_var(b, var, val)),
+        ),
+        E::Sub(a, b) => E::Sub(
+            Box::new(subst_var(a, var, val)),
+            Box::new(subst_var(b, var, val)),
+        ),
+        E::Mul(a, b) => E::Mul(
+            Box::new(subst_var(a, var, val)),
+            Box::new(subst_var(b, var, val)),
+        ),
+        E::Div(a, b) => E::Div(
+            Box::new(subst_var(a, var, val)),
+            Box::new(subst_var(b, var, val)),
+        ),
+        E::Mod(a, b) => E::Mod(
+            Box::new(subst_var(a, var, val)),
+            Box::new(subst_var(b, var, val)),
+        ),
+        E::Pow(a, b) => E::Pow(
+            Box::new(subst_var(a, var, val)),
+            Box::new(subst_var(b, var, val)),
+        ),
+        E::Unary(op, a) => E::Unary(op.clone(), Box::new(subst_var(a, var, val))),
+        E::Comparison(op, a, b) => E::Comparison(
+            op.clone(),
+            Box::new(subst_var(a, var, val)),
+            Box::new(subst_var(b, var, val)),
+        ),
+        E::IsNull(a) => E::IsNull(Box::new(subst_var(a, var, val))),
+        E::IsNotNull(a) => E::IsNotNull(Box::new(subst_var(a, var, val))),
+        E::And(a, b) => E::And(
+            Box::new(subst_var(a, var, val)),
+            Box::new(subst_var(b, var, val)),
+        ),
+        E::Or(a, b) => E::Or(
+            Box::new(subst_var(a, var, val)),
+            Box::new(subst_var(b, var, val)),
+        ),
+        E::Xor(a, b) => E::Xor(
+            Box::new(subst_var(a, var, val)),
+            Box::new(subst_var(b, var, val)),
+        ),
+        E::Not(a) => E::Not(Box::new(subst_var(a, var, val))),
+        E::Property(base, key) => E::Property(Box::new(subst_var(base, var, val)), key.clone()),
+        E::Subscript(a, b) => E::Subscript(
+            Box::new(subst_var(a, var, val)),
+            Box::new(subst_var(b, var, val)),
+        ),
+        E::ListSlice { list, start, end } => E::ListSlice {
+            list: Box::new(subst_var(list, var, val)),
+            start: start.as_deref().map(|e| Box::new(subst_var(e, var, val))),
+            end: end.as_deref().map(|e| Box::new(subst_var(e, var, val))),
+        },
+        E::List(items) => E::List(items.iter().map(|e| subst_var(e, var, val)).collect()),
+        E::Map(pairs) => E::Map(
+            pairs
+                .iter()
+                .map(|(k, e)| (k.clone(), subst_var(e, var, val)))
+                .collect(),
+        ),
+        E::FunctionCall {
+            name,
+            distinct,
+            args,
+        } => E::FunctionCall {
+            name: name.clone(),
+            distinct: *distinct,
+            args: args.iter().map(|a| subst_var(a, var, val)).collect(),
+        },
+        E::CaseSearched {
+            branches,
+            else_expr,
+        } => E::CaseSearched {
+            branches: branches
+                .iter()
+                .map(|(c, t)| (subst_var(c, var, val), subst_var(t, var, val)))
+                .collect(),
+            else_expr: else_expr
+                .as_deref()
+                .map(|e| Box::new(subst_var(e, var, val))),
+        },
+        E::LabelCheck {
+            expr: inner,
+            labels,
+        } => E::LabelCheck {
+            expr: Box::new(subst_var(inner, var, val)),
+            labels: labels.clone(),
+        },
+        // For other complex variants (Aggregate, Quantifier, comprehensions, etc.)
+        // that are unlikely to appear inside a quantifier predicate, leave as-is.
+        _ => expr.clone(),
+    }
+}
+
 /// Structural equality check for LQA expressions (ignores type annotations).
 /// Used to match ORDER BY sort keys to GROUP BY projection item expressions.
 /// Recursively substitute alias references inside a Cypher expression.
@@ -3389,6 +3749,20 @@ fn literal_to_ground(expr: &Expr) -> Result<Option<spargebra::term::GroundTerm>,
             SparLit::new_typed_literal(b.to_string(), NamedNode::new_unchecked(XSD_BOOLEAN)),
         ))),
         Expr::Literal(Literal::Null) => Ok(None),
+        Expr::Literal(Literal::TypedLiteral(v, t)) => {
+            if t.is_empty() {
+                Ok(Some(spargebra::term::GroundTerm::Literal(
+                    SparLit::new_simple_literal(v.as_str()),
+                )))
+            } else {
+                Ok(Some(spargebra::term::GroundTerm::Literal(
+                    SparLit::new_typed_literal(
+                        v.as_str(),
+                        NamedNode::new_unchecked(t.as_str()),
+                    ),
+                )))
+            }
+        }
         _ => Err(PolygraphError::Unsupported {
             construct: format!("non-literal value ({}) in UNWIND/VALUES context", expr_type_name(expr)),
             spec_ref: "openCypher 9 §4.5".into(),
@@ -3464,6 +3838,116 @@ fn lqa_expr_is_string(e: &Expr) -> bool {
     }
 }
 
+/// Serialize a constant LQA literal expression to its Cypher string representation
+/// (as used inside a list or map serialization). Returns `None` for non-constants.
+/// Try to extract a Cypher temporal/duration property from a known scalar literal string.
+/// Returns the SPARQL integer literal for the component, or `None` if not recognized.
+fn lqa_scalar_temporal_prop(val: &str, component: &str) -> Option<SparExpr> {
+    use crate::translator::cypher as tc;
+
+    // Duration property: val starts with 'P' or '-P'
+    if val.starts_with('P') || val.starts_with("-P") {
+        let n = tc::duration_get_component(val, component)?;
+        let parsed: i64 = n.parse().ok()?;
+        return Some(SparExpr::Literal(SparLit::new_typed_literal(
+            parsed.to_string(),
+            NamedNode::new_unchecked(XSD_INTEGER),
+        )));
+    }
+
+    // Temporal (date / time / datetime) property.
+    // Use tc_from_iso_string to parse the temporal value.
+    let comps = tc::tc_from_iso_string(val)?;
+    let n: i64 = match component {
+        "year" => comps.year?,
+        "month" => comps.month?,
+        "day" => comps.day?,
+        "hour" => comps.hour?,
+        "minute" => comps.minute?,
+        "second" => comps.second?,
+        "millisecond" | "millisecondOfSecond" | "millisecondsOfSecond" => {
+            (comps.ns? / 1_000_000) as i64
+        }
+        "microsecond" | "microsecondOfSecond" | "microsecondsOfSecond" => {
+            (comps.ns? / 1_000) as i64
+        }
+        "nanosecond" | "nanosecondOfSecond" | "nanosecondsOfSecond" => comps.ns? as i64,
+        "week" => {
+            let y = comps.year?;
+            let m = comps.month?;
+            let d = comps.day?;
+            let (_, w, _) = crate::translator::cypher::date_to_iso_week(y, m, d);
+            w
+        }
+        "dayOfWeek" => {
+            let y = comps.year?;
+            let m = comps.month?;
+            let d = comps.day?;
+            let (_, _, dow) = crate::translator::cypher::date_to_iso_week(y, m, d);
+            dow
+        }
+        "dayOfYear" | "ordinalDay" => {
+            let y = comps.year?;
+            let m = comps.month?;
+            let d = comps.day?;
+            let epoch_d = crate::translator::cypher::temporal_epoch(y, m, d);
+            let epoch_y = crate::translator::cypher::temporal_epoch(y, 1, 1);
+            (epoch_d - epoch_y + 1) as i64
+        }
+        "quarter" => {
+            let m = comps.month?;
+            (m - 1) / 3 + 1
+        }
+        "dayOfQuarter" => {
+            let y = comps.year?;
+            let m = comps.month?;
+            let d = comps.day?;
+            let q_start_m = ((m - 1) / 3) * 3 + 1;
+            let mut doq = d;
+            for mo in q_start_m..m {
+                doq += crate::translator::cypher::temporal_dim(y, mo);
+            }
+            doq
+        }
+        "weekYear" => {
+            let y = comps.year?;
+            let m = comps.month?;
+            let d = comps.day?;
+            let (iso_year, _, _) = crate::translator::cypher::date_to_iso_week(y, m, d);
+            iso_year
+        }
+        "offset" | "timezone" | "epochMillis" | "epochSeconds" => return None,
+        _ => return None,
+    };
+    Some(SparExpr::Literal(SparLit::new_typed_literal(
+        n.to_string(),
+        NamedNode::new_unchecked(XSD_INTEGER),
+    )))
+}
+
+fn lqa_lit_elem_str(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Literal(lit) => match lit {
+            Literal::Integer(n) => Some(n.to_string()),
+            Literal::Float(f) => {
+                // Mirror Cypher float formatting: avoid trailing zeros but keep decimal.
+                let s = format!("{f}");
+                Some(s)
+            }
+            Literal::String(s) => Some(format!("'{s}'")),
+            Literal::Boolean(b) => Some(if *b { "true" } else { "false" }.to_owned()),
+            Literal::Null => Some("null".to_owned()),
+            Literal::TypedLiteral(v, _) => Some(v.clone()),
+        },
+        Expr::Unary(crate::lqa::expr::UnaryOp::Neg, inner) => match inner.as_ref() {
+            Expr::Literal(Literal::Integer(n)) => Some(format!("-{n}")),
+            Expr::Literal(Literal::Float(f)) => Some(format!("{}", -f)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn arg_err(name: &str) -> PolygraphError {
     PolygraphError::UnsupportedFeature {
         feature: format!("{name}() requires an argument"),
@@ -3528,8 +4012,16 @@ fn bool_to_int_for_order(e: SparExpr) -> SparExpr {
 /// * Mixed int/double   → double
 /// * `op` is one of `'+'`, `'-'`, `'*'`, `'/'`, `'%'`
 fn fold_numeric_binop(op: char, la: &SparExpr, rb: &SparExpr) -> Option<SparExpr> {
-    let la_lit = if let SparExpr::Literal(l) = la { l } else { return None };
-    let rb_lit = if let SparExpr::Literal(l) = rb { l } else { return None };
+    let la_lit = if let SparExpr::Literal(l) = la {
+        l
+    } else {
+        return None;
+    };
+    let rb_lit = if let SparExpr::Literal(l) = rb {
+        l
+    } else {
+        return None;
+    };
 
     let la_dt = la_lit.datatype().as_str();
     let rb_dt = rb_lit.datatype().as_str();
@@ -3566,9 +4058,7 @@ fn fold_numeric_binop(op: char, la: &SparExpr, rb: &SparExpr) -> Option<SparExpr
     // Mixed or double literals → double result.
     let parse_num = |l: &SparLit| -> Option<f64> {
         let dt = l.datatype().as_str();
-        if dt == XSD_INTEGER
-            || dt == XSD_DOUBLE
-            || dt == "http://www.w3.org/2001/XMLSchema#decimal"
+        if dt == XSD_INTEGER || dt == XSD_DOUBLE || dt == "http://www.w3.org/2001/XMLSchema#decimal"
         {
             l.value().parse().ok()
         } else {

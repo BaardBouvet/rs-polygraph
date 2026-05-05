@@ -794,10 +794,303 @@ impl AstLowerer {
                         return Ok(Expr::List(items));
                     }
                 }
-                let largs = args
+                let largs: Vec<Expr> = args
                     .iter()
                     .map(|a| self.lower_expr(a))
                     .collect::<Result<_, _>>()?;
+
+                // ── Temporal constructor constant folding ───────────────────
+                // If this is a temporal constructor and all of the LQA args are
+                // ground literals (potentially wrapped in a function call that
+                // was itself folded), call the pub(crate) temporal helpers from
+                // the original AST-level args to produce a typed literal.
+                // We do this AFTER lowering the args so that non-literal args
+                // (e.g. temporal values from WITH bindings) have already been
+                // lowered; but we pass the ORIGINAL `args` (AST) to the temporal
+                // helpers because they expect `ast::cypher::Expression`.
+                {
+                    use crate::lqa::expr::Literal as LLit;
+                    use crate::translator::cypher as tc;
+
+                    const XSD_DATE: &str = "http://www.w3.org/2001/XMLSchema#date";
+                    const XSD_TIME: &str = "http://www.w3.org/2001/XMLSchema#time";
+                    const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
+
+                    let name_lc = name.to_lowercase();
+                    let base = name_lc
+                        .strip_suffix(".transaction")
+                        .or_else(|| name_lc.strip_suffix(".statement"))
+                        .or_else(|| name_lc.strip_suffix(".realtime"))
+                        .unwrap_or(name_lc.as_str());
+
+                    let temporal_lit: Option<Expr> = match base {
+                        "date" | "localtime" | "localdatetime" | "time" | "datetime"
+                        | "duration" => {
+                            // Zero-arg: placeholder literal
+                            if args.is_empty() {
+                                let (val, xsd) = match base {
+                                    "date" => ("2000-01-01", XSD_DATE),
+                                    "localtime" => ("00:00:00", XSD_TIME),
+                                    "time" => ("00:00:00Z", XSD_TIME),
+                                    "localdatetime" => ("2000-01-01T00:00:00", XSD_DATETIME),
+                                    "datetime" => ("2000-01-01T00:00:00Z", XSD_DATETIME),
+                                    "duration" => ("PT0S", ""),
+                                    _ => unreachable!(),
+                                };
+                                let lit = if xsd.is_empty() {
+                                    LLit::String(val.into())
+                                } else {
+                                    LLit::TypedLiteral(val.into(), xsd.into())
+                                };
+                                Some(Expr::Literal(lit))
+                            }
+                            // Null propagation
+                            else if matches!(args.first(), Some(AE::Literal(ast::Literal::Null))) {
+                                Some(Expr::Literal(LLit::Null))
+                            }
+                            // Map arg: call temporal helpers with ORIGINAL AST Map pairs.
+                            // Guard: if any map value is a Variable reference, the
+                            // caller may have WITH-bound substitutions we don't track
+                            // here — fall through to legacy (return None).
+                            else if let Some(AE::Map(pairs)) = args.first() {
+                                let has_var = pairs.iter().any(|(_, v)| {
+                                    matches!(v, AE::Variable(_))
+                                });
+                                if has_var {
+                                    None
+                                } else {
+                                let result = match base {
+                                    "date" => tc::temporal_date_from_map(pairs)
+                                        .map(|s| LLit::TypedLiteral(s, XSD_DATE.into())),
+                                    "localtime" => tc::temporal_localtime_from_map(pairs)
+                                        .map(|s| LLit::TypedLiteral(s, XSD_TIME.into())),
+                                    "time" => tc::temporal_time_from_map(pairs)
+                                        .map(|s| LLit::TypedLiteral(s, XSD_TIME.into())),
+                                    "localdatetime" => tc::temporal_localdatetime_from_map(pairs)
+                                        .map(|s| LLit::TypedLiteral(s, XSD_DATETIME.into())),
+                                    "datetime" => tc::temporal_datetime_from_map(pairs)
+                                        .map(|s| LLit::TypedLiteral(s, XSD_DATETIME.into())),
+                                    "duration" => tc::temporal_duration_from_map(pairs)
+                                        .map(LLit::String),
+                                    _ => None,
+                                };
+                                result.map(|lit| Expr::Literal(lit))
+                                }
+                            }
+                            // String arg: call temporal string parse helper
+                            else if let Some(AE::Literal(ast::Literal::String(s))) = args.first() {
+                                let result = match base {
+                                    "date" => tc::temporal_parse_date(s)
+                                        .map(|v| LLit::TypedLiteral(v, XSD_DATE.into())),
+                                    "localtime" => tc::temporal_parse_localtime(s)
+                                        .map(|v| LLit::TypedLiteral(v, XSD_TIME.into())),
+                                    "time" => tc::temporal_parse_time(s)
+                                        .map(|v| LLit::TypedLiteral(v, XSD_TIME.into())),
+                                    "localdatetime" => tc::temporal_parse_localdatetime(s)
+                                        .map(|v| LLit::TypedLiteral(v, XSD_DATETIME.into())),
+                                    "datetime" => tc::temporal_parse_datetime(s)
+                                        .map(|v| LLit::TypedLiteral(v, XSD_DATETIME.into())),
+                                    "duration" => tc::temporal_parse_duration(s)
+                                        .map(LLit::String),
+                                    _ => None,
+                                };
+                                result.map(|lit| Expr::Literal(lit))
+                            } else {
+                                None
+                            }
+                        }
+                        // date.truncate / datetime.truncate / localdatetime.truncate / etc.
+                        "date.truncate"
+                        | "datetime.truncate"
+                        | "localdatetime.truncate"
+                        | "localtime.truncate"
+                        | "time.truncate" => {
+                            if args.len() >= 3 {
+                                // Unit must be a string literal
+                                let unit = if let AE::Literal(ast::Literal::String(u)) = &args[0] {
+                                    Some(u.clone())
+                                } else {
+                                    None
+                                };
+                                // Overrides map
+                                let overrides_pairs: Option<&Vec<(String, ast::Expression)>> =
+                                    if let AE::Map(pairs) = &args[2] {
+                                        Some(pairs)
+                                    } else {
+                                        None
+                                    };
+                                if let (Some(unit), Some(overrides)) = (unit, overrides_pairs) {
+                                    // Build TcComponents from the "other" arg (args[1])
+                                    let mut comps =
+                                        tc::tc_from_expr(&args[1])
+                                            .or_else(|| {
+                                                // Fallback: try tc_from_iso_string for
+                                                // string-literal "other" arg
+                                                if let AE::Literal(ast::Literal::String(s)) =
+                                                    &args[1]
+                                                {
+                                                    tc::tc_from_iso_string(s)
+                                                } else {
+                                                    None
+                                                }
+                                            });
+                                    if let Some(ref mut c) = comps {
+                                        tc::tc_apply_truncation(&unit, c);
+                                        tc::tc_apply_overrides(overrides, c);
+
+                                        const XSD_DATE_T: &str =
+                                            "http://www.w3.org/2001/XMLSchema#date";
+                                        const XSD_TIME_T: &str =
+                                            "http://www.w3.org/2001/XMLSchema#time";
+                                        const XSD_DT_T: &str =
+                                            "http://www.w3.org/2001/XMLSchema#dateTime";
+
+                                        let lit = match base {
+                                            "date.truncate" => {
+                                                let y = c.year.unwrap_or(0);
+                                                let m = c.month.unwrap_or(1);
+                                                let d = c.day.unwrap_or(1);
+                                                LLit::TypedLiteral(
+                                                    format!("{y:04}-{m:02}-{d:02}"),
+                                                    XSD_DATE_T.into(),
+                                                )
+                                            }
+                                            "datetime.truncate" => {
+                                                let y = c.year.unwrap_or(0);
+                                                let m = c.month.unwrap_or(1);
+                                                let d = c.day.unwrap_or(1);
+                                                let h = c.hour.unwrap_or(0);
+                                                let mn = c.minute.unwrap_or(0);
+                                                let s = c.second.unwrap_or(0);
+                                                let ns = c.ns.unwrap_or(0);
+                                                let t = tc::tc_fmt_time(h, mn, s, ns);
+                                                let tz = c.tz.as_deref().unwrap_or("Z");
+                                                LLit::TypedLiteral(
+                                                    format!("{y:04}-{m:02}-{d:02}T{t}{tz}"),
+                                                    XSD_DT_T.into(),
+                                                )
+                                            }
+                                            "localdatetime.truncate" => {
+                                                let y = c.year.unwrap_or(0);
+                                                let m = c.month.unwrap_or(1);
+                                                let d = c.day.unwrap_or(1);
+                                                let h = c.hour.unwrap_or(0);
+                                                let mn = c.minute.unwrap_or(0);
+                                                let s = c.second.unwrap_or(0);
+                                                let ns = c.ns.unwrap_or(0);
+                                                let t = tc::tc_fmt_time(h, mn, s, ns);
+                                                LLit::TypedLiteral(
+                                                    format!("{y:04}-{m:02}-{d:02}T{t}"),
+                                                    XSD_DT_T.into(),
+                                                )
+                                            }
+                                            "localtime.truncate" => {
+                                                let h = c.hour.unwrap_or(0);
+                                                let mn = c.minute.unwrap_or(0);
+                                                let s = c.second.unwrap_or(0);
+                                                let ns = c.ns.unwrap_or(0);
+                                                LLit::TypedLiteral(
+                                                    tc::tc_fmt_time(h, mn, s, ns),
+                                                    XSD_TIME_T.into(),
+                                                )
+                                            }
+                                            "time.truncate" => {
+                                                let h = c.hour.unwrap_or(0);
+                                                let mn = c.minute.unwrap_or(0);
+                                                let s = c.second.unwrap_or(0);
+                                                let ns = c.ns.unwrap_or(0);
+                                                let t = tc::tc_fmt_time(h, mn, s, ns);
+                                                let tz = c.tz.as_deref().unwrap_or("Z");
+                                                LLit::TypedLiteral(
+                                                    format!("{t}{tz}"),
+                                                    XSD_TIME_T.into(),
+                                                )
+                                            }
+                                            _ => unreachable!(),
+                                        };
+                                        Some(Expr::Literal(lit))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(folded) = temporal_lit {
+                        return Ok(folded);
+                    }
+
+                    // ── Duration-between constant folding ─────────────────
+                    // If this is a duration.between / duration.inMonths / etc.
+                    // and both args are already-folded typed temporal literals,
+                    // compute the duration at compile time.
+                    let dur_lit = match base {
+                        "duration.between" | "duration.inmonths" | "duration.indays"
+                        | "duration.inseconds" => {
+                            if largs.len() >= 2 {
+                                // Null propagation: if either arg is null, result is null.
+                                if matches!(largs[0], Expr::Literal(LLit::Null))
+                                    || matches!(largs[1], Expr::Literal(LLit::Null))
+                                {
+                                    Some(Expr::Literal(LLit::Null))
+                                } else {
+                                    let v1 = match &largs[0] {
+                                        Expr::Literal(LLit::TypedLiteral(v, _)) => Some(v.clone()),
+                                        Expr::Literal(LLit::String(v))
+                                            if v.starts_with('P') || v.starts_with("-P") =>
+                                        {
+                                            Some(v.clone())
+                                        }
+                                        _ => None,
+                                    };
+                                    let v2 = match &largs[1] {
+                                        Expr::Literal(LLit::TypedLiteral(v, _)) => Some(v.clone()),
+                                        Expr::Literal(LLit::String(v))
+                                            if v.starts_with('P') || v.starts_with("-P") =>
+                                        {
+                                            Some(v.clone())
+                                        }
+                                        _ => None,
+                                    };
+                                    if let (Some(s1), Some(s2)) = (v1, v2) {
+                                        let result = match base {
+                                            "duration.between" => {
+                                                tc::temporal_duration_between(&s1, &s2)
+                                            }
+                                            "duration.inmonths" => {
+                                                tc::temporal_duration_in_months(&s1, &s2)
+                                            }
+                                            "duration.indays" => {
+                                                tc::temporal_duration_in_days(&s1, &s2)
+                                            }
+                                            "duration.inseconds" => {
+                                                tc::temporal_duration_in_seconds(&s1, &s2)
+                                            }
+                                            _ => None,
+                                        };
+                                        result.map(|s| Expr::Literal(LLit::String(s)))
+                                    } else {
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(folded) = dur_lit {
+                        return Ok(folded);
+                    }
+                }
+                // ─────────────────────────────────────────────────────────────
                 Ok(Expr::FunctionCall {
                     name: name.clone(),
                     distinct: *distinct,
