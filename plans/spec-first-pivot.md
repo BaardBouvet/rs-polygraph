@@ -598,10 +598,10 @@ out of scope — that is Phase L2 (a completely separate future work item).
 **Baseline (2026-05-05):**
 
 ```
-Read fallbacks:   951  (743 after initial Phase 7 PRs — see progress below)
+Read fallbacks:   951  (604 lqa_compile=Unsupported after Phase 7 — see progress below)
 Write fallbacks:  278  (Phase 8)
 TCK pass rate:    3757/3828
-Difftest:         213/213
+Difftest:         220/220
 ```
 
 **Bucket table (full baseline, 2026-05-05):**
@@ -611,7 +611,7 @@ Difftest:         213/213
 | W | Writes (CREATE/MERGE/SET/DELETE/REMOVE/CALL) | 278 | 278 | `src/translator/cypher/clauses.rs` (write lowering) | Phase 8 |
 | 1 | `Expr::List` literal | 155 | 155 | `lower_expr` in `mod.rs` — serialises `[a,b,c]` to string `"[a, b, c]"` | ✅ portable (string serialisation) |
 | 2 | `Expr::Map` literal | 117 | 117 | same — serialises `{k: v}` to string | ✅ portable |
-| 3 | UNWIND of non-literal / variable list | 116 | 116 | `clauses.rs` UNWIND lowering | ✅ portable (needs bucket 1+2 first) |
+| 3 | UNWIND of non-literal / variable list | 116 | 109 | `clauses.rs` UNWIND lowering | ✅ portable (needs bucket 1+2 first); −7 from UNWIND keys(n/r) |
 | 4 | Temporal constructors (datetime/localdatetime/date/time/localtime/duration) | 199 | 14 | `temporal.rs` | ✅ DONE (−185) |
 | 5 | Named path `MATCH p = …` | 87 | 87 | `patterns.rs` — emits BGP chain, records path variable | ✅ portable |
 | 6 | `collect()` aggregate | 57 | 57 | `return_proj.rs` — emits `GROUP_CONCAT` | ✅ portable (GROUP_CONCAT, same lossy semantics as legacy) |
@@ -619,7 +619,7 @@ Difftest:         213/213
 | 8 | `relvar_after_with` / varlen named relvar / unbounded varlen unlabeled | 41 | 41 | `is_lqa_safe` guards | ✅ portable for relvar_after_with (port leg. treatment); `unbounded_varlen_unlabeled` (9) in failing set → keep guard |
 | 9 | `ListComprehension` / `PatternComprehension` / `ListSlice` | 40 | 40 | `mod.rs` lower_expr branches | ✅ portable (correlated sub-SELECT, same as legacy) |
 | 10 | `Quantifier over non-constant list` | 24 | 24 | — | ❌ genuinely not portable: these 24 map to failing TCK scenarios; leave `Unsupported` |
-| 11 | `keys()` / `properties()` / `labels()` | 20 | 20 | `mod.rs` function dispatch | ✅ portable |
+| 11 | `keys()` / `properties()` / `labels()` | 20 | 19 | `mod.rs` function dispatch | ✅ UNWIND keys(n/r) + IN keys(n) DONE (−1 expr fallback); Map3 list returns blocked |
 | 12 | scalar-var property access, `Exists`, `type(r)`, `rand()`, `^`, `Subscript`, `with_orderby_shadow_alias`, misc | 42 | 42 | various | mostly portable; check legacy per-item |
 
 **Progress log:**
@@ -628,6 +628,8 @@ Difftest:         213/213
 |------|--------|---|-------|
 | 2026-05-05 | 4 — temporal constructors | −185 | 6 difftest queries added |
 | 2026-05-05 | 7 — range() literal args | −27 | 3 difftest queries added |
+| 2026-05-11 | 3 — UNWIND keys(n/r) | −7 | UNWIND keys() node + rel RDF-star; 4 difftest queries added |
+| 2026-05-11 | 11 — keys() IN expression | −1 | 'literal' IN keys(node_var) → EXISTS { ?n <base:prop> ?_kv } |
 
 **Ordered queue (next-up first):**
 
