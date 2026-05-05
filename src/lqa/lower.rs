@@ -1116,10 +1116,25 @@ impl AstLowerer {
                     .collect::<Result<Vec<_>, PolygraphError>>()?;
                 Ok(Expr::Map(lpairs))
             }
-            AE::Subscript(a, b) => Ok(Expr::Subscript(
-                Box::new(self.lower_expr(a)?),
-                Box::new(self.lower_expr(b)?),
-            )),
+            AE::Subscript(a, b) => {
+                // Constant-fold: if the list is a literal list and the index is
+                // a literal integer, extract the element directly.
+                if let AE::List(items) = a.as_ref() {
+                    if let AE::Literal(ast::Literal::Integer(idx)) = b.as_ref() {
+                        let len = items.len() as i64;
+                        let i = if *idx < 0 { len + idx } else { *idx };
+                        if i >= 0 && (i as usize) < items.len() {
+                            return self.lower_expr(&items[i as usize]);
+                        }
+                        // Out-of-bounds → null.
+                        return Ok(Expr::Literal(crate::lqa::expr::Literal::Null));
+                    }
+                }
+                Ok(Expr::Subscript(
+                    Box::new(self.lower_expr(a)?),
+                    Box::new(self.lower_expr(b)?),
+                ))
+            }
             AE::ListSlice { list, start, end } => Ok(Expr::ListSlice {
                 list: Box::new(self.lower_expr(list)?),
                 start: start

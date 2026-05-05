@@ -3361,6 +3361,42 @@ impl Compiler {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(SparExpr::Coalesce(largs))
             }
+            "head" | "first" => {
+                // Constant folding: head over a compile-time constant list.
+                let arg = args.first().ok_or_else(|| arg_err(name))?;
+                match arg {
+                    Expr::List(items) => {
+                        if items.is_empty() {
+                            Ok(SparExpr::Variable(self.fresh("_null_head")))
+                        } else {
+                            self.lower_expr(&items[0])
+                        }
+                    }
+                    _ => Err(PolygraphError::Unsupported {
+                        construct: "head()".into(),
+                        spec_ref: "openCypher 9 §3.4.2".into(),
+                        reason: "head() over runtime list requires legacy path".into(),
+                    }),
+                }
+            }
+            "last" => {
+                // Constant folding: last over a compile-time constant list.
+                let arg = args.first().ok_or_else(|| arg_err(name))?;
+                match arg {
+                    Expr::List(items) => {
+                        if items.is_empty() {
+                            Ok(SparExpr::Variable(self.fresh("_null_last")))
+                        } else {
+                            self.lower_expr(items.last().unwrap())
+                        }
+                    }
+                    _ => Err(PolygraphError::Unsupported {
+                        construct: "last()".into(),
+                        spec_ref: "openCypher 9 §3.4.2".into(),
+                        reason: "last() over runtime list requires legacy path".into(),
+                    }),
+                }
+            }
             _ => Err(PolygraphError::Unsupported {
                 construct: format!("{name}()"),
                 spec_ref: "openCypher 9 §6.3".into(),
