@@ -1128,6 +1128,51 @@ impl AstLowerer {
                     if let Some(folded) = dur_lit {
                         return Ok(folded);
                     }
+
+                    // ── datetime.fromepoch / datetime.fromepochmillis ─────
+                    // Constant-fold when all arguments are integer literals.
+                    let epoch_lit: Option<Expr> = match base {
+                        "datetime.fromepoch" if largs.len() >= 2 => {
+                            let secs = match &largs[0] {
+                                Expr::Literal(LLit::Integer(n)) => Some(*n),
+                                _ => None,
+                            };
+                            let nanos = match &largs[1] {
+                                Expr::Literal(LLit::Integer(n)) => {
+                                    u32::try_from(*n).ok()
+                                }
+                                _ => None,
+                            };
+                            if let (Some(s), Some(ns)) = (secs, nanos) {
+                                let dt = tc::temporal_fromepoch_to_str(s, ns);
+                                Some(Expr::Literal(LLit::TypedLiteral(
+                                    dt,
+                                    "http://www.w3.org/2001/XMLSchema#dateTime".into(),
+                                )))
+                            } else {
+                                None
+                            }
+                        }
+                        "datetime.fromepochmillis" if largs.len() >= 1 => {
+                            let ms = match &largs[0] {
+                                Expr::Literal(LLit::Integer(n)) => Some(*n),
+                                _ => None,
+                            };
+                            if let Some(ms) = ms {
+                                let dt = tc::temporal_fromepochmillis_to_str(ms);
+                                Some(Expr::Literal(LLit::TypedLiteral(
+                                    dt,
+                                    "http://www.w3.org/2001/XMLSchema#dateTime".into(),
+                                )))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(folded) = epoch_lit {
+                        return Ok(folded);
+                    }
                 }
                 // ─────────────────────────────────────────────────────────────
                 Ok(Expr::FunctionCall {

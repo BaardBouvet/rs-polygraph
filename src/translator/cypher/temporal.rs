@@ -3441,7 +3441,7 @@ pub(crate) fn temporal_duration_in_seconds(lhs: &str, rhs: &str) -> Option<Strin
 /// Convert Unix epoch seconds + sub-second nanoseconds to an ISO 8601 UTC
 /// datetime string, as required by `datetime.fromepoch(seconds, nanoseconds)`.
 /// Nanoseconds must be in 0..=999_999_999.
-fn temporal_fromepoch_to_str(epoch_seconds: i64, nanoseconds: u32) -> String {
+pub(crate) fn temporal_fromepoch_to_str(epoch_seconds: i64, nanoseconds: u32) -> String {
     // Split into Unix days and seconds within the day (always non-negative).
     let (unix_day, sec_of_day) = if epoch_seconds >= 0 {
         (epoch_seconds / 86400, (epoch_seconds % 86400) as u64)
@@ -3478,4 +3478,18 @@ fn temporal_fromepoch_to_str(epoch_seconds: i64, nanoseconds: u32) -> String {
             year, month, day, hour, min, sec, ns_str
         )
     }
+}
+
+/// Convert Unix epoch milliseconds to an ISO 8601 UTC datetime string,
+/// as required by `datetime.fromepochmillis(milliseconds)`.
+pub(crate) fn temporal_fromepochmillis_to_str(epoch_ms: i64) -> String {
+    let secs = epoch_ms / 1000;
+    let ms_part = epoch_ms % 1000;
+    // Handle negative values: ensure nanoseconds is always non-negative.
+    let (secs_adj, ns) = if ms_part < 0 {
+        (secs - 1, ((ms_part + 1000) * 1_000_000) as u32)
+    } else {
+        (secs, (ms_part * 1_000_000) as u32)
+    };
+    temporal_fromepoch_to_str(secs_adj, ns)
 }

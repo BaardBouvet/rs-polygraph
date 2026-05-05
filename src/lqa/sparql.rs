@@ -3453,12 +3453,18 @@ impl Compiler {
                 reason: "rand() inside aggregates raises SyntaxError; legacy fallback needed".into(),
             }),
             "sqrt" => {
-                // SPARQL 1.1 has no native SQRT; fall back.
-                // TODO: use xpf:sqrt or custom function when supported.
+                // Constant-fold sqrt() when argument is a numeric literal.
+                let arg = args.first().ok_or_else(|| arg_err(name))?;
+                if let Some(val) = const_eval_numeric(arg) {
+                    let result = val.sqrt();
+                    if result.is_finite() {
+                        return Ok(Self::lit_double(result));
+                    }
+                }
                 Err(PolygraphError::Unsupported {
                     construct: format!("{name}()"),
                     spec_ref: "openCypher 9 §6.3.2".into(),
-                    reason: "sqrt() has no SPARQL 1.1 built-in; legacy fallback applies".into(),
+                    reason: "sqrt() with non-constant argument requires legacy path".into(),
                 })
             }
             "reverse" => {
@@ -3476,11 +3482,55 @@ impl Compiler {
                     }),
                 }
             }
-            _ => Err(PolygraphError::Unsupported {
-                construct: format!("{name}()"),
-                spec_ref: "openCypher 9 §6.3".into(),
-                reason: format!("function '{name}' not yet in LQA path; legacy fallback applies"),
-            }),
+            "toboolean" => {
+                let arg = args.first().ok_or_else(|| arg_err(name))?;
+                match arg {
+                    // Identity on booleans.
+                    Expr::Literal(Literal::Boolean(b)) => Ok(Self::lit_bool(*b)),
+                    // Null propagation.
+                    Expr::Literal(Literal::Null) => {
+                        Ok(SparExpr::Variable(self.fresh("_tob_null")))
+                    }
+                    // Constant string → boolean.
+                    Expr::Literal(Literal::String(s)) => match s.to_lowercase().as_str() {
+                        "true" => Ok(Self::lit_bool(true)),
+                        "false" => Ok(Self::lit_bool(false)),
+                        _ => Ok(SparExpr::Variable(self.fresh("_tob_null"))),
+                    },
+                    _ => Err(PolygraphError::Unsupported {
+                        construct: "toBoolean()".into(),
+                        spec_ref: "openCypher 9 §6.3.2".into(),
+                        reason: "toBoolean() with non-constant arg requires legacy path".into(),
+                    }),
+                }
+            }
+            // Known openCypher functions that are valid but not yet implemented in the
+            // LQA SPARQL path — fall through to legacy rather than raising a hard error.
+            "datetime" | "localdatetime" | "date" | "time" | "localtime" | "duration"
+            | "datetime.truncate" | "localdatetime.truncate" | "date.truncate"
+            | "time.truncate" | "localtime.truncate"
+            | "duration.between" | "duration.inmonths" | "duration.indays"
+            | "duration.inseconds" | "datetime.fromepoch" | "datetime.fromepochmillis"
+            | "keys" | "properties" | "labels"
+            | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "cot"
+            | "degrees" | "radians" | "haversin" | "log" | "log10" | "e" | "pi"
+            | "reduce" | "any" | "all" | "none" | "single"
+            | "nodes" | "relationships" | "shortestpath" | "allshortestpaths"
+            | "range" | "split" | "replace" | "left" | "right"
+            | "trim" | "ltrim" | "rtrim"
+            | "collect" | "percentiledisc" | "percentilecont" | "stdev" | "stdevp" => {
+                Err(PolygraphError::Unsupported {
+                    construct: format!("{name}()"),
+                    spec_ref: "openCypher 9 §6.3".into(),
+                    reason: format!("function '{name}' not yet in LQA path; legacy fallback applies"),
+                })
+            }
+            _ => {
+                // Truly unknown function: raise a Translation/SyntaxError.
+                Err(PolygraphError::Translation {
+                    message: format!("Unknown function '{name}'"),
+                })
+            }
         }
     }
 
