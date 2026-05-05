@@ -1,0 +1,18 @@
+cypher = """
+MATCH p = (a:Person)-[:KNOWS]->(b:Person)
+RETURN a.name AS name, length(p) AS hops
+ORDER BY name
+"""
+
+[[graphs]]
+triples = [
+  ["ex:alice", "rdf:type", "ex:Person"],
+  ["ex:bob",   "rdf:type", "ex:Person"],
+  ["ex:alice", "ex:name",  "\"Alice\""],
+  ["ex:bob",   "ex:name",  "\"Bob\""],
+  ["ex:alice", "ex:KNOWS", "ex:bob"],
+]
+expected = [
+  [{ name = "Alice", hops = "1" }],
+  [{ name = "Bob",   hops = "1" }],
+]

@@ -409,9 +409,6 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
             }
             Clause::Match(m) => {
                 for pattern in &m.pattern.0 {
-                    if pattern.variable.is_some() {
-                        return Some("named_path");
-                    }
                     for (idx, elem) in pattern.elements.iter().enumerate() {
                         match elem {
                             PatternElement::Node(n) => {
@@ -425,6 +422,12 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                                 }
                                 if r.range.is_some() && r.variable.is_some() {
                                     return Some("varlen_named_relvar");
+                                }
+                                // Named paths with varlen relationships cannot be
+                                // statically resolved in the LQA path (hop count and
+                                // node list are dynamic).  Fall back to legacy.
+                                if pattern.variable.is_some() && r.range.is_some() {
+                                    return Some("named_path_varlen");
                                 }
                                 if r.variable.is_some() && seen_with {
                                     return Some("relvar_after_with");
@@ -475,5 +478,98 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
         }
     }
 
+    // If any MATCH clause uses a named path AND any RETURN/WITH clause contains
+    // a real aggregate (AVG, SUM, MIN, MAX, COLLECT — not COUNT), fall back to
+    // legacy.  LQA's aggregate subquery form can produce wrong results (0 rows
+    // instead of 1 row with null) for empty result sets via Oxigraph, which
+    // does not affect the legacy path's simpler SPARQL formulation.
+    let has_named_path = ast.clauses.iter().any(|c| {
+        if let Clause::Match(m) = c {
+            m.pattern.0.iter().any(|p| p.variable.is_some())
+        } else {
+            false
+        }
+    });
+    if has_named_path {
+        let has_real_agg = ast.clauses.iter().any(|c| match c {
+            Clause::Return(r) => {
+                if let ReturnItems::Explicit(items) = &r.items {
+                    items.iter().any(|i| expr_has_real_aggregate(&i.expression))
+                } else {
+                    false
+                }
+            }
+            Clause::With(w) => {
+                if let ReturnItems::Explicit(items) = &w.items {
+                    items.iter().any(|i| expr_has_real_aggregate(&i.expression))
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        });
+        if has_real_agg {
+            return Some("named_path_with_real_agg");
+        }
+    }
+
     None
+}
+
+/// Returns `true` if `expr` (or any sub-expression) is a real (non-Count)
+/// aggregate: AVG, SUM, MIN, MAX, or COLLECT.  Used by `lqa_safe_reason` to
+/// detect when a named-path query uses an aggregate that LQA cannot yet
+/// generate correct null-group SPARQL for.
+fn expr_has_real_aggregate(expr: &ast::cypher::Expression) -> bool {
+    use ast::cypher::{AggregateExpr, Expression};
+    match expr {
+        Expression::Aggregate(agg) => matches!(
+            agg,
+            AggregateExpr::Avg { .. }
+                | AggregateExpr::Sum { .. }
+                | AggregateExpr::Min { .. }
+                | AggregateExpr::Max { .. }
+                | AggregateExpr::Collect { .. }
+        ),
+        Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b)
+        | Expression::Modulo(a, b)
+        | Expression::Power(a, b)
+        | Expression::And(a, b)
+        | Expression::Or(a, b)
+        | Expression::Xor(a, b)
+        | Expression::Comparison(a, _, b)
+        | Expression::Subscript(a, b) => {
+            expr_has_real_aggregate(a) || expr_has_real_aggregate(b)
+        }
+        Expression::Not(e) | Expression::Negate(e) | Expression::IsNull(e) | Expression::IsNotNull(e) => {
+            expr_has_real_aggregate(e)
+        }
+        Expression::Property(e, _) => expr_has_real_aggregate(e),
+        Expression::FunctionCall { args, .. } => args.iter().any(expr_has_real_aggregate),
+        Expression::CaseExpression { operand, whens, else_expr } => {
+            operand.as_deref().map_or(false, expr_has_real_aggregate)
+                || whens.iter().any(|(w, t)| {
+                    expr_has_real_aggregate(w) || expr_has_real_aggregate(t)
+                })
+                || else_expr.as_deref().map_or(false, expr_has_real_aggregate)
+        }
+        Expression::ListComprehension { list, predicate, projection, .. } => {
+            expr_has_real_aggregate(list)
+                || predicate.as_deref().map_or(false, expr_has_real_aggregate)
+                || projection.as_deref().map_or(false, expr_has_real_aggregate)
+        }
+        Expression::QuantifierExpr { list, predicate, .. } => {
+            expr_has_real_aggregate(list)
+                || predicate.as_deref().map_or(false, expr_has_real_aggregate)
+        }
+        Expression::ListSlice { list, start, end } => {
+            expr_has_real_aggregate(list)
+                || start.as_deref().map_or(false, expr_has_real_aggregate)
+                || end.as_deref().map_or(false, expr_has_real_aggregate)
+        }
+        _ => false,
+    }
 }

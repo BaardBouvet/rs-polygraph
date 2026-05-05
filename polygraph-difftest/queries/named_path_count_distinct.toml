@@ -1,0 +1,11 @@
+cypher = """
+MATCH p = (n)-->(b)
+RETURN count(distinct p) AS c
+"""
+
+[[graphs]]
+triples = [
+  ["ex:n1", "ex:rel", "ex:b1"],
+  ["ex:n2", "ex:rel", "ex:b2"],
+]
+expected = [[{ c = "2" }]]

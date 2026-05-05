@@ -175,6 +175,10 @@ struct Compiler {
     /// Varlen paths are excluded (their lengths are dynamic and cannot be
     /// resolved at compile time).
     path_lengths: HashMap<String, usize>,
+    /// Ordered list of node variables for each fixed-length named path.
+    /// Used to implement `nodes(p)` → the sequence of node IRIs along the path.
+    /// Populated in the Op::Expand handler alongside `path_lengths`.
+    path_node_vars: HashMap<String, Vec<Variable>>,
 }
 
 impl Compiler {
@@ -199,6 +203,7 @@ impl Compiler {
             temporal_type_vars: HashMap::new(),
             scalar_lit_vals: HashMap::new(),
             path_lengths: HashMap::new(),
+            path_node_vars: HashMap::new(),
         }
     }
 
@@ -842,6 +847,18 @@ impl Compiler {
                 }
                 if let Expr::Variable { name, .. } = &pi.expr {
                     if *name == pi.alias {
+                        // Path variables have no SPARQL representation — projecting one
+                        // directly (e.g. `RETURN p`) must fall back to legacy.
+                        if self.path_lengths.contains_key(name.as_str()) {
+                            return Err(PolygraphError::Unsupported {
+                                construct: "path value in projection".into(),
+                                spec_ref: "openCypher 9 §3.7".into(),
+                                reason: format!(
+                                    "path variable `{name}` cannot be projected as a SPARQL \
+                                     variable; legacy fallback applies"
+                                ),
+                            });
+                        }
                         self.projected_columns.push(scalar_col(name.clone()));
                         continue;
                     }
@@ -894,10 +911,27 @@ impl Compiler {
             let agg_expr = match kind {
                 AggKind::Count => {
                     if let Some(arg_expr) = arg {
-                        AggregateExpression::FunctionCall {
-                            name: AggregateFunction::Count,
-                            expr: self.lower_expr(arg_expr)?,
-                            distinct: *distinct,
+                        // Path variable: count(p) / count(distinct p) → COUNT(*).
+                        // A path value has no SPARQL representation; counting paths
+                        // is equivalent to counting distinct solution rows.
+                        if let Expr::Variable { name: pv, .. } = arg_expr.as_ref() {
+                            if self.path_lengths.contains_key(pv.as_str()) {
+                                AggregateExpression::CountSolutions {
+                                    distinct: *distinct,
+                                }
+                            } else {
+                                AggregateExpression::FunctionCall {
+                                    name: AggregateFunction::Count,
+                                    expr: self.lower_expr(arg_expr)?,
+                                    distinct: *distinct,
+                                }
+                            }
+                        } else {
+                            AggregateExpression::FunctionCall {
+                                name: AggregateFunction::Count,
+                                expr: self.lower_expr(arg_expr)?,
+                                distinct: *distinct,
+                            }
                         }
                     } else {
                         AggregateExpression::CountSolutions {
@@ -1051,9 +1085,12 @@ impl Compiler {
                 // after processing the whole chain, path_lengths[pvar] == total hops.
                 // For varlen named paths, record usize::MAX as a sentinel so the path
                 // variable is still tracked (and will fail correctly if used as a value).
+                // Use saturating_add to guard against edge cases where a mixed
+                // fixed+varlen path would otherwise overflow the MAX sentinel.
                 if let Some(pvar) = path_var.as_deref() {
                     if range.is_none() {
-                        *self.path_lengths.entry(pvar.to_string()).or_insert(0) += 1;
+                        let counter = self.path_lengths.entry(pvar.to_string()).or_insert(0);
+                        *counter = counter.saturating_add(1);
                     } else {
                         // Varlen: mark as dynamic (usize::MAX sentinel).
                         self.path_lengths
@@ -1063,6 +1100,31 @@ impl Compiler {
                 }
 
                 let inner_pat = self.lower_op(inner)?;
+
+                // For fixed-length named paths, maintain an ordered list of node variables
+                // so that `nodes(p)` can emit them at query-compile time.
+                // The inner op is processed first (recursive), so when we arrive here the
+                // inner Expand (if any) has already prepended its `from` variable.
+                // Strategy: innermost Expand seeds the vec with [from, to]; each outer
+                // Expand then prepends its own `from` (its `to` is already the first
+                // element contributed by the inner step).
+                if let Some(pvar) = path_var.as_deref() {
+                    if range.is_none() {
+                        let from_var = Self::var(from.as_str());
+                        let to_var = Self::var(to.as_str());
+                        match self.path_node_vars.get_mut(pvar) {
+                            Some(nodes) => {
+                                // Outer expand: prepend our `from` (inner already owns `to`).
+                                nodes.insert(0, from_var);
+                            }
+                            None => {
+                                // Innermost expand: seed with [from, to].
+                                self.path_node_vars
+                                    .insert(pvar.to_string(), vec![from_var, to_var]);
+                            }
+                        }
+                    }
+                }
 
                 // If the FROM node may be null (produced by OPTIONAL MATCH or BIND on a
                 // nullable expression), enforce Cypher's null→empty-match semantics.
@@ -3774,6 +3836,41 @@ impl Compiler {
                 let a = self.lower_expr(arg)?;
                 Ok(SparExpr::FunctionCall(Function::StrLen, vec![a]))
             }
+            "nodes" => {
+                // nodes(p) on a fixed-length, non-nullable named path:
+                // emit CONCAT("[", STR(?n0), ", ", STR(?n1), ..., "]").
+                // Falls back to legacy for varlen or OPTIONAL MATCH paths.
+                let arg = args.first().ok_or_else(|| arg_err(name))?;
+                if let Expr::Variable { name: pv, .. } = arg {
+                    if let Some(node_vars) = self.path_node_vars.get(pv.as_str()).cloned() {
+                        // Only use compile-time CONCAT when no node is nullable.
+                        // If the path comes from OPTIONAL MATCH the nodes may be
+                        // absent; in that case fall through to legacy.
+                        let any_nullable = node_vars
+                            .iter()
+                            .any(|v| self.nullable.contains(v.as_str()));
+                        if !any_nullable {
+                            let mut parts: Vec<SparExpr> = vec![Self::lit_str("[")];
+                            for (idx, v) in node_vars.iter().enumerate() {
+                                if idx > 0 {
+                                    parts.push(Self::lit_str(", "));
+                                }
+                                parts.push(SparExpr::FunctionCall(
+                                    Function::Str,
+                                    vec![SparExpr::Variable(v.clone())],
+                                ));
+                            }
+                            parts.push(Self::lit_str("]"));
+                            return Ok(SparExpr::FunctionCall(Function::Concat, parts));
+                        }
+                    }
+                }
+                Err(PolygraphError::Unsupported {
+                    construct: "nodes()".into(),
+                    spec_ref: "openCypher 9 §3.7".into(),
+                    reason: "nodes() on varlen or nullable path requires legacy path".into(),
+                })
+            }
             "substring" | "substr" => {
                 let a0 = self.lower_expr(args.first().ok_or_else(|| arg_err(name))?)?;
                 let raw_start = self.lower_expr(args.get(1).ok_or_else(|| arg_err(name))?)?;
@@ -4249,9 +4346,8 @@ impl Compiler {
             | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "cot"
             | "degrees" | "radians" | "haversin" | "log" | "log10" | "e" | "pi"
             | "reduce" | "any" | "all" | "none" | "single"
-            | "nodes" | "relationships" | "shortestpath" | "allshortestpaths"
+            | "relationships" | "shortestpath" | "allshortestpaths"
             | "split" | "replace" | "left" | "right"
-            | "trim" | "ltrim" | "rtrim"
             | "collect" | "percentiledisc" | "percentilecont" | "stdev" | "stdevp" => {
                 Err(PolygraphError::Unsupported {
                     construct: format!("{name}()"),
