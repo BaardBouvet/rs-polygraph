@@ -697,7 +697,14 @@ impl AstLowerer {
                 Box::new(self.lower_expr(a)?),
                 Box::new(self.lower_expr(b)?),
             )),
-            AE::Negate(a) => Ok(Expr::Unary(UnaryOp::Neg, Box::new(self.lower_expr(a)?))),
+            AE::Negate(a) => {
+                // Constant fold: -(integer) → integer literal with negated value.
+                // This ensures UNWIND [-1, -2] works in VALUES context.
+                if let AE::Literal(ast::Literal::Integer(n)) = a.as_ref() {
+                    return Ok(Expr::Literal(Literal::Integer(-n)));
+                }
+                Ok(Expr::Unary(UnaryOp::Neg, Box::new(self.lower_expr(a)?)))
+            }
             AE::Not(a) => {
                 if is_definitely_non_boolean(a) {
                     return Err(PolygraphError::Translation {

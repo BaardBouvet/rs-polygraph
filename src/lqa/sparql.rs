@@ -2619,9 +2619,9 @@ impl Compiler {
                         let la = self.lower_expr(a)?;
                         let lb = self.lower_expr(b)?;
                         let is_date = xsd_type.as_str() == XSD_DATE;
-                        return Ok(
-                            crate::translator::cypher::temporal_add_sparql(la, lb, is_date)
-                        );
+                        return Ok(crate::translator::cypher::temporal_add_sparql(
+                            la, lb, is_date,
+                        ));
                     }
                 }
 
@@ -2675,9 +2675,9 @@ impl Compiler {
                         let la = self.lower_expr(a)?;
                         let rb = self.lower_expr(b)?;
                         let is_date = xsd_type.as_str() == XSD_DATE;
-                        return Ok(
-                            crate::translator::cypher::temporal_subtract_sparql(la, rb, is_date)
-                        );
+                        return Ok(crate::translator::cypher::temporal_subtract_sparql(
+                            la, rb, is_date,
+                        ));
                     }
                 }
                 let la = self.lower_expr(a)?;
@@ -3152,10 +3152,7 @@ impl Compiler {
     /// suitable for use as an element inside a CONCAT-based list/map serialization.
     /// Constant literals are serialized directly; everything else is wrapped in
     /// `COALESCE(STR(?x), "?")` to protect against unbound variables.
-    fn lower_expr_as_concat_piece(
-        &mut self,
-        expr: &Expr,
-    ) -> Result<SparExpr, PolygraphError> {
+    fn lower_expr_as_concat_piece(&mut self, expr: &Expr) -> Result<SparExpr, PolygraphError> {
         // Fast path: constant literals.
         if let Some(s) = lqa_lit_elem_str(expr) {
             return Ok(Self::lit_str(&s));
@@ -3483,10 +3480,14 @@ fn quant_pred_uses_arithmetic(expr: &Expr, var: &str) -> bool {
     use crate::lqa::expr::Expr as E;
     match expr {
         E::Mod(a, b) | E::Div(a, b) | E::Mul(a, b) | E::Sub(a, b) | E::Pow(a, b) => {
-            expr_contains_var(a, var) || expr_contains_var(b, var)
-                || quant_pred_uses_arithmetic(a, var) || quant_pred_uses_arithmetic(b, var)
+            expr_contains_var(a, var)
+                || expr_contains_var(b, var)
+                || quant_pred_uses_arithmetic(a, var)
+                || quant_pred_uses_arithmetic(b, var)
         }
-        E::Unary(UnaryOp::Neg, a) => expr_contains_var(a, var) || quant_pred_uses_arithmetic(a, var),
+        E::Unary(UnaryOp::Neg, a) => {
+            expr_contains_var(a, var) || quant_pred_uses_arithmetic(a, var)
+        }
         E::And(a, b) | E::Or(a, b) | E::Xor(a, b) => {
             quant_pred_uses_arithmetic(a, var) || quant_pred_uses_arithmetic(b, var)
         }
