@@ -700,10 +700,8 @@ impl AstLowerer {
             AE::Negate(a) => Ok(Expr::Unary(UnaryOp::Neg, Box::new(self.lower_expr(a)?))),
             AE::Not(a) => {
                 if is_definitely_non_boolean(a) {
-                    return Err(PolygraphError::Unsupported {
-                        construct: "NOT with non-boolean literal operand".into(),
-                        spec_ref: "openCypher 9 §6.2.3".into(),
-                        reason: "type error: NOT requires a boolean operand; fall back to legacy for SyntaxError".into(),
+                    return Err(PolygraphError::Translation {
+                        message: "Type mismatch: expected Boolean, but was given {} for input in NOT; fall back for SyntaxError".into(),
                     });
                 }
                 Ok(Expr::Not(Box::new(self.lower_expr(a)?)))
@@ -712,10 +710,8 @@ impl AstLowerer {
             AE::IsNotNull(a) => Ok(Expr::IsNotNull(Box::new(self.lower_expr(a)?))),
             AE::Or(a, b) => {
                 if is_definitely_non_boolean(a) || is_definitely_non_boolean(b) {
-                    return Err(PolygraphError::Unsupported {
-                        construct: "OR with non-boolean literal operand".into(),
-                        spec_ref: "openCypher 9 §6.2.3".into(),
-                        reason: "type error: OR requires boolean operands; fall back to legacy for SyntaxError".into(),
+                    return Err(PolygraphError::Translation {
+                        message: "Type mismatch: expected Boolean, but was given non-boolean value for input in OR".into(),
                     });
                 }
                 Ok(Expr::Or(
@@ -725,10 +721,8 @@ impl AstLowerer {
             }
             AE::And(a, b) => {
                 if is_definitely_non_boolean(a) || is_definitely_non_boolean(b) {
-                    return Err(PolygraphError::Unsupported {
-                        construct: "AND with non-boolean literal operand".into(),
-                        spec_ref: "openCypher 9 §6.2.3".into(),
-                        reason: "type error: AND requires boolean operands; fall back to legacy for SyntaxError".into(),
+                    return Err(PolygraphError::Translation {
+                        message: "Type mismatch: expected Boolean, but was given non-boolean value for input in AND".into(),
                     });
                 }
                 Ok(Expr::And(
@@ -738,10 +732,8 @@ impl AstLowerer {
             }
             AE::Xor(a, b) => {
                 if is_definitely_non_boolean(a) || is_definitely_non_boolean(b) {
-                    return Err(PolygraphError::Unsupported {
-                        construct: "XOR with non-boolean literal operand".into(),
-                        spec_ref: "openCypher 9 §6.2.3".into(),
-                        reason: "type error: XOR requires boolean operands; fall back to legacy for SyntaxError".into(),
+                    return Err(PolygraphError::Translation {
+                        message: "Type mismatch: expected Boolean, but was given non-boolean value for input in XOR".into(),
                     });
                 }
                 // Xor(a, b) = (a OR b) AND NOT (a AND b)
@@ -756,10 +748,8 @@ impl AstLowerer {
                 // Type-check `IN` before lowering: if the RHS is definitely not a list,
                 // fall back to legacy which raises the proper SyntaxError.
                 if matches!(op, CompOp::In) && is_definitely_non_list(b) {
-                    return Err(PolygraphError::Unsupported {
-                        construct: "IN with non-list literal RHS".into(),
-                        spec_ref: "openCypher 9 §6.3.4".into(),
-                        reason: "type error: IN requires a list on the RHS; fall back to legacy for SyntaxError".into(),
+                    return Err(PolygraphError::Translation {
+                        message: "Type mismatch: expected a list but got a non-list value for IN operator".into(),
                     });
                 }
                 let la = self.lower_expr(a)?;
