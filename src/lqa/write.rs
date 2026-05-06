@@ -430,8 +430,11 @@ fn op_to_where_parts(op: &Op, base: &str) -> Result<Vec<String>, PolygraphError>
         | Op::Distinct { inner, .. } => op_to_where_parts(inner, base),
 
         // Projection (WITH clause): only transparent if all items are identity passthroughs
-        // (no renames, no expressions). A rename like `WITH n AS a` changes variable names;
-        // the write WHERE can't safely mix old/new names, so fall back to legacy.
+        // (no renames, no expressions). Simple variable renames like `WITH n AS a` appear
+        // to be handleable via BIND, but CREATE after a rename introduces new nodes that
+        // the RETURN-clause SELECT (run post-INSERT) would also pick up, giving wrong row
+        // counts.  Keep the conservative all-passthrough gate until SELECT-before-INSERT
+        // ordering is implemented.
         Op::Projection { inner, items, .. } => {
             let all_passthrough = items.iter().all(|pi| {
                 matches!(&pi.expr, crate::lqa::Expr::Variable { name, .. } if *name == pi.alias)
@@ -603,6 +606,47 @@ fn expr_to_sparql_lit(expr: &Expr, _base: &str) -> Option<String> {
                 _ => None,
             }
         }
+        // Constant list / map literals: serialise as a compact string literal.
+        Expr::List(_) | Expr::Map(_) => {
+            let s = lqa_write_serialize_literal(expr)?;
+            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+            Some(format!("\"{escaped}\""))
+        }
+        _ => None,
+    }
+}
+
+/// Serialise a constant LQA expression to a string representation.
+/// Returns `None` if the expression contains runtime-dependent sub-expressions.
+fn lqa_write_serialize_literal(e: &Expr) -> Option<String> {
+    match e {
+        Expr::List(items) => {
+            let parts: Vec<String> = items
+                .iter()
+                .map(lqa_write_serialize_literal)
+                .collect::<Option<_>>()?;
+            Some(format!("[{}]", parts.join(", ")))
+        }
+        Expr::Map(pairs) => {
+            let entries: Vec<String> = pairs
+                .iter()
+                .map(|(k, v)| lqa_write_serialize_literal(v).map(|s| format!("{k}: {s}")))
+                .collect::<Option<_>>()?;
+            Some(format!("{{{}}}", entries.join(", ")))
+        }
+        Expr::Literal(lit) => match lit {
+            Literal::Integer(n) => Some(n.to_string()),
+            Literal::Float(f) => Some(format!("{f}")),
+            Literal::String(s) => Some(format!("'{s}'")),
+            Literal::Boolean(b) => Some(if *b { "true" } else { "false" }.to_owned()),
+            Literal::Null => Some("null".to_owned()),
+            Literal::TypedLiteral(v, _) => Some(v.clone()),
+        },
+        Expr::Unary(UnaryOp::Neg, inner) => match inner.as_ref() {
+            Expr::Literal(Literal::Integer(n)) => Some(format!("-{n}")),
+            Expr::Literal(Literal::Float(f)) => Some(format!("{}", -f)),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -653,6 +697,38 @@ fn compile_create(
 ) -> Result<(), PolygraphError> {
     let no_match = where_parts.is_empty();
 
+    // Build a set of variable names that are already bound by the WHERE clause.
+    // These correspond to nodes that exist in the MATCH context; they must be
+    // referenced via `?var` in the INSERT rather than as fresh blank nodes.
+    let bound_in_where: std::collections::HashSet<&str> = where_parts
+        .iter()
+        .flat_map(|p| {
+            // Extract `?varname` from the pattern string.
+            let bytes = p.as_bytes();
+            let mut found = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'?' {
+                    let start = i + 1;
+                    let end = bytes[start..]
+                        .iter()
+                        .position(|&b| !b.is_ascii_alphanumeric() && b != b'_')
+                        .map(|n| start + n)
+                        .unwrap_or(bytes.len());
+                    if start < end {
+                        if let Ok(s) = std::str::from_utf8(&bytes[start..end]) {
+                            found.push(s);
+                        }
+                    }
+                    i = end;
+                } else {
+                    i += 1;
+                }
+            }
+            found
+        })
+        .collect();
+
     let mut insert_triples: Vec<String> = Vec::new();
 
     for node in nodes {
@@ -660,6 +736,14 @@ fn compile_create(
             // Reuse a blank node already assigned to this variable (chained creates).
             if let Some(existing) = bnode_map.get(var) {
                 existing.clone()
+            } else if bound_in_where.contains(var.as_str()) {
+                // This variable is already bound by the WHERE clause (it came from a MATCH
+                // pattern).  Use the SPARQL variable directly; do NOT create a new blank node
+                // or insert a sentinel triple (the node already exists in the graph).
+                let var_ref = format!("?{var}");
+                bnode_map.insert(var.clone(), var_ref.clone());
+                // Skip sentinel/labels/properties for existing nodes.
+                continue;
             } else {
                 let bn = format!("_:__n{}", *counter);
                 *counter += 1;
@@ -817,6 +901,8 @@ fn compile_set_items(
 
             SetItem::MergeMap { .. } | SetItem::Replace { .. } => {
                 // SET n += {map} or SET n = {map}: fall back to legacy.
+                // Correct implementation requires running SELECT before updates (so that
+                // MATCH filters still hold for the RETURN clause after SET removes properties).
                 // The legacy translator handles these correctly via skip_writes mode.
                 return Err(write_unsupported!("write_set_replace_or_merge_map"));
             }
@@ -986,15 +1072,6 @@ fn compile_merge(
     counter: &mut usize,
     out: &mut Vec<String>,
 ) -> Result<(), PolygraphError> {
-    // If there is an outer MATCH context, MERGE semantics require a global
-    // NOT EXISTS check (independent of how many outer rows there are).
-    // The LQA compiler's current INSERT WHERE approach creates one node per
-    // outer result, which is incorrect.  Fall back to the legacy path for
-    // MATCH+MERGE patterns until a correct multi-row MERGE is implemented.
-    if !outer_where.is_empty() {
-        return Err(write_unsupported!("write_merge_with_outer_match"));
-    }
-
     // Get the match pattern from clause.pattern (the Op that defines what to match-or-create).
     let pattern_parts = op_to_where_parts(&clause.pattern, base)?;
 
@@ -1062,6 +1139,14 @@ fn compile_merge_node_scan(
     counter: &mut usize,
     out: &mut Vec<String>,
 ) -> Result<(), PolygraphError> {
+    // Node MERGE with outer MATCH context: LQA's INSERT WHERE creates one new node
+    // per outer result row, which is incorrect — Cypher's node MERGE checks for the
+    // existence of the pattern globally, independent of the number of outer rows.
+    // Relationship MERGE (handled by compile_merge_rel) is per-row and works correctly.
+    if !outer_where.is_empty() {
+        return Err(write_unsupported!("write_merge_with_outer_match"));
+    }
+
     // Validate that we can parse the scan op's WHERE parts.
     let _scan_parts = op_to_where_parts(scan_op, base).map_err(|_| {
         write_unsupported!("write_merge_node_scan_parts")

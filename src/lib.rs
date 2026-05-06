@@ -459,6 +459,10 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
     // Any WITH that renames a variable (alias != source) makes the flat SPARQL
     // variable chain unreliable, so we clear live_rel_vars entirely.
     let mut live_rel_vars: HashSet<&str> = HashSet::new();
+    // Track ALL rel-vars seen in any MATCH clause prior to the current point.
+    // Used to distinguish "fresh rel-var introduced after WITH" (safe) from
+    // "previously-seen rel-var reused after WITH without passthrough" (unsafe).
+    let mut seen_rel_vars: HashSet<&str> = HashSet::new();
     for c in &ast.clauses {
         match c {
             Clause::With(w) => {
@@ -530,19 +534,19 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                                 // Cross-WITH rel-var handling: if a named rel-var appears
                                 // after a WITH clause, only allow LQA when the var was
                                 // explicitly passed through all preceding WITHs as an
-                                // identity item (live_rel_vars).  Any other case (fresh
-                                // var after WITH, aggregated-away var reused, renamed var)
-                                // is routed to legacy to avoid BIND conflicts and
-                                // cross-product issues in LQA's flat WHERE model.
+                                // identity item (live_rel_vars).  Any other case (fresh var,
+                                // aggregated-away var, renamed var) is routed to legacy to
+                                // avoid BIND conflicts and cross-product issues in LQA's flat
+                                // WHERE model.  Even brand-new rel-vars after WITH can cause
+                                // cross-products with pre-WITH MATCH patterns that are still
+                                // active in LQA's flat WHERE.
                                 if let Some(rv) = r.variable.as_deref() {
                                     if seen_with && !live_rel_vars.contains(rv) {
                                         return Some("relvar_after_with");
                                     }
-                                    // Register this rel-var as live for potential future
-                                    // cross-WITH reuse (unsafe cast away lifetime: the
-                                    // string is borrowed from ast which lives for the
-                                    // duration of this function).
+                                    // Register this rel-var as live.
                                     live_rel_vars.insert(rv);
+                                    seen_rel_vars.insert(rv);
                                 }
                                 if let Some(range) = &r.range {
                                     if range.upper.is_none() {

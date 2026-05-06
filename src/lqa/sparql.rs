@@ -190,6 +190,10 @@ struct Compiler {
     /// Maps variable name → list element count (populated when `WITH list AS v`
     /// assigns a plain list literal, or `UNWIND` of a sized literal list).
     list_size_vars: HashMap<String, usize>,
+    /// Variables bound to map literals via WITH, e.g. `WITH {k: v} AS m`.
+    /// Stores the key-value pairs so that `m.k` can be constant-folded at
+    /// compile time without emitting a runtime SPARQL lookup.
+    scalar_map_exprs: HashMap<String, Vec<(String, Expr)>>,
 }
 
 impl Compiler {
@@ -217,6 +221,7 @@ impl Compiler {
             path_node_vars: HashMap::new(),
             const_int_vars: HashMap::new(),
             list_size_vars: HashMap::new(),
+            scalar_map_exprs: HashMap::new(),
         }
     }
 
@@ -1642,25 +1647,31 @@ impl Compiler {
                 // aggregation, e.g. `WITH count(n) AS c`), delegate to lower_projection_inner
                 // which knows how to generate the SPARQL GROUP BY / aggregate pattern.
                 if matches!(inner.as_ref(), Op::GroupBy { .. }) {
-                    // Compute which items are passthrough node variables BEFORE
-                    // lower_projection_inner may alter scan_vars.  These must NOT be
-                    // inserted into scalar_vars — they remain RDF resources that support
-                    // triple-based property access in subsequent clauses.
-                    let passthrough_node_aliases: std::collections::HashSet<String> = items
+                    let (gp, group_vars) = self.lower_projection_inner(inner, items)?;
+                    let flushed = self.flush_pending(gp);
+                    // Compute passthrough node aliases AFTER lower_projection_inner so
+                    // that scan_vars has been populated by the inner MATCH processing.
+                    // (Before the inner runs, scan_vars may be empty for the first
+                    // WITH-aggregate in a query chain, causing node passthrough vars to
+                    // be incorrectly inserted into scalar_vars.)
+                    let passthrough_node_aliases: std::collections::HashSet<&str> = items
                         .iter()
                         .filter_map(|pi| {
                             if let Expr::Variable { name, .. } = &pi.expr {
-                                if *name == pi.alias && self.scan_vars.contains(name.as_str()) {
-                                    return Some(name.clone());
+                                if *name == pi.alias
+                                    && (self.scan_vars.contains(name.as_str())
+                                        || group_vars
+                                            .iter()
+                                            .any(|v| v.as_str() == name.as_str()))
+                                {
+                                    return Some(pi.alias.as_str());
                                 }
                             }
                             None
                         })
                         .collect();
-                    let (gp, _) = self.lower_projection_inner(inner, items)?;
-                    let flushed = self.flush_pending(gp);
                     for pi in items {
-                        if pi.alias != "*" && !passthrough_node_aliases.contains(&pi.alias) {
+                        if pi.alias != "*" && !passthrough_node_aliases.contains(pi.alias.as_str()) {
                             self.scalar_vars.insert(pi.alias.clone());
                         }
                     }
@@ -1806,7 +1817,31 @@ impl Compiler {
                                 variable: Self::var(&pi.alias),
                                 expression: e,
                             };
-                            self.scalar_vars.insert(pi.alias.clone());
+                            // Mark as scalar only when the source is itself scalar (or the
+                            // expression is not a simple variable rename). Node variables
+                            // passed through WITH as a rename (e.g. `WITH n AS a`) must NOT
+                            // be added to scalar_vars — they remain node variables and need
+                            // triple-based property access.
+                            let is_node_rename = matches!(
+                                &pi.expr,
+                                Expr::Variable { name, .. } if !self.scalar_vars.contains(name.as_str())
+                            );
+                            if !is_node_rename {
+                                self.scalar_vars.insert(pi.alias.clone());
+                            }
+                            // Store map literal pairs for compile-time property access
+                            // (e.g. `WITH {k: v} AS m RETURN m.k`).
+                            // Also handle null scalar: `WITH null AS m` — any property
+                            // access on null returns null, so register empty pairs.
+                            match &pi.expr {
+                                Expr::Map(pairs) => {
+                                    self.scalar_map_exprs.insert(pi.alias.clone(), pairs.clone());
+                                }
+                                Expr::Literal(Literal::Null) => {
+                                    self.scalar_map_exprs.insert(pi.alias.clone(), vec![]);
+                                }
+                                _ => {}
+                            }
                             // Track temporal-typed variables for date/time arithmetic.
                             if let Expr::Literal(Literal::TypedLiteral(_, xsd_type)) = &pi.expr {
                                 if !xsd_type.is_empty() {
@@ -3076,7 +3111,72 @@ impl Compiler {
                 }
             },
 
+            // ── Subscript access: expr[key] ───────────────────────────────────────
+            // When the key is a compile-time string, treat as property access.
+            // When both base and key are literals (constant-folding), evaluate directly.
+            Expr::Subscript(base, key) => {
+                // Constant-fold: Map[string_key] → look up key in the map.
+                if let Expr::Map(pairs) = base.as_ref() {
+                    if let Some(key_str) = lqa_eval_string_expr(key) {
+                        if let Some((_, val_expr)) =
+                            pairs.iter().find(|(k, _)| k.as_str() == key_str)
+                        {
+                            return self.lower_expr(val_expr);
+                        }
+                        // Key not found in literal map → null.
+                        let null_var = self.fresh("null");
+                        return Ok(SparExpr::Variable(null_var));
+                    }
+                }
+                // Dynamic string key on a variable → treat as property access.
+                if let Some(key_str) = lqa_eval_string_expr(key) {
+                    // Delegate to the Property handler by synthesising the expression.
+                    return self.lower_expr(&Expr::Property(base.clone(), key_str));
+                }
+                // Constant integer index on a literal list → already folded in lower.rs.
+                // Any remaining Subscript is runtime-dynamic → legacy.
+                Err(PolygraphError::Unsupported {
+                    construct: "expression type Subscript in LQA SPARQL lowering".into(),
+                    spec_ref: "openCypher 9 §6".into(),
+                    reason: "dynamic subscript with non-constant key requires legacy path".into(),
+                })
+            }
+
             Expr::Property(base, key) => {
+                // Constant-fold: literal temporal value accessed via property key.
+                // This handles e.g. `date({year: 1984}).year` where the date constructor
+                // was folded to a TypedLiteral at lower time.
+                if let Expr::Literal(lit) = base.as_ref() {
+                    if let Some(val_str) = lqa_literal_str_value(lit) {
+                        if let Some(spar) = lqa_scalar_temporal_prop(&val_str, key) {
+                            return Ok(spar);
+                        }
+                    }
+                }
+                // Constant-fold: Map literal property access {k: v}.key → v
+                if let Expr::Map(pairs) = base.as_ref() {
+                    if let Some((_, val_expr)) =
+                        pairs.iter().find(|(k, _)| k.as_str() == key.as_str())
+                    {
+                        return self.lower_expr(val_expr);
+                    }
+                    // Key not in map → null.
+                    let null_var = self.fresh("null");
+                    return Ok(SparExpr::Variable(null_var));
+                }
+                // Constant-fold: property access through a variable bound to a map literal,
+                // or through a chain of such accesses (e.g. `WITH {a:{b:1}} AS m RETURN m.a.b`).
+                // `try_get_map_pairs` resolves Variable / Property chains stored in
+                // `scalar_map_exprs`.
+                if let Some(pairs) = self.try_get_map_pairs(base) {
+                    return match pairs.into_iter().find(|(k, _)| k.as_str() == key.as_str()) {
+                        Some((_, val)) => self.lower_expr(&val),
+                        None => {
+                            let v = self.fresh("null");
+                            Ok(SparExpr::Variable(v))
+                        }
+                    };
+                }
                 // If the base is an edge (relationship) variable, use RDF-star reification
                 // to access the edge property.  Two triples must stay together in one
                 // OPTIONAL block: the rdf:reifies triple and the property triple.
@@ -3189,8 +3289,13 @@ impl Compiler {
                         if let Some(spar) = lqa_temporal_component_fn(key, var_expr) {
                             return Ok(spar);
                         }
+                        // Try JDN-based runtime computation (week, weekYear, weekDay,
+                        // ordinalDay, dayOfQuarter) via BIND chain.
+                        if let Some(spar) = self.lower_temporal_jdn_property(name, key) {
+                            return Ok(spar);
+                        }
                         return Err(PolygraphError::Unsupported {
-                            construct: "property access on scalar variable".into(),
+                            construct: format!("property access on scalar variable .{key} (var={name})"),
                             spec_ref: "openCypher 9 §6.1".into(),
                             reason: format!(
                                 "Variable `{name}` is bound to a scalar value (not a node); \
@@ -3202,6 +3307,21 @@ impl Compiler {
                 let base_expr = self.lower_expr(base)?;
                 let base_var = match &base_expr {
                     SparExpr::Variable(v) => v.clone(),
+                    // When the base expression folded to a literal (e.g., a temporal
+                    // constructor call that wasn't folded earlier), try to extract the
+                    // temporal component directly from the literal value.
+                    SparExpr::Literal(lit) => {
+                        if let Some(val_str) = Some(lit.value()) {
+                            if let Some(spar) = lqa_scalar_temporal_prop(val_str, key) {
+                                return Ok(spar);
+                            }
+                        }
+                        return Err(PolygraphError::Unsupported {
+                            construct: "property access on non-variable expression".into(),
+                            spec_ref: "openCypher 9 §6.1".into(),
+                            reason: "LQA path only supports property access on variables".into(),
+                        });
+                    }
                     _ => {
                         return Err(PolygraphError::Unsupported {
                             construct: "property access on non-variable expression".into(),
@@ -3887,8 +4007,7 @@ impl Compiler {
                 Ok(SparExpr::FunctionCall(Function::Concat, parts))
             }
 
-            Expr::Subscript(_, _)
-            | Expr::ListSlice { .. }
+            Expr::ListSlice { .. }
             | Expr::ListComprehension { .. }
             | Expr::PatternComprehension { .. }
             | Expr::Reduce { .. }
@@ -4807,6 +4926,211 @@ impl Compiler {
             SortDir::Desc => OrderExpression::Desc(sparql_expr),
         })
     }
+
+    /// Compute a JDN-based temporal property (week, weekYear, weekDay, ordinalDay,
+    /// dayOfQuarter) for a RUNTIME date/datetime variable `var_name`.
+    ///
+    /// Intermediate computations are pushed to `self.pending_binds`; these are
+    /// flushed as SPARQL BIND/EXTEND nodes by `flush_pending` in the enclosing
+    /// `lower_op` call.  Returns a `SparExpr` for the final value.
+    fn lower_temporal_jdn_property(&mut self, var_name: &str, prop: &str) -> Option<SparExpr> {
+        use spargebra::algebra::Function;
+        type SE = SparExpr;
+
+        let xsi_nn  = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#integer");
+        let xsd_dec = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#decimal");
+
+        let d_var  = SE::Variable(Self::var(var_name));
+        let str_e  = SE::FunctionCall(Function::Str, vec![d_var]);
+
+        // ── arithmetic / cast helpers (all produce SparExpr inline) ──────────
+        macro_rules! dim  { ($n:expr) => { SE::Literal(SparLit::new_typed_literal(
+            ($n as i64).to_string(), xsi_nn.clone())) }; }
+        macro_rules! ddm  { ($s:expr) => { SE::Literal(SparLit::new_typed_literal(
+            $s.to_owned(), xsd_dec.clone())) }; }
+        macro_rules! int_cast { ($e:expr) => {
+            SE::FunctionCall(Function::Custom(xsi_nn.clone()), vec![$e]) }; }
+        macro_rules! dec_cast { ($e:expr) => {
+            SE::FunctionCall(Function::Custom(xsd_dec.clone()), vec![$e]) }; }
+        macro_rules! substr2 { ($s:expr, $st:expr, $ln:expr) => {
+            SE::FunctionCall(Function::SubStr, vec![$s, dim!($st), dim!($ln)]) }; }
+        macro_rules! floor_f { ($e:expr) => { SE::FunctionCall(Function::Floor, vec![$e]) }; }
+        macro_rules! add  { ($a:expr, $b:expr) => { SE::Add(Box::new($a), Box::new($b)) }; }
+        macro_rules! sub  { ($a:expr, $b:expr) => { SE::Subtract(Box::new($a), Box::new($b)) }; }
+        macro_rules! mul  { ($a:expr, $b:expr) => { SE::Multiply(Box::new($a), Box::new($b)) }; }
+        macro_rules! div  { ($a:expr, $b:expr) => { SE::Divide(Box::new($a), Box::new($b)) }; }
+
+        // Push intermediate bind; returns SparExpr::Variable referencing it.
+        macro_rules! bind { ($hint:literal, $expr:expr) => {{
+            let v = self.fresh(concat!("tp_", $hint));
+            self.pending_binds.push((v.clone(), $expr));
+            SE::Variable(v)
+        }}; }
+
+        // ── Date component extraction (string-based, works for xsd:date/dateTime) ─
+        let v_Y  = bind!("Y",  int_cast!(substr2!(str_e.clone(), 1, 4)));
+        let v_M  = bind!("M",  int_cast!(substr2!(str_e.clone(), 6, 2)));
+        let v_D  = bind!("D",  int_cast!(substr2!(str_e.clone(), 9, 2)));
+        let v_Yd = bind!("Yd", dec_cast!(v_Y.clone()));
+        let v_Md = bind!("Md", dec_cast!(v_M.clone()));
+        let v_Dd = bind!("Dd", dec_cast!(v_D.clone()));
+
+        // ── Julian Day Number (JDN) ─────────────────────────────────────────
+        // a = FLOOR((14 – Md) / 12)
+        let v_14mM    = bind!("14mM",    sub!(ddm!("14"), v_Md.clone()));
+        let v_jdn_a   = bind!("jdna",    floor_f!(div!(v_14mM, ddm!("12"))));
+        // y = Yd + 4800 – a
+        let v_jdn_y   = bind!("jdny",    sub!(add!(v_Yd.clone(), ddm!("4800")), v_jdn_a.clone()));
+        // m = Md + 12*a – 3
+        let v_12a     = bind!("12a",     mul!(ddm!("12"), v_jdn_a.clone()));
+        let v_jdn_m   = bind!("jdnm",    sub!(add!(v_Md.clone(), v_12a), ddm!("3")));
+        // FLOOR((153*m + 2) / 5)
+        let v_153m    = bind!("153m",    mul!(ddm!("153"), v_jdn_m));
+        let v_153m2   = bind!("153m2",   add!(v_153m, ddm!("2")));
+        let v_f153m25 = bind!("f153m25", floor_f!(div!(v_153m2, ddm!("5"))));
+        // 365*y, FLOOR(y/4), FLOOR(y/100), FLOOR(y/400)
+        let v_365y    = bind!("365y",    mul!(ddm!("365"), v_jdn_y.clone()));
+        let v_y4      = bind!("y4",      floor_f!(div!(v_jdn_y.clone(), ddm!("4"))));
+        let v_y100    = bind!("y100",    floor_f!(div!(v_jdn_y.clone(), ddm!("100"))));
+        let v_y400    = bind!("y400",    floor_f!(div!(v_jdn_y.clone(), ddm!("400"))));
+        // JDN = D + f153m25 + 365y + y4 – y100 + y400 – 32045
+        // Oxigraph right-assoc workaround: sum positives, sum negatives, then subtract.
+        let v_jdn_pos = bind!("JDNp", add!(add!(add!(add!(
+            v_Dd, v_f153m25), v_365y), v_y4), v_y400));
+        let v_jdn_neg = bind!("JDNn", add!(v_y100, ddm!("32045")));
+        let v_JDN     = bind!("JDN",  sub!(v_jdn_pos, v_jdn_neg));
+
+        // ── JDN mod 7 (0 = Monday … 6 = Sunday) ────────────────────────────
+        let v_JDN7    = bind!("JDN7",  floor_f!(div!(v_JDN.clone(), ddm!("7"))));
+        let v_mod7    = bind!("mod7",  sub!(v_JDN.clone(), mul!(ddm!("7"), v_JDN7)));
+
+        if prop == "weekDay" || prop == "dayOfWeek" {
+            // ISO weekday: 1=Mon .. 7=Sun; int_cast wraps the Add ✓
+            return Some(int_cast!(add!(v_mod7, ddm!("1"))));
+        }
+
+        // ── ordinalDay = JDN − JDN(Y, 1, 1) + 1 ─────────────────────────────
+        let v_y4799    = bind!("y4799",   add!(v_Yd.clone(), ddm!("4799")));
+        let v_365yj1   = bind!("365yj1",  mul!(ddm!("365"), v_y4799.clone()));
+        let v_yj1_4    = bind!("yj1_4",   floor_f!(div!(v_y4799.clone(), ddm!("4"))));
+        let v_yj1_100  = bind!("yj1_100", floor_f!(div!(v_y4799.clone(), ddm!("100"))));
+        let v_yj1_400  = bind!("yj1_400", floor_f!(div!(v_y4799, ddm!("400"))));
+        // JDN(Y,1,1): D=1, M=1 → a=1, y=Y+4799, m=10 → D + FLOOR((153*10+2)/5) = 1+306 = 307
+        let v_JDNj1_p  = bind!("JDNj1p", add!(add!(add!(ddm!("307"), v_365yj1), v_yj1_4), v_yj1_400));
+        let v_JDNj1_n  = bind!("JDNj1n", add!(v_yj1_100, ddm!("32045")));
+        let v_JDN_j1   = bind!("JDNj1",  sub!(v_JDNj1_p, v_JDNj1_n));
+
+        if prop == "ordinalDay" || prop == "dayOfYear" {
+            let v_dj1 = bind!("dj1", sub!(v_JDN.clone(), v_JDN_j1));
+            return Some(int_cast!(add!(v_dj1, ddm!("1"))));
+        }
+
+        // ── ISO week / weekYear ───────────────────────────────────────────────
+        // JDN of the Thursday of the same ISO week: thu_jdn = JDN + 3 – mod7
+        let v_thu_jdn  = bind!("thujdn", sub!(add!(v_JDN.clone(), ddm!("3")), v_mod7));
+
+        // Inverse JDN formula to recover thu_year (Gregorian proleptic year)
+        let v_inv_a    = bind!("inva",   add!(v_thu_jdn.clone(), ddm!("32044")));
+        let v_4a       = bind!("4a",     mul!(ddm!("4"), v_inv_a.clone()));
+        let v_4a3      = bind!("4a3",    add!(v_4a, ddm!("3")));
+        let v_inv_b    = bind!("invb",   floor_f!(div!(v_4a3, ddm!("146097"))));
+        let v_146097b  = bind!("146b",   mul!(ddm!("146097"), v_inv_b.clone()));
+        let v_146097b4 = bind!("146b4",  floor_f!(div!(v_146097b, ddm!("4"))));
+        let v_inv_c    = bind!("invc",   sub!(v_inv_a, v_146097b4));
+        let v_4c       = bind!("4c",     mul!(ddm!("4"), v_inv_c.clone()));
+        let v_4c3      = bind!("4c3",    add!(v_4c, ddm!("3")));
+        let v_inv_d    = bind!("invd",   floor_f!(div!(v_4c3, ddm!("1461"))));
+        let v_1461d    = bind!("1461d",  mul!(ddm!("1461"), v_inv_d.clone()));
+        let v_1461d4   = bind!("1461d4", floor_f!(div!(v_1461d, ddm!("4"))));
+        let v_inv_e    = bind!("inve",   sub!(v_inv_c, v_1461d4));
+        let v_5e       = bind!("5e",     mul!(ddm!("5"), v_inv_e));
+        let v_5e2      = bind!("5e2",    add!(v_5e, ddm!("2")));
+        let v_inv_m    = bind!("invm",   floor_f!(div!(v_5e2, ddm!("153"))));
+        let v_m10      = bind!("m10",    floor_f!(div!(v_inv_m, ddm!("10"))));
+        let v_100b     = bind!("100b",   mul!(ddm!("100"), v_inv_b));
+        // thu_year = 100*b + d + FLOOR(m/10) – 4800
+        let v_tyr_p    = bind!("tyrp",   add!(add!(v_100b, v_inv_d), v_m10));
+        let v_thu_year = bind!("tyr",    sub!(v_tyr_p, ddm!("4800")));
+
+        if prop == "weekYear" {
+            return Some(int_cast!(v_thu_year));
+        }
+
+        if prop == "week" {
+            // JDN(thu_year, 1, 4): D=4, a=1, y=ty+4799, m=10 → 4+FLOOR((153*10+2)/5)=4+306=310
+            let v_ty4799   = bind!("ty4799",  add!(dec_cast!(v_thu_year), ddm!("4799")));
+            let v_365ty    = bind!("365ty",   mul!(ddm!("365"), v_ty4799.clone()));
+            let v_ty4      = bind!("ty4",     floor_f!(div!(v_ty4799.clone(), ddm!("4"))));
+            let v_ty100    = bind!("ty100",   floor_f!(div!(v_ty4799.clone(), ddm!("100"))));
+            let v_ty400    = bind!("ty400",   floor_f!(div!(v_ty4799, ddm!("400"))));
+            let v_JDNtj4_p = bind!("JDNtj4p", add!(add!(add!(ddm!("310"), v_365ty), v_ty4), v_ty400));
+            let v_JDNtj4_n = bind!("JDNtj4n", add!(v_ty100, ddm!("32045")));
+            let v_JDN_tj4  = bind!("JDNtj4",  sub!(v_JDNtj4_p, v_JDNtj4_n));
+            // w1_mon = JDN_tj4 – (JDN_tj4 mod 7)  (Monday of ISO week 1)
+            let v_tj4_7    = bind!("tj47",  floor_f!(div!(v_JDN_tj4.clone(), ddm!("7"))));
+            let v_j4mod7   = bind!("j4m7",  sub!(v_JDN_tj4.clone(), mul!(ddm!("7"), v_tj4_7)));
+            let v_w1_mon   = bind!("w1mon", sub!(v_JDN_tj4, v_j4mod7));
+            let v_thu_w1   = bind!("thuw1", sub!(v_thu_jdn, v_w1_mon));
+            let v_wraw     = bind!("wraw",  floor_f!(div!(v_thu_w1, ddm!("7"))));
+            return Some(int_cast!(add!(v_wraw, ddm!("1"))));
+        }
+
+        if prop == "dayOfQuarter" {
+            // quarter start month: FLOOR((Md – 1) / 3) * 3 + 1
+            let v_m1   = bind!("m1",   sub!(v_Md.clone(), ddm!("1")));
+            let v_qm3  = bind!("qm3",  floor_f!(div!(v_m1, ddm!("3"))));
+            let v_qsm  = bind!("qsm",  add!(mul!(ddm!("3"), v_qm3), ddm!("1")));
+            // JDN(Y, qsm, 1)
+            let v_14qs  = bind!("14qs",  sub!(ddm!("14"), v_qsm.clone()));
+            let v_qs_a  = bind!("qsa",   floor_f!(div!(v_14qs, ddm!("12"))));
+            let v_qs_y  = bind!("qsy",   sub!(add!(v_Yd, ddm!("4800")), v_qs_a.clone()));
+            let v_12qsa = bind!("12qsa", mul!(ddm!("12"), v_qs_a));
+            let v_qs_m  = bind!("qsm2",  sub!(add!(v_qsm, v_12qsa), ddm!("3")));
+            let v_153qm = bind!("153qm", mul!(ddm!("153"), v_qs_m));
+            let v_153qm2 = bind!("153qm2", add!(v_153qm, ddm!("2")));
+            let v_f153q  = bind!("f153q", floor_f!(div!(v_153qm2, ddm!("5"))));
+            let v_365qy  = bind!("365qy", mul!(ddm!("365"), v_qs_y.clone()));
+            let v_qy4    = bind!("qy4",   floor_f!(div!(v_qs_y.clone(), ddm!("4"))));
+            let v_qy100  = bind!("qy100", floor_f!(div!(v_qs_y.clone(), ddm!("100"))));
+            let v_qy400  = bind!("qy400", floor_f!(div!(v_qs_y, ddm!("400"))));
+            // JDN of quarter start (D=1): 1 + FLOOR((153*m+2)/5) → same as above but D=1
+            let v_JDNqs_p = bind!("JDNqsp", add!(add!(add!(add!(ddm!("1"), v_f153q), v_365qy), v_qy4), v_qy400));
+            let v_JDNqs_n = bind!("JDNqsn", add!(v_qy100, ddm!("32045")));
+            let v_JDN_qs  = bind!("JDNqs",  sub!(v_JDNqs_p, v_JDNqs_n));
+            let v_dqs     = bind!("dqs",    sub!(v_JDN, v_JDN_qs));
+            return Some(int_cast!(add!(v_dqs, ddm!("1"))));
+        }
+
+        None
+    }
+
+    /// Recursively resolve a map literal structure rooted at `expr`.
+    ///
+    /// Returns the `(key, value)` pairs of the resolved map if `expr` is:
+    /// * An inline `Expr::Map` literal, or
+    /// * A `Variable` bound to a map literal via `scalar_map_exprs`, or
+    /// * A `Property` access on any of the above that itself yields a nested map.
+    ///
+    /// Returns `None` if the expression cannot be resolved to a compile-time map.
+    fn try_get_map_pairs(&self, expr: &Expr) -> Option<Vec<(String, Expr)>> {
+        match expr {
+            Expr::Map(pairs) => Some(pairs.clone()),
+            Expr::Variable { name, .. } => self.scalar_map_exprs.get(name.as_str()).cloned(),
+            Expr::Property(inner_base, inner_key) => {
+                let pairs = self.try_get_map_pairs(inner_base)?;
+                let val = pairs
+                    .into_iter()
+                    .find(|(k, _)| k.as_str() == inner_key.as_str())
+                    .map(|(_, v)| v)?;
+                if let Expr::Map(inner_pairs) = val {
+                    Some(inner_pairs)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
@@ -5365,23 +5689,209 @@ fn lqa_expr_is_string(e: &Expr) -> bool {
 /// Returns the SPARQL integer literal for the component, or `None` if not recognized.
 
 /// Map a Cypher temporal component name to a SPARQL built-in function call on a
-/// runtime temporal variable. Returns `None` for components that have no direct
-/// SPARQL equivalent (week, quarter, weekYear, ordinalDay, etc.) so the caller
-/// can fall back gracefully.
-fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr> {
-    let f = match component {
-        "year" => Function::Year,
-        "month" => Function::Month,
-        "day" => Function::Day,
-        "hour" => Function::Hours,
-        "minute" => Function::Minutes,
-        "second" => Function::Seconds,
-        "timezone" => Function::Tz,   // returns string like "+01:00"
-        "offset" => Function::Tz,     // synonym
-        // No direct SPARQL equivalents for the rest.
-        _ => return None,
+/// Evaluate a compile-time string expression.  Handles string literals and
+/// string concatenation of literals (e.g. `'nam' + 'e'` → `"name"`).
+/// Returns `None` for any expression with a runtime component.
+fn lqa_eval_string_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Literal(Literal::String(s)) => Some(s.clone()),
+        Expr::Add(a, b) => {
+            // String concatenation of two string expressions.
+            let sa = lqa_eval_string_expr(a)?;
+            let sb = lqa_eval_string_expr(b)?;
+            Some(format!("{sa}{sb}"))
+        }
+        _ => None,
+    }
+}
+
+/// Extract the canonical string value from a literal for use in temporal
+/// component extraction.  Returns the raw lexical value for typed literals
+/// (dates, durations) or plain string literals.
+fn lqa_literal_str_value(lit: &Literal) -> Option<String> {
+    match lit {
+        Literal::String(s) => Some(s.clone()),
+        Literal::TypedLiteral(v, _) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+/// Build a SPARQL expression for an exotic temporal component using SPARQL
+/// arithmetic built-ins.  Returns `None` for components that cannot be
+/// expressed with standard SPARQL functions.
+fn lqa_temporal_component_expr(component: &str, arg: SparExpr) -> Option<SparExpr> {
+    use spargebra::algebra::Expression as SE;
+    let xsd_int = NamedNode::new_unchecked(XSD_INTEGER);
+    let lit_int = |n: i64| -> SparExpr {
+        SparExpr::Literal(SparLit::new_typed_literal(
+            n.to_string(),
+            xsd_int.clone(),
+        ))
     };
-    Some(SparExpr::FunctionCall(f, vec![arg]))
+    let lit_flt = |n: f64| -> SparExpr {
+        SparExpr::Literal(SparLit::new_typed_literal(
+            format!("{n}"),
+            NamedNode::new_unchecked(XSD_DOUBLE),
+        ))
+    };
+    let month_expr = || SparExpr::FunctionCall(Function::Month, vec![arg.clone()]);
+    let sec_expr = || SparExpr::FunctionCall(Function::Seconds, vec![arg.clone()]);
+
+    match component {
+        // quarter: 1-4
+        // FLOOR((MONTH(?d) - 1) / 3) + 1
+        "quarter" => Some(SE::Add(
+            Box::new(SE::FunctionCall(
+                Function::Floor,
+                vec![SE::Divide(
+                    Box::new(SE::Subtract(
+                        Box::new(month_expr()),
+                        Box::new(lit_int(1)),
+                    )),
+                    Box::new(lit_flt(3.0)),
+                )],
+            )),
+            Box::new(lit_int(1)),
+        )),
+        // millisecond: 0-999  (fractional seconds × 1000, mod 1000)
+        // FLOOR((SECONDS(?d) - FLOOR(SECONDS(?d))) * 1000)
+        "millisecond" | "millisecondOfSecond" | "millisecondsOfSecond" => Some(SE::FunctionCall(
+            Function::Floor,
+            vec![SE::Multiply(
+                Box::new(SE::Subtract(
+                    Box::new(sec_expr()),
+                    Box::new(SE::FunctionCall(Function::Floor, vec![sec_expr()])),
+                )),
+                Box::new(lit_flt(1000.0)),
+            )],
+        )),
+        // microsecond: 0-999 within the millisecond
+        // FLOOR((SECONDS(?d) - FLOOR(SECONDS(?d))) * 1000000) % 1000
+        "microsecond" | "microsecondOfSecond" | "microsecondsOfSecond" => {
+            let ms_total = SE::FunctionCall(
+                Function::Floor,
+                vec![SE::Multiply(
+                    Box::new(SE::Subtract(
+                        Box::new(sec_expr()),
+                        Box::new(SE::FunctionCall(Function::Floor, vec![sec_expr()])),
+                    )),
+                    Box::new(lit_flt(1_000_000.0)),
+                )],
+            );
+            // ms_total % 1000 — spargebra doesn't expose modulo directly; use
+            // ms_total - FLOOR(ms_total / 1000) * 1000 instead.
+            Some(SE::Subtract(
+                Box::new(ms_total.clone()),
+                Box::new(SE::Multiply(
+                    Box::new(SE::FunctionCall(
+                        Function::Floor,
+                        vec![SE::Divide(
+                            Box::new(ms_total),
+                            Box::new(lit_flt(1000.0)),
+                        )],
+                    )),
+                    Box::new(lit_flt(1000.0)),
+                )),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Map a Cypher temporal component name to a SPARQL expression on a runtime
+/// temporal variable.
+///
+/// Uses string-based extraction (SUBSTR/STRAFTER) rather than SPARQL built-ins
+/// (YEAR/MONTH/DAY/…) because temporal values stored as node properties in the
+/// TCK and in typical usage are plain string literals ("1984-10-11"), not typed
+/// xsd:date/dateTime literals.  SPARQL built-ins return null on plain strings;
+/// SUBSTR works correctly on both typed and plain string representations.
+fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr> {
+    use spargebra::algebra::Function;
+
+    let xsi_nn  = NamedNode::new_unchecked(XSD_INTEGER);
+    let xsd_dec = NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#decimal");
+
+    let str_e = SparExpr::FunctionCall(Function::Str, vec![arg.clone()]);
+
+    let dim = |n: i64| SparExpr::Literal(SparLit::new_typed_literal(
+        n.to_string(), xsi_nn.clone()));
+    let slit = |s: &str| SparExpr::Literal(SparLit::new_simple_literal(s.to_owned()));
+    let int_cast = |e: SparExpr| SparExpr::FunctionCall(
+        Function::Custom(xsi_nn.clone()), vec![e]);
+    let dec_cast = |e: SparExpr| SparExpr::FunctionCall(
+        Function::Custom(xsd_dec.clone()), vec![e]);
+    let substr2 = |s: SparExpr, start: i64, len: i64| SparExpr::FunctionCall(
+        Function::SubStr, vec![s, dim(start), dim(len)]);
+    let contains_f = |s: SparExpr, sub: &str| SparExpr::FunctionCall(
+        Function::Contains, vec![s, slit(sub)]);
+    let strafter_f = |s: SparExpr, delim: &str| SparExpr::FunctionCall(
+        Function::StrAfter, vec![s, slit(delim)]);
+    let floor_f = |e: SparExpr| SparExpr::FunctionCall(Function::Floor, vec![e]);
+    let ceil_f  = |e: SparExpr| SparExpr::FunctionCall(Function::Ceil,  vec![e]);
+    let add = |a: SparExpr, b: SparExpr| SparExpr::Add(Box::new(a), Box::new(b));
+    let sub = |a: SparExpr, b: SparExpr| SparExpr::Subtract(Box::new(a), Box::new(b));
+    let mul = |a: SparExpr, b: SparExpr| SparExpr::Multiply(Box::new(a), Box::new(b));
+    let div = |a: SparExpr, b: SparExpr| SparExpr::Divide(Box::new(a), Box::new(b));
+
+    // Time portion helper: IF(CONTAINS(str, "T"), STRAFTER(str, "T"), str).
+    // Works for both "HH:MM:SS…" (time-only) and "YYYY-MM-DDTHH:MM:SS…" (datetime).
+    let time_str = || SparExpr::If(
+        Box::new(contains_f(str_e.clone(), "T")),
+        Box::new(strafter_f(str_e.clone(), "T")),
+        Box::new(str_e.clone()),
+    );
+    let t_str = time_str();
+
+    // Fractional-second helper: raw string after "."  in the time part.
+    let frac_raw = strafter_f(t_str.clone(), ".");
+    let frac9 = substr2(
+        SparExpr::FunctionCall(
+            Function::Concat,
+            vec![frac_raw, slit("000000000")],
+        ),
+        1, 9,
+    );
+
+    match component {
+        // ── Date components ─────────────────────────────────────────────────
+        "year" =>
+            Some(int_cast(substr2(str_e.clone(), 1, 4))),
+        "month" =>
+            Some(int_cast(substr2(str_e.clone(), 6, 2))),
+        "day" =>
+            Some(int_cast(substr2(str_e.clone(), 9, 2))),
+        "quarter" | "quarterOfYear" => {
+            // CEIL(DEC(month) / 3) — correct for all 12 months.
+            // month 1-3 → 1, 4-6 → 2, 7-9 → 3, 10-12 → 4.
+            let month_i = int_cast(substr2(str_e.clone(), 6, 2));
+            let month_d = dec_cast(month_i);
+            Some(int_cast(ceil_f(div(
+                month_d,
+                SparExpr::Literal(SparLit::new_typed_literal("3".to_owned(), xsd_dec.clone())),
+            ))))
+        }
+        // ── Time components ─────────────────────────────────────────────────
+        "hour" =>
+            Some(int_cast(substr2(t_str.clone(), 1, 2))),
+        "minute" =>
+            Some(int_cast(substr2(t_str.clone(), 4, 2))),
+        "second" =>
+            Some(int_cast(substr2(t_str.clone(), 7, 2))),
+        "millisecond" | "millisecondOfSecond" | "millisecondsOfSecond" =>
+            Some(int_cast(substr2(frac9.clone(), 1, 3))),
+        "microsecond" | "microsecondOfSecond" | "microsecondsOfSecond" =>
+            Some(int_cast(substr2(frac9.clone(), 1, 6))),
+        "nanosecond" | "nanosecondOfSecond" | "nanosecondsOfSecond" =>
+            Some(int_cast(frac9)),
+        // ── Timezone ────────────────────────────────────────────────────────
+        // TZ() works on typed xsd:dateTime; for plain strings we'd need string
+        // extraction. Accept TZ() for now — timezone tests use typed literals.
+        "timezone" | "offset" =>
+            Some(SparExpr::FunctionCall(Function::Tz, vec![arg])),
+        // ── Arithmetic-based exotic components ──────────────────────────────
+        other => lqa_temporal_component_expr(other, arg),
+    }
 }
 
 fn lqa_scalar_temporal_prop(val: &str, component: &str) -> Option<SparExpr> {
