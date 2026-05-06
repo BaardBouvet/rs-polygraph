@@ -285,7 +285,38 @@ fn tc_tz_suffix_month(tz: &str, month: i64) -> String {
     // Named timezone lookup — approximate DST by month:
     // Central European Time: +01:00 (Oct-Mar), +02:00 (Apr-Sep)
     let is_summer = matches!(month, 4 | 5 | 6 | 7 | 8 | 9);
-    let (winter, summer) = match tz {
+    let (winter, summer) = tc_tz_winter_summer(tz);
+    let offset = if is_summer { summer } else { winter };
+    if offset == "Z" {
+        format!("Z[{}]", tz)
+    } else {
+        format!("{}[{}]", offset, tz)
+    }
+}
+
+/// Precise DST-aware timezone suffix using year/month/day to determine the exact DST boundary.
+/// Uses last-Sunday-of-March / last-Sunday-of-October rule for European timezones.
+pub(crate) fn tc_tz_suffix_ymd(tz: &str, y: i64, m: i64, d: i64) -> String {
+    if tz == "Z" || tz.starts_with('+') || tz.starts_with('-') {
+        if tz != "Z" && tz.len() == 9 && tz.as_bytes().get(6) == Some(&b':') && tz.ends_with(":00")
+        {
+            return tz[..6].to_string();
+        }
+        return tz.to_string();
+    }
+    let (winter, summer) = tc_tz_winter_summer(tz);
+    let is_summer = tc_is_eu_dst(tz, y, m, d);
+    let offset = if is_summer { summer } else { winter };
+    if offset == "Z" {
+        format!("Z[{}]", tz)
+    } else {
+        format!("{}[{}]", offset, tz)
+    }
+}
+
+/// Return the (winter_offset, summer_offset) pair for a named timezone.
+fn tc_tz_winter_summer(tz: &str) -> (&'static str, &'static str) {
+    match tz {
         "Europe/Stockholm" | "Europe/Paris" | "Europe/Berlin" | "Europe/Rome" | "Europe/Madrid"
         | "Europe/Amsterdam" | "Europe/Brussels" | "Europe/Copenhagen" | "Europe/Warsaw"
         | "Europe/Vienna" | "Europe/Zurich" | "Europe/Prague" | "Europe/Budapest" => {
@@ -300,13 +331,46 @@ fn tc_tz_suffix_month(tz: &str, month: i64) -> String {
         "Pacific/Honolulu" | "Pacific/Johnston" => ("-10:00", "-10:00"), // Hawaii, no DST
         "Australia/Eucla" => ("+08:45", "+08:45"), // Western Central Standard Time, no DST
         _ => ("Z", "Z"),
-    };
-    let offset = if is_summer { summer } else { winter };
-    if offset == "Z" {
-        format!("Z[{}]", tz)
-    } else {
-        format!("{}[{}]", offset, tz)
     }
+}
+
+/// Determine if a European-DST timezone is currently observing DST for the given date.
+/// Uses historically-approximate rules:
+/// - Spring forward: last Sunday of March (consistent since DST adoption)
+/// - Fall back: last Sunday of September (before 1996) or last Sunday of October (1996+)
+fn tc_is_eu_dst(tz: &str, y: i64, m: i64, d: i64) -> bool {
+    match tz {
+        "Europe/Stockholm" | "Europe/Paris" | "Europe/Berlin" | "Europe/Rome" | "Europe/Madrid"
+        | "Europe/Amsterdam" | "Europe/Brussels" | "Europe/Copenhagen" | "Europe/Warsaw"
+        | "Europe/Vienna" | "Europe/Zurich" | "Europe/Prague" | "Europe/Budapest"
+        | "Europe/London" | "Europe/Dublin" | "Europe/Lisbon" => {}
+        _ => return false,
+    }
+    // EU harmonized to last-Sunday-of-October fall-back from 1996 onward;
+    // before that, most countries used last Sunday of September.
+    let fall_month: i64 = if y >= 1996 { 10 } else { 9 };
+    if m > 3 && m < fall_month {
+        return true;
+    }
+    if m < 3 || m > fall_month {
+        return false;
+    }
+    let last_sun = tc_last_sunday_of_month(y, m);
+    if m == 3 {
+        d >= last_sun // spring forward: from last Sunday of March onward
+    } else {
+        d < last_sun // fall back: before last Sunday of fall_month
+    }
+}
+
+/// Return the day (1-based) of the last Sunday in the given month/year.
+fn tc_last_sunday_of_month(y: i64, m: i64) -> i64 {
+    let last_day = temporal_dim(y, m);
+    let epoch = temporal_epoch(y, m, last_day);
+    // dow: 1=Mon, 7=Sun (same convention as tc_iso_week_year)
+    let dow = ((epoch - 1) % 7 + 7) % 7 + 1;
+    let days_back = if dow == 7 { 0 } else { dow };
+    last_day - days_back
 }
 
 /// Return the ISO week-numbering year for a given calendar date.
@@ -1451,8 +1515,9 @@ pub(crate) fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Opti
             let year = temporal_get_i(pairs, "year").unwrap_or(by);
             let month = temporal_get_i(pairs, "month").unwrap_or(bm);
             let day = temporal_get_i(pairs, "day").unwrap_or(bd);
+            let year = temporal_get_i(pairs, "year").unwrap_or(by);
             let override_tz_str =
-                temporal_get_s(pairs, "timezone").map(|s| tc_tz_suffix_month(&s, month));
+                temporal_get_s(pairs, "timezone").map(|s| tc_tz_suffix_ymd(&s, year, month, day));
             let new_tz_s = override_tz_str
                 .as_deref()
                 .and_then(parse_tz_offset_s)
@@ -1588,7 +1653,14 @@ pub(crate) fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Opti
             (1, format!("{year:04}-01-01"))
         }
     };
-    let override_tz_str = temporal_get_s(pairs, "timezone").map(|s| tc_tz_suffix_month(&s, month));
+    let override_tz_str = temporal_get_s(pairs, "timezone").map(|s| {
+        // Use precise DST calculation from the full date (year, month, day).
+        let dp: Vec<&str> = date_part.splitn(3, '-').collect();
+        let y: i64 = dp.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let m: i64 = dp.get(1).and_then(|s| s.parse().ok()).unwrap_or(month);
+        let d: i64 = dp.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+        tc_tz_suffix_ymd(&s, y, m, d)
+    });
     if let Some((bh, bmin, bsec, bns, ref base_tz_raw, orig_had_tz)) = base_time_data {
         let override_h = temporal_get_i(pairs, "hour");
         let override_min = temporal_get_i(pairs, "minute");
@@ -2448,7 +2520,17 @@ pub(crate) fn temporal_parse_datetime(s: &str) -> Option<String> {
     let rest = &s[t_pos + 1..];
     let (time_body, tz_raw) = split_tz(rest);
     let time_s = temporal_parse_localtime(time_body)?;
-    let tz = normalize_tz(tz_raw);
+    let tz = if tz_raw.starts_with('[') {
+        // Named timezone without an explicit numeric offset: compute DST-aware offset from date.
+        let tz_name = &tz_raw[1..tz_raw.len().saturating_sub(1)]; // strip '[' and ']'
+        let dp: Vec<&str> = date_s.splitn(3, '-').collect();
+        let y: i64 = dp.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let m: i64 = dp.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let d: i64 = dp.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
+        tc_tz_suffix_ymd(tz_name, y, m, d)
+    } else {
+        normalize_tz(tz_raw)
+    };
     Some(format!("{date_s}T{time_s}{tz}"))
 }
 
