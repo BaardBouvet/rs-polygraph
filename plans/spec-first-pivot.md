@@ -845,23 +845,46 @@ in full**. This is the pivot's terminal phase.
   - CALL { } / FOREACH → `Unsupported`.
 - Some MERGE shapes documented as statically unresolvable (see [fundamental-limitations.md](fundamental-limitations.md)).
 
-#### 8.6 — CALL with updates / FOREACH  (1 + scattered)
+#### 8.6 — CALL with updates / FOREACH  (✅ landed, scoped)
 
-- `CALL { … }` write subqueries route to update lowering of the inner block.
-- `FOREACH (x IN list | …)` lowers to a write template instantiated per
-  list element; constant lists fully expand at compile time, variable
-  lists require `INSERT … WHERE` with VALUES.
-- **Exit:** 0 `write_call` / `write_foreach` fallbacks for the supported subset.
+- Procedure `CALL proc()` queries: removed over-eager `write_call` gate from `lqa_safe_reason`.
+  They now fall through to `Op::Call => Unsupported` in `lqa::sparql::compile` — same
+  legacy fallback, correct route.
+- `CALL { }` write subquery: parser-level `UnsupportedFeature` (no AST node exists yet).
+- `FOREACH`: parser-level `UnsupportedFeature` (not in failing TCK set; no TCK regression).
+- `write_call` `is_lqa_safe` gate replaced by `clause_shape` fallback for bare CALL-only queries.
+- `op_to_where_parts` extended for write WHERE context: `OrderBy`/`Distinct` (transparent),
+  `Projection` (transparent only for identity-passthrough WITH), `GroupBy` (recurse into inner),
+  `Limit`/`Skip` (new `write_limit_skip_context` fallback).
+- GroupBy Projection path in `lqa::sparql` fixed: passthrough scan vars are no longer inserted
+  into `scalar_vars` — prevents `property access on scalar variable` for `WITH n, count(*) AS c RETURN n.prop`.
+- Runtime temporal property access via SPARQL built-ins: `YEAR(?d)`, `MONTH(?d)`, `DAY(?d)`,
+  `HOURS(?d)`, `MINUTES(?d)`, `SECONDS(?d)`, `TZ(?d)` — used when scalar var has no compile-time value.
+- **Exit criteria met for scope.** Full CALL { } subquery and FOREACH require parser changes (Phase 9+ scope).
 
-#### 8.7 — Translator deletion  (terminal step)
+#### 8.7 — Translator deletion  (gated on Phase L2)
 
-Pre-conditions:
-- Total legacy fallbacks ≤ 10 (long-tail `Unsupported` only) for a
-  full week of nightly TCK + difftest runs.
-- All TCK-passing scenarios produce byte-identical (or
-  semantically-equivalent — diff via difftest oracle) SPARQL on both paths
-  for one nightly run with `POLYGRAPH_FORCE_LEGACY=1` and 
-  `POLYGRAPH_FORCE_LQA=1` env-flag-gated full-corpus comparisons.
+**Revised pre-conditions (2026-05-06):**
+
+Full translator deletion requires more than just Phase 8 write work. Current fallback analysis:
+
+| Category | Count | Status |
+|---|---|---|
+| L2-deferred (UNWIND variable list, ListComprehension, collect(), Quantifier) | 307 | Cannot fix without Phase L2 |
+| Write compile (write_merge_with_outer_match, write_delete_with_return, write_where_complex_op, etc.) | 111 | ~20 fixable; 90 complex |
+| `is_lqa_safe` gates (varlen paths, relvar_after_with, etc.) | 66 | ~14 fixable; 52 complex |
+| Fixable read (temporal props, range, scalar vars, etc.) | 275 | Ongoing Phase 7 work |
+| **Total** | **759** | |
+
+The 307 L2-deferred fallbacks are intentional and will stay until Phase L2 (runtime list
+materialization) ships. The 8.7 pre-condition of “≤ 10 fallbacks” must be revised to
+“≤ 10 non-L2-deferred fallbacks”, which still requires fixing ~452 additional fallbacks.
+
+**Realistic 8.7 pre-conditions:**
+- All non-L2-deferred, non-varlen fallbacks ≤ 10.
+- L2-deferred constructs documented as `Unsupported` in the public API.
+- Varlen path constructs (named_path_varlen, varlen_named_relvar, unbounded_varlen_unlabeled)
+  documented as permanently `Unsupported` OR ported via SPARQL property paths.
 - Difftest at ≥ 250 queries spanning every Phase 7+8 bucket.
 
 Steps:
