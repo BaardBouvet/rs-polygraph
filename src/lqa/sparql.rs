@@ -286,6 +286,305 @@ impl Compiler {
         format!("{{{}}}", entries.join(", "))
     }
 
+    // ── properties() helpers ──────────────────────────────────────────────────
+
+    /// Build a SPARQL expression for `properties(node_var)`.
+    /// Emits a GROUP BY subquery in `pending_optional_patterns` that collects
+    /// all base-namespace property key-value pairs for the node and formats them
+    /// as the Cypher map string `{key1: val1, key2: val2, ...}`.
+    fn build_node_properties_expr(&mut self, vname: &str) -> SparExpr {
+        let node_var = Self::var(vname);
+        let pred_var = self.fresh("_pp_pred");
+        let val_var = self.fresh("_pp_val");
+        let pair_var = self.fresh("_pp_pair");
+        let raw_var = self.fresh("_pp_raw");
+        let base = self.base_iri.clone();
+        let base_len = base.len();
+        let sentinel_str = format!("{base}__node");
+
+        // BGP: ?node ?pred ?val
+        let bgp = GraphPattern::Bgp {
+            patterns: vec![TriplePattern {
+                subject: TermPattern::Variable(node_var.clone()),
+                predicate: NamedNodePattern::Variable(pred_var.clone()),
+                object: TermPattern::Variable(val_var.clone()),
+            }],
+        };
+
+        // FILTER: STRSTARTS(STR(?pred), base) && ?pred != sentinel && ?pred != rdf:type
+        let str_pred = SparExpr::FunctionCall(
+            Function::Str,
+            vec![SparExpr::Variable(pred_var.clone())],
+        );
+        let strstarts = SparExpr::FunctionCall(
+            Function::StrStarts,
+            vec![
+                str_pred.clone(),
+                SparExpr::Literal(SparLit::new_simple_literal(base.clone())),
+            ],
+        );
+        let not_sentinel = SparExpr::Not(Box::new(SparExpr::Equal(
+            Box::new(str_pred.clone()),
+            Box::new(SparExpr::Literal(SparLit::new_simple_literal(sentinel_str))),
+        )));
+        let not_rdf_type = SparExpr::Not(Box::new(SparExpr::Equal(
+            Box::new(str_pred),
+            Box::new(SparExpr::Literal(SparLit::new_simple_literal(RDF_TYPE.to_string()))),
+        )));
+        let filter_expr = SparExpr::And(
+            Box::new(strstarts),
+            Box::new(SparExpr::And(Box::new(not_sentinel), Box::new(not_rdf_type))),
+        );
+        let filtered = GraphPattern::Filter {
+            expr: filter_expr,
+            inner: Box::new(bgp),
+        };
+
+        // key string: SUBSTR(STR(?pred), base_len + 1)
+        let key_expr = SparExpr::FunctionCall(
+            Function::SubStr,
+            vec![
+                SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(pred_var)]),
+                SparExpr::Literal(SparLit::new_typed_literal(
+                    (base_len + 1).to_string(),
+                    NamedNode::new_unchecked(XSD_INTEGER),
+                )),
+            ],
+        );
+        // value format: IF(numeric_or_boolean, STR(?val), CONCAT("'", STR(?val), "'"))
+        let pair_expr = SparExpr::FunctionCall(
+            Function::Concat,
+            vec![
+                key_expr,
+                SparExpr::Literal(SparLit::new_simple_literal(": ")),
+                Self::sparql_cypher_format_value(val_var),
+            ],
+        );
+        let extended = GraphPattern::Extend {
+            inner: Box::new(filtered),
+            variable: pair_var.clone(),
+            expression: pair_expr,
+        };
+        let gc_agg = AggregateExpression::FunctionCall {
+            name: AggregateFunction::GroupConcat {
+                separator: Some(", ".to_string()),
+            },
+            expr: SparExpr::Variable(pair_var),
+            distinct: false,
+        };
+        let group_pat = GraphPattern::Group {
+            inner: Box::new(extended),
+            variables: vec![node_var],
+            aggregates: vec![(raw_var.clone(), gc_agg)],
+        };
+        // Push Group directly (no Extend wrapper) to mirror the labels() pattern.
+        self.pending_optional_patterns.push(group_pat);
+
+        // Return: IF(BOUND(?raw), CONCAT("{", ?raw, "}"), "{}")
+        SparExpr::If(
+            Box::new(SparExpr::Bound(raw_var.clone())),
+            Box::new(SparExpr::FunctionCall(
+                Function::Concat,
+                vec![
+                    SparExpr::Literal(SparLit::new_simple_literal("{")),
+                    SparExpr::Variable(raw_var),
+                    SparExpr::Literal(SparLit::new_simple_literal("}")),
+                ],
+            )),
+            Box::new(SparExpr::Literal(SparLit::new_simple_literal("{}"))),
+        )
+    }
+
+    /// Build a SPARQL expression for `properties(edge_var)`.
+    /// Uses RDF-star reification to enumerate edge properties.
+    fn build_edge_properties_expr(&mut self, vname: &str) -> SparExpr {
+        let edge_info = match self.edge_vars.get(vname).cloned() {
+            Some(info) => info,
+            None => {
+                // Fallback: return unbound (shouldn't happen since we check contains_key)
+                return SparExpr::Variable(self.fresh("_null"));
+            }
+        };
+        let subj_var = Self::var(&edge_info.subj);
+        let obj_var = Self::var(&edge_info.obj);
+        let reif_var = self.fresh("_ep_reif");
+        let pred_var = self.fresh("_ep_pred");
+        let val_var = self.fresh("_ep_val");
+        let pair_var = self.fresh("_ep_pair");
+        let raw_var = self.fresh("_ep_raw");
+        let base = self.base_iri.clone();
+        let base_len = base.len();
+        let rdf_reifies = NamedNode::new_unchecked(
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
+        );
+
+        // Build the edge triple term: <<subj pred obj>>
+        let (inner_bgp, group_by_vars) = match &edge_info.pred {
+            EdgePred::Static(iri) => {
+                let edge_triple_tp = TermPattern::Triple(Box::new(TriplePattern {
+                    subject: TermPattern::Variable(subj_var.clone()),
+                    predicate: NamedNodePattern::NamedNode(iri.clone()),
+                    object: TermPattern::Variable(obj_var.clone()),
+                }));
+                let bgp = GraphPattern::Bgp {
+                    patterns: vec![
+                        TriplePattern {
+                            subject: TermPattern::Variable(reif_var.clone()),
+                            predicate: NamedNodePattern::NamedNode(rdf_reifies),
+                            object: edge_triple_tp,
+                        },
+                        TriplePattern {
+                            subject: TermPattern::Variable(reif_var.clone()),
+                            predicate: NamedNodePattern::Variable(pred_var.clone()),
+                            object: TermPattern::Variable(val_var.clone()),
+                        },
+                    ],
+                };
+                (bgp, vec![subj_var, obj_var])
+            }
+            EdgePred::Dynamic(dyn_pred_var) => {
+                let edge_triple_tp = TermPattern::Triple(Box::new(TriplePattern {
+                    subject: TermPattern::Variable(subj_var.clone()),
+                    predicate: NamedNodePattern::Variable(dyn_pred_var.clone()),
+                    object: TermPattern::Variable(obj_var.clone()),
+                }));
+                let bgp = GraphPattern::Bgp {
+                    patterns: vec![
+                        TriplePattern {
+                            subject: TermPattern::Variable(reif_var.clone()),
+                            predicate: NamedNodePattern::NamedNode(rdf_reifies),
+                            object: edge_triple_tp,
+                        },
+                        TriplePattern {
+                            subject: TermPattern::Variable(reif_var.clone()),
+                            predicate: NamedNodePattern::Variable(pred_var.clone()),
+                            object: TermPattern::Variable(val_var.clone()),
+                        },
+                    ],
+                };
+                (bgp, vec![subj_var, dyn_pred_var.clone(), obj_var])
+            }
+        };
+
+        // FILTER: STRSTARTS(STR(?pred), base)
+        let str_pred = SparExpr::FunctionCall(
+            Function::Str,
+            vec![SparExpr::Variable(pred_var.clone())],
+        );
+        let filter_expr = SparExpr::FunctionCall(
+            Function::StrStarts,
+            vec![
+                str_pred,
+                SparExpr::Literal(SparLit::new_simple_literal(base.clone())),
+            ],
+        );
+        let filtered = GraphPattern::Filter {
+            expr: filter_expr,
+            inner: Box::new(inner_bgp),
+        };
+
+        // key: SUBSTR(STR(?pred), base_len + 1)
+        let key_expr = SparExpr::FunctionCall(
+            Function::SubStr,
+            vec![
+                SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(pred_var)]),
+                SparExpr::Literal(SparLit::new_typed_literal(
+                    (base_len + 1).to_string(),
+                    NamedNode::new_unchecked(XSD_INTEGER),
+                )),
+            ],
+        );
+        let pair_expr = SparExpr::FunctionCall(
+            Function::Concat,
+            vec![
+                key_expr,
+                SparExpr::Literal(SparLit::new_simple_literal(": ")),
+                Self::sparql_cypher_format_value(val_var),
+            ],
+        );
+        let extended = GraphPattern::Extend {
+            inner: Box::new(filtered),
+            variable: pair_var.clone(),
+            expression: pair_expr,
+        };
+
+        let gc_agg = AggregateExpression::FunctionCall {
+            name: AggregateFunction::GroupConcat {
+                separator: Some(", ".to_string()),
+            },
+            expr: SparExpr::Variable(pair_var),
+            distinct: false,
+        };
+        let group_pat = GraphPattern::Group {
+            inner: Box::new(extended),
+            variables: group_by_vars,
+            aggregates: vec![(raw_var.clone(), gc_agg)],
+        };
+        // Push Group directly (no Extend wrapper) to mirror the labels() pattern.
+        self.pending_optional_patterns.push(group_pat);
+
+        // Return: IF(BOUND(?raw), CONCAT("{", ?raw, "}"), "{}")
+        SparExpr::If(
+            Box::new(SparExpr::Bound(raw_var.clone())),
+            Box::new(SparExpr::FunctionCall(
+                Function::Concat,
+                vec![
+                    SparExpr::Literal(SparLit::new_simple_literal("{")),
+                    SparExpr::Variable(raw_var),
+                    SparExpr::Literal(SparLit::new_simple_literal("}")),
+                ],
+            )),
+            Box::new(SparExpr::Literal(SparLit::new_simple_literal("{}"))),
+        )
+    }
+
+    /// Format a SPARQL value as a Cypher literal element:
+    /// numeric/boolean → plain STR, strings → `'...'` wrapped.
+    fn sparql_cypher_format_value(val_var: Variable) -> SparExpr {
+        let val_expr = SparExpr::Variable(val_var.clone());
+        let dt_expr = SparExpr::FunctionCall(Function::Datatype, vec![val_expr]);
+        let str_val = SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(val_var.clone())]);
+
+        // Build: numeric_or_bool = (DATATYPE = xsd:integer || xsd:long || xsd:decimal || xsd:double || xsd:float || xsd:boolean)
+        let mk_dt_eq = |iri: &str| {
+            SparExpr::Equal(
+                Box::new(dt_expr.clone()),
+                Box::new(SparExpr::NamedNode(NamedNode::new_unchecked(iri))),
+            )
+        };
+        let is_numeric_or_bool = SparExpr::Or(
+            Box::new(mk_dt_eq(XSD_INTEGER)),
+            Box::new(SparExpr::Or(
+                Box::new(mk_dt_eq("http://www.w3.org/2001/XMLSchema#long")),
+                Box::new(SparExpr::Or(
+                    Box::new(mk_dt_eq("http://www.w3.org/2001/XMLSchema#decimal")),
+                    Box::new(SparExpr::Or(
+                        Box::new(mk_dt_eq(XSD_DOUBLE)),
+                        Box::new(SparExpr::Or(
+                            Box::new(mk_dt_eq("http://www.w3.org/2001/XMLSchema#float")),
+                            Box::new(mk_dt_eq(XSD_BOOLEAN)),
+                        )),
+                    )),
+                )),
+            )),
+        );
+
+        // IF numeric_or_bool: STR(?val)
+        // ELSE: CONCAT("'", STR(?val), "'")
+        SparExpr::If(
+            Box::new(is_numeric_or_bool),
+            Box::new(str_val.clone()),
+            Box::new(SparExpr::FunctionCall(
+                Function::Concat,
+                vec![
+                    SparExpr::Literal(SparLit::new_simple_literal("'")),
+                    str_val,
+                    SparExpr::Literal(SparLit::new_simple_literal("'")),
+                ],
+            )),
+        )
+    }
+
     // ── IRI helpers ───────────────────────────────────────────────────────────
 
     fn prop_iri(&self, key: &str) -> NamedNode {
@@ -5203,6 +5502,20 @@ impl Compiler {
                         if self.nullable.contains(vname.as_str()) =>
                     {
                         Ok(SparExpr::Variable(self.fresh("_null")))
+                    }
+                    // Edge variable (check before scan_vars — edge vars are also in scan_vars):
+                    // build GROUP BY subquery via RDF-star reification.
+                    Expr::Variable { name: vname, .. }
+                        if self.edge_vars.contains_key(vname.as_str()) =>
+                    {
+                        Ok(self.build_edge_properties_expr(vname))
+                    }
+                    // Node variable: build a GROUP BY subquery that collects all
+                    // base-namespace properties and formats them as "{key: val, ...}".
+                    Expr::Variable { name: vname, .. }
+                        if self.scan_vars.contains(vname.as_str()) =>
+                    {
+                        Ok(self.build_node_properties_expr(vname))
                     }
                     _ => Err(PolygraphError::Unsupported {
                         construct: "properties()".into(),

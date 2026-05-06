@@ -2977,6 +2977,14 @@ impl TranslationState {
                 }
                 Ok(SparExpr::Exists(Box::new(combined)))
             }
+            Expression::ExistsFullSubquery { .. } => {
+                // Full EXISTS subquery with WITH/aggregation — not supported in legacy path.
+                Err(PolygraphError::Unsupported {
+                    construct: "EXISTS subquery with WITH/aggregation".into(),
+                    spec_ref: "openCypher 9 §6.3.8".into(),
+                    reason: "requires LQA path".into(),
+                })
+            }
             Expression::Aggregate(agg) => {
                 // Check if this aggregate was already computed (e.g. in RETURN with ORDER BY).
                 // If so, reuse the existing variable instead of creating a new unbound one.

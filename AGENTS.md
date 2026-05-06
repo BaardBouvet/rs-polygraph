@@ -14,6 +14,7 @@ See [ROADMAP.md](ROADMAP.md) for phased delivery. Design documents live in `plan
 | [fundamental-limitations.md](plans/fundamental-limitations.md) | reference | Hard limits of the static transpiler; L1/L2/L3 mitigation levels |
 | [target-engines.md](plans/target-engines.md) | reference | SPARQL engine capability analysis (`TargetEngine` trait) |
 | [spec-first-pivot.md](plans/spec-first-pivot.md) | in progress | Active: spec-anchored LQA + differential testing pivot (v0.6.0) |
+| [iana-timezone.md](plans/iana-timezone.md) | planned | Replace static DST table with `chrono-tz`; fix 10 timezone TCK failures |
 | [release.md](plans/release.md) | planned | CI workflows, crates.io publishing, docs.rs, GitHub Pages (v0.7.0) |
 | [write-clause-api.md](plans/write-clause-api.md) | planned | Promote write-clause transpilation to public API; Neo4j getting-started tutorial on Oxigraph (v0.7.1) |
 | [result-mapping.md](plans/result-mapping.md) | planned | SPARQL results → openCypher values hydration API (v0.8.0) |

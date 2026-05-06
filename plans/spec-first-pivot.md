@@ -267,7 +267,7 @@ L2-runtime or structural bucket; none is a simple translator patch.
 | Count | Bucket | Representative scenario |
 |------:|--------|-------------------------|
 | 17 | Temporal8 — duration arithmetic (3 structural: dur+dur, dur×n; 5 fixable format) | `[6] Should add or subtract durations` |
-| 10 | DST timezone (IANA db required; **not fixable**) | Temporal2[6], Temporal3[10], Temporal10[8] |
+| 10 | DST timezone (IANA db required) | Temporal2[6], Temporal3[10], Temporal10[8] — see [iana-timezone.md](iana-timezone.md) |
 | 8 | Quantifier1–4[8,9] — quantifiers on list of nodes/rels | nodes/rels can't be UNWIND'd as literals |
 | 6 | List12 — `collect()` then property access on collected nodes | runtime list element access |
 | 5 | Quantifier invariants — opaque `rand()`/`reverse()` list chains | UNWIND of complex mixed-value list |

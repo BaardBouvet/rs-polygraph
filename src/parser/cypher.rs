@@ -1339,9 +1339,12 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
                         where_expr = Some(Box::new(build_where_clause(child)?.expression));
                     }
                     Rule::statement => {
-                        // Lower a simple `EXISTS { MATCH pat [WHERE pred] RETURN ... }`
-                        // into ExistsSubquery { patterns, where_ }. Reject anything more
-                        // complex (multiple MATCH, WITH, writes, UNION, etc.).
+                        // Parse `EXISTS { ... }` body.
+                        // Simple form: `EXISTS { MATCH pat [WHERE pred] [RETURN ...] }`
+                        //   → ExistsSubquery { patterns, where_ }
+                        // Full form: `EXISTS { MATCH ... WITH ... WHERE ... RETURN ... }`
+                        //   → ExistsFullSubquery { clauses }
+                        // Write clauses (CREATE, SET, DELETE, MERGE, REMOVE) → SyntaxError.
                         let mut single_queries: Vec<Pair<Rule>> = Vec::new();
                         for sq in child.into_inner() {
                             if sq.as_rule() == Rule::single_query {
@@ -1353,48 +1356,74 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
                                 feature: "EXISTS subquery with UNION (Phase 4+)".to_string(),
                             });
                         }
+                        let mut has_with = false;
                         let mut found_match: Option<Pair<Rule>> = None;
                         let mut found_where: Option<Pair<Rule>> = None;
-                        let mut saw_return = false;
+                        let mut all_clause_pairs: Vec<Pair<Rule>> = Vec::new();
                         for cl in single_queries.remove(0).into_inner() {
                             if cl.as_rule() != Rule::clause {
                                 continue;
                             }
-                            for inner_cl in cl.into_inner() {
-                                match inner_cl.as_rule() {
-                                    Rule::match_clause => {
+                            // Peek at the inner rule to detect write clauses.
+                            let inner_cl = cl
+                                .clone()
+                                .into_inner()
+                                .next()
+                                .expect("clause has inner rule");
+                            match inner_cl.as_rule() {
+                                Rule::create_clause
+                                | Rule::set_clause
+                                | Rule::delete_clause
+                                | Rule::merge_clause
+                                | Rule::remove_clause => {
+                                    return Err(PolygraphError::UnsupportedFeature {
+                                        feature: "EXISTS subquery with non-MATCH/RETURN clauses (Phase 4+)".to_string(),
+                                    });
+                                }
+                                Rule::with_clause => {
+                                    has_with = true;
+                                }
+                                Rule::match_clause => {
+                                    if !has_with {
+                                        // Simple path: collect match/where for ExistsSubquery.
                                         if found_match.is_some() {
-                                            return Err(PolygraphError::UnsupportedFeature {
-                                                feature: "EXISTS subquery with multiple MATCH (Phase 4+)".to_string(),
-                                            });
-                                        }
-                                        // Extract pattern_list and optional where from match_clause.
-                                        for mc_inner in inner_cl.into_inner() {
-                                            match mc_inner.as_rule() {
-                                                Rule::pattern_list => {
-                                                    found_match = Some(mc_inner);
+                                            // Promote to full form.
+                                            has_with = true;
+                                        } else {
+                                            for mc_inner in inner_cl.into_inner() {
+                                                match mc_inner.as_rule() {
+                                                    Rule::pattern_list => {
+                                                        found_match = Some(mc_inner);
+                                                    }
+                                                    Rule::where_clause => {
+                                                        found_where = Some(mc_inner);
+                                                    }
+                                                    _ => {}
                                                 }
-                                                Rule::where_clause => {
-                                                    found_where = Some(mc_inner);
-                                                }
-                                                _ => {}
                                             }
                                         }
                                     }
-                                    Rule::return_clause => {
-                                        // Ignore RETURN body; existence only depends on
-                                        // whether the WHERE matches.
-                                        saw_return = true;
-                                    }
-                                    _ => {
-                                        return Err(PolygraphError::UnsupportedFeature {
-                                            feature: "EXISTS subquery with non-MATCH/RETURN clauses (Phase 4+)".to_string(),
-                                        });
-                                    }
                                 }
+                                _ => {} // return_clause, unwind_clause: ignored in simple path
                             }
+                            all_clause_pairs.push(cl);
                         }
-                        let _ = saw_return;
+
+                        if has_with {
+                            // Full form: parse all clauses via build_clause.
+                            let mut full_clauses = Vec::new();
+                            for cl_pair in all_clause_pairs {
+                                let inner_cl = cl_pair
+                                    .into_inner()
+                                    .next()
+                                    .expect("clause has inner rule");
+                                full_clauses.push(build_clause(inner_cl)?);
+                            }
+                            return Ok(Expression::ExistsFullSubquery {
+                                clauses: full_clauses,
+                            });
+                        }
+
                         let pl_pair = found_match.ok_or_else(|| PolygraphError::UnsupportedFeature {
                             feature: "EXISTS subquery without MATCH".to_string(),
                         })?;

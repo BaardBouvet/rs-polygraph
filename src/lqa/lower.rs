@@ -1365,6 +1365,14 @@ impl AstLowerer {
                 };
                 Ok(Expr::Exists(Box::new(subq)))
             }
+            AE::ExistsFullSubquery { clauses } => {
+                // Lower the full clause body as an inner Op tree.
+                // Use a fresh nested lowerer to avoid polluting the outer scope's
+                // variable tracking (list_const_map, seen_vars, etc.).
+                let mut inner_lowerer = Self::new();
+                let inner_op = inner_lowerer.lower_clauses(clauses)?;
+                Ok(Expr::Exists(Box::new(inner_op)))
+            }
             AE::PatternPredicate(pat) => {
                 let pat_op = self.lower_pattern(pat)?;
                 Ok(Expr::Exists(Box::new(pat_op)))

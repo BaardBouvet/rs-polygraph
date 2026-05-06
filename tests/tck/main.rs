@@ -392,9 +392,31 @@ fn parse_duration_semantic(s: &str) -> Option<(i64, i64)> {
 /// Compare two scalar string values for semantic equality.
 /// For duration values (P.../−P...) use semantic comparison to handle
 /// Oxigraph's hours→days normalization and per-component vs global negation.
+fn normalize_map_keys(s: &str) -> String {
+    let s = s.trim();
+    if !s.starts_with('{') || !s.ends_with('}') {
+        return s.to_owned();
+    }
+    let inner = &s[1..s.len() - 1];
+    if inner.is_empty() {
+        return "{}".to_owned();
+    }
+    // Simple split on ", " — works for maps with scalar values (no commas in values).
+    let mut pairs: Vec<&str> = inner.split(", ").collect();
+    pairs.sort();
+    format!("{{{}}}", pairs.join(", "))
+}
+
 fn scalar_values_equal(a: &str, b: &str) -> bool {
     if a == b {
         return true;
+    }
+    // Map key-order normalization: {k1: v1, k2: v2} vs {k2: v2, k1: v1} are equal.
+    // Uses a simple split-on-", " approach (works for scalar property values).
+    if a.starts_with('{') && b.starts_with('{') {
+        if normalize_map_keys(a) == normalize_map_keys(b) {
+            return true;
+        }
     }
     // Try duration semantic comparison.
     let a_dur = parse_duration_semantic(a);

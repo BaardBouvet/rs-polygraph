@@ -298,6 +298,11 @@ pub enum Expression {
         patterns: PatternList,
         where_: Option<Box<Expression>>,
     },
+    /// EXISTS subquery with full clause body (MATCH + WITH + WHERE + RETURN).
+    /// `EXISTS { MATCH (n)-->(m) WITH n, count(*) AS c WHERE c > 2 RETURN true }`.
+    ExistsFullSubquery {
+        clauses: Vec<Clause>,
+    },
     /// CASE expression: `CASE [operand] WHEN val THEN result ... [ELSE default] END`.
     CaseExpression {
         operand: Option<Box<Expression>>,
