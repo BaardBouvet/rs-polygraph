@@ -1,8 +1,9 @@
 # L2 Runtime Support — Roadmap to Full TCK Compliance
 
-**Status**: planned
-**Updated**: 2026-04-23
-**Baseline**: 3488 / 3789 scenarios pass (92.1 %), 153 failed, 148 skipped.
+**Status**: in progress
+**Updated**: 2026-05-14
+**Baseline**: 3757 / 3828 scenarios pass (98.1 %), 71 failed.
+**Current**: 3765 / 3828 scenarios pass (98.3 %), 63 failed — 8 Temporal8 closes.
 **Target**: ≥ 99 % pass + skipped categories collapsed.
 
 This plan describes how to close the remaining gap between the static
@@ -127,7 +128,52 @@ with those bindings inlined as `VALUES`.
 
 ---
 
-## 3. Per-Bucket Designs
+## 4. Implementation Progress
+
+### Phase L2-β: Duration arithmetic via custom SPARQL functions  ✅ DONE (2026-05-14)
+
+Instead of using `TranspileOutput::Continuation` (which would require a 2-phase
+round-trip), duration arithmetic was solved by registering **custom Oxigraph
+SPARQL functions** — a simpler static approach that avoids L2 infrastructure:
+
+| Function URI | Operation |
+|---|---|
+| `urn:polygraph:duration-add` | `dur_a + dur_b` |
+| `urn:polygraph:duration-sub` | `dur_a - dur_b` |
+| `urn:polygraph:duration-mul-num` | `dur * number` |
+| `urn:polygraph:duration-div-num` | `dur / number` |
+
+**LQA change** (`src/lqa/sparql.rs`): In `Expr::Add/Sub/Mul/Div`, when the
+LHS is an `Expr::Property(..)`, emit an `IF(STRSTARTS(STR(?x), "P"), custom_fn(...), arithmetic)` dispatch. For `Add` with two Property operands, the existing list-concat heuristic is preserved as the outer branch, and duration-add as the middle branch.
+
+**Arithmetic functions** (`src/translator/cypher/temporal.rs`): Four new
+`pub` functions (`duration_add_str`, `duration_sub_str`, `duration_mul_num_str`,
+`duration_div_num_str`) + two internal carry helpers (`ns_carry`, `min_carry`).
+Key rules:
+- Add/sub: carry ns→s→min→h only (no h→d or mo→y carry)
+- Mul/div: full cascade via same logic as `temporal_duration_from_map`
+- Sub-nanosecond fractions truncated (not rounded) to match Cypher semantics
+
+**TCK/difftest runners**: custom functions registered via `.with_custom_function(...)` chain on `SparqlEvaluator`. Return `Literal::new_simple_literal` (not `xsd:duration`) to avoid Oxigraph normalizing 32H → 1D8H.
+
+**Result**: 8 new TCK passes (all of Temporal8). No regressions. Difftest 232/232.
+
+---
+
+### Remaining 63 failures (post Phase L2-β)
+
+| Bucket | Count | Mitigation |
+|--------|------:|-----------|
+| L2-deferred (quantifiers, collect, list comprehension) | ~30 | L2-Q1/LC1 |
+| L1-temporal (Temporal10 DST, Temporal2/3 constructors) | 10 | chrono-tz + parser |
+| L1-varlen (variable-length path, named paths) | ~6 | structural |
+| L1-write (Merge5) | 4 | write clause work |
+| L1-structural (properties(), UNWIND variable) | ~7 | structural |
+| L1-other (Match4/5 cardinality, Precedence1) | ~6 | structural |
+
+---
+
+## 5. Backlog
 
 ### 3.1 Q1 — Quantifiers on runtime lists  *(63 failures)*
 

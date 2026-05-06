@@ -979,7 +979,7 @@ single-number "legacy count" headline that conflated read and write fallbacks):
 ```
 Read fallbacks:   ~604 (Phase 7 in progress; baseline 951; L2-blocked floor ~700)
 Write fallbacks:  ~0 LQA-routed (conservative fallbacks remain; Phase 8 in progress; baseline 278)
-TCK pass rate:    3757/3828 (floor: 3757)
+TCK pass rate:    3765/3828 (floor: 3757; +8 Temporal8 via duration arithmetic custom functions)
 Difftest:         232/232 (floor: 232)
 Translator LoC:   L (Phase 8.7 target: → 0; write path now in lqa/write.rs)
 ```

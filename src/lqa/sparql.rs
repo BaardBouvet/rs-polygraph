@@ -3409,34 +3409,51 @@ impl Compiler {
                 } else if matches!(a.as_ref(), Expr::Property(..))
                     && matches!(b.as_ref(), Expr::Property(..))
                 {
-                    // Runtime list-concatenation heuristic: if STR(?a) starts with "["
-                    // the property holds a serialised Cypher list — join the two by
-                    // trimming the trailing "]" of a and the leading "[" of b.
+                    // Runtime dispatch: list OR duration OR numeric addition.
+                    let str_a = SparExpr::FunctionCall(Function::Str, vec![la.clone()]);
+                    let is_list = SparExpr::FunctionCall(
+                        Function::StrStarts,
+                        vec![str_a.clone(), SparExpr::Literal(SparLit::new_simple_literal("["))],
+                    );
+                    let is_dur = SparExpr::FunctionCall(
+                        Function::StrStarts,
+                        vec![str_a.clone(), SparExpr::Literal(SparLit::new_simple_literal("P"))],
+                    );
+                    // List concat: trim trailing ']' of a, leading '[' of b, join with ", ".
                     let one = SparExpr::Literal(SparLit::new_typed_literal(
-                        "1",
-                        NamedNode::new_unchecked(XSD_INTEGER),
+                        "1", NamedNode::new_unchecked(XSD_INTEGER),
                     ));
                     let two = SparExpr::Literal(SparLit::new_typed_literal(
-                        "2",
-                        NamedNode::new_unchecked(XSD_INTEGER),
+                        "2", NamedNode::new_unchecked(XSD_INTEGER),
                     ));
                     let strlen_a = SparExpr::FunctionCall(Function::StrLen, vec![la.clone()]);
-                    let len_minus_1 = SparExpr::Subtract(Box::new(strlen_a), Box::new(one.clone()));
+                    let len_minus_1 =
+                        SparExpr::Subtract(Box::new(strlen_a), Box::new(one.clone()));
                     let head = SparExpr::FunctionCall(
-                        Function::SubStr,
-                        vec![la.clone(), one, len_minus_1],
+                        Function::SubStr, vec![la.clone(), one, len_minus_1],
                     );
-                    let tail = SparExpr::FunctionCall(Function::SubStr, vec![lb.clone(), two]);
+                    let tail =
+                        SparExpr::FunctionCall(Function::SubStr, vec![lb.clone(), two]);
                     let sep = SparExpr::Literal(SparLit::new_simple_literal(", "));
-                    let concat = SparExpr::FunctionCall(Function::Concat, vec![head, sep, tail]);
-                    let str_a = SparExpr::FunctionCall(Function::Str, vec![la.clone()]);
-                    let bracket = SparExpr::Literal(SparLit::new_simple_literal("["));
-                    let is_list = SparExpr::FunctionCall(Function::StrStarts, vec![str_a, bracket]);
+                    let list_concat =
+                        SparExpr::FunctionCall(Function::Concat, vec![head, sep, tail]);
+                    // Duration add: urn:polygraph:duration-add(STR(?a), STR(?b))
+                    let str_b = SparExpr::FunctionCall(Function::Str, vec![lb.clone()]);
+                    let dur_add = SparExpr::FunctionCall(
+                        Function::Custom(NamedNode::new_unchecked(
+                            "urn:polygraph:duration-add",
+                        )),
+                        vec![str_a, str_b],
+                    );
                     let numeric_add = SparExpr::Add(Box::new(la), Box::new(lb));
                     Ok(SparExpr::If(
                         Box::new(is_list),
-                        Box::new(concat),
-                        Box::new(numeric_add),
+                        Box::new(list_concat),
+                        Box::new(SparExpr::If(
+                            Box::new(is_dur),
+                            Box::new(dur_add),
+                            Box::new(numeric_add),
+                        )),
                     ))
                 } else {
                     if let Some(folded) = fold_numeric_binop('+', &la, &lb) {
@@ -3459,6 +3476,27 @@ impl Compiler {
                 }
                 let la = self.lower_expr(a)?;
                 let rb = self.lower_expr(b)?;
+                // Duration-dispatch for property - property subtraction.
+                if matches!(a.as_ref(), Expr::Property(..))
+                    && matches!(b.as_ref(), Expr::Property(..))
+                {
+                    let str_a = SparExpr::FunctionCall(Function::Str, vec![la.clone()]);
+                    let is_dur = SparExpr::FunctionCall(
+                        Function::StrStarts,
+                        vec![str_a.clone(), SparExpr::Literal(SparLit::new_simple_literal("P"))],
+                    );
+                    let str_b = SparExpr::FunctionCall(Function::Str, vec![rb.clone()]);
+                    let dur_sub = SparExpr::FunctionCall(
+                        Function::Custom(NamedNode::new_unchecked("urn:polygraph:duration-sub")),
+                        vec![str_a, str_b],
+                    );
+                    let numeric_sub = SparExpr::Subtract(Box::new(la), Box::new(rb));
+                    return Ok(SparExpr::If(
+                        Box::new(is_dur),
+                        Box::new(dur_sub),
+                        Box::new(numeric_sub),
+                    ));
+                }
                 if let Some(folded) = fold_numeric_binop('-', &la, &rb) {
                     return Ok(folded);
                 }
@@ -3467,12 +3505,56 @@ impl Compiler {
             Expr::Mul(a, b) => {
                 let la = self.lower_expr(a)?;
                 let rb = self.lower_expr(b)?;
+                // Duration * number dispatch when the LHS is a property access.
+                if matches!(a.as_ref(), Expr::Property(..)) {
+                    let str_a = SparExpr::FunctionCall(Function::Str, vec![la.clone()]);
+                    let is_dur = SparExpr::FunctionCall(
+                        Function::StrStarts,
+                        vec![str_a.clone(), SparExpr::Literal(SparLit::new_simple_literal("P"))],
+                    );
+                    let str_b = SparExpr::FunctionCall(Function::Str, vec![rb.clone()]);
+                    let dur_mul = SparExpr::FunctionCall(
+                        Function::Custom(NamedNode::new_unchecked(
+                            "urn:polygraph:duration-mul-num",
+                        )),
+                        vec![str_a, str_b],
+                    );
+                    let numeric_mul = SparExpr::Multiply(Box::new(la), Box::new(rb));
+                    return Ok(SparExpr::If(
+                        Box::new(is_dur),
+                        Box::new(dur_mul),
+                        Box::new(numeric_mul),
+                    ));
+                }
                 if let Some(folded) = fold_numeric_binop('*', &la, &rb) {
                     return Ok(folded);
                 }
                 Ok(SparExpr::Multiply(Box::new(la), Box::new(rb)))
             }
             Expr::Div(a, b) => {
+                // Duration / number dispatch when the LHS is a property access.
+                if matches!(a.as_ref(), Expr::Property(..)) {
+                    let la = self.lower_expr(a)?;
+                    let rb = self.lower_expr(b)?;
+                    let str_a = SparExpr::FunctionCall(Function::Str, vec![la.clone()]);
+                    let is_dur = SparExpr::FunctionCall(
+                        Function::StrStarts,
+                        vec![str_a.clone(), SparExpr::Literal(SparLit::new_simple_literal("P"))],
+                    );
+                    let str_b = SparExpr::FunctionCall(Function::Str, vec![rb.clone()]);
+                    let dur_div = SparExpr::FunctionCall(
+                        Function::Custom(NamedNode::new_unchecked(
+                            "urn:polygraph:duration-div-num",
+                        )),
+                        vec![str_a, str_b],
+                    );
+                    let numeric_div = SparExpr::Divide(Box::new(la), Box::new(rb));
+                    return Ok(SparExpr::If(
+                        Box::new(is_dur),
+                        Box::new(dur_div),
+                        Box::new(numeric_div),
+                    ));
+                }
                 // Constant-fold when both operands are numeric literals.  This
                 // avoids the SPARQL integer/integer → decimal problem: `12 / 4`
                 // folds to `3^^xsd:integer` at compile time rather than emitting

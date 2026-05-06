@@ -152,7 +152,57 @@ pub fn run_one(spec: &QuerySpec) -> RunReport {
 
     // Execute.
     #[expect(deprecated)]
-    let res = store.query_opt(sparql.as_str(), SparqlEvaluator::new());
+    let res = store.query_opt(
+        sparql.as_str(),
+        SparqlEvaluator::new()
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:unsupported-pow"),
+            |args| {
+                let a = match args.first()? { OxTerm::Literal(l) => l.value().parse::<f64>().ok()?, _ => return None };
+                let b = match args.get(1)?  { OxTerm::Literal(l) => l.value().parse::<f64>().ok()?, _ => return None };
+                Some(OxTerm::Literal(oxigraph::model::Literal::new_typed_literal(
+                    a.powf(b).to_string(),
+                    oxigraph::model::NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#double"),
+                )))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-add"),
+            |args| {
+                let a = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let b = match args.get(1)?  { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let r = polygraph::translator::cypher::duration_add_str(&a, &b)?;
+                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(r)))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-sub"),
+            |args| {
+                let a = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let b = match args.get(1)?  { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let r = polygraph::translator::cypher::duration_sub_str(&a, &b)?;
+                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(r)))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-mul-num"),
+            |args| {
+                let dur = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let num = match args.get(1)?  { OxTerm::Literal(l) => l.value().parse::<f64>().ok()?, _ => return None };
+                let r = polygraph::translator::cypher::duration_mul_num_str(&dur, num)?;
+                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(r)))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-div-num"),
+            |args| {
+                let dur = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let num = match args.get(1)?  { OxTerm::Literal(l) => l.value().parse::<f64>().ok()?, _ => return None };
+                let r = polygraph::translator::cypher::duration_div_num_str(&dur, num)?;
+                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(r)))
+            },
+        ),
+    );
     let (actual_columns, actual_rows) = match res {
         Err(e) => {
             return RunReport {

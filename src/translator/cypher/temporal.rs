@@ -1677,12 +1677,123 @@ struct ParsedDuration {
     subsec_ns: i64,
 }
 
+// ── Duration arithmetic ───────────────────────────────────────────────────────
+
+/// Add two ISO 8601 duration strings and return the result.
+/// Returns `None` if either string is not a valid duration.
+/// Carries ns→seconds→minutes→hours (but NOT hours→days or months→years).
+pub fn duration_add_str(a: &str, b: &str) -> Option<String> {
+    duration_arith_str(a, b, false)
+}
+
+/// Subtract duration `b` from `a` and return the ISO 8601 result.
+pub fn duration_sub_str(a: &str, b: &str) -> Option<String> {
+    duration_arith_str(a, b, true)
+}
+
+fn duration_arith_str(a: &str, b: &str, subtract: bool) -> Option<String> {
+    let (a_neg, a_str) = if a.starts_with('-') { (true, &a[1..]) } else { (false, a) };
+    let (b_neg, b_str) = if b.starts_with('-') { (true, &b[1..]) } else { (false, b) };
+    let da = parse_duration_components(a_str)?;
+    let db = parse_duration_components(b_str)?;
+
+    // Sign-adjust components
+    let sign_a: i64 = if a_neg { -1 } else { 1 };
+    let sign_b: i64 = if b_neg { -1 } else { 1 };
+    let sign_b = if subtract { -sign_b } else { sign_b };
+
+    let y  = sign_a * da.years   + sign_b * db.years;
+    let mo = sign_a * da.months  + sign_b * db.months;
+    let d  = sign_a * da.days    + sign_b * db.days;
+
+    // Time: accumulate in nanoseconds then carry ns→s→min→h
+    let total_ns: i128 =
+        (sign_a as i128) * (da.seconds as i128 * 1_000_000_000 + da.subsec_ns as i128)
+      + (sign_b as i128) * (db.seconds as i128 * 1_000_000_000 + db.subsec_ns as i128);
+    let (carry_min_from_s, s_ns) = ns_carry(total_ns);
+
+    let total_min = sign_a * da.minutes + sign_b * db.minutes + carry_min_from_s;
+    let (carry_h_from_min, min) = min_carry(total_min);
+
+    let h = sign_a * da.hours + sign_b * db.hours + carry_h_from_min;
+
+    Some(dur_fmt(y, mo, d, h, min, s_ns))
+}
+
+/// Multiply a duration by a floating-point number.
+/// Cascades fractional components the same way `temporal_duration_from_map` does.
+pub fn duration_mul_num_str(dur: &str, num: f64) -> Option<String> {
+    if num == 1.0 {
+        return Some(dur.to_owned());
+    }
+    let (neg, abs_str) = if dur.starts_with('-') { (true, &dur[1..]) } else { (false, dur) };
+    let d = parse_duration_components(abs_str)?;
+    let eff = if neg { -num } else { num };
+
+    // Scale with cascading (same logic as temporal_duration_from_map).
+    let years_f      = d.years   as f64 * eff;
+    let months_f     = d.months  as f64 * eff + years_f.fract()  * 12.0;
+    let days_f       = d.days    as f64 * eff + months_f.fract() * 30.436875;
+    let hours_f      = d.hours   as f64 * eff + days_f.fract()   * 24.0;
+    let minutes_f    = d.minutes as f64 * eff + hours_f.fract()  * 60.0;
+    let secs_f       = d.seconds as f64 * eff + minutes_f.fract() * 60.0;
+    let ns_extra_f   = d.subsec_ns as f64 * eff;
+
+    let y  = years_f.trunc()  as i64;
+    let mo = months_f.trunc() as i64;
+    let dv = days_f.trunc()   as i64;
+
+    // Seconds + ns → carry into minutes then hours.
+    // Truncate sub-nanosecond fractions: 0.5 ns → 0 ns (Cypher semantics).
+    let total_ns: i128 = (secs_f * 1_000_000_000.0).round() as i128
+                       + ns_extra_f as i128;
+    let (carry_min, s_ns) = ns_carry(total_ns);
+
+    let total_min = minutes_f.trunc() as i64 + carry_min;
+    let (carry_h, min) = min_carry(total_min);
+    let h = hours_f.trunc() as i64 + carry_h;
+
+    Some(dur_fmt(y, mo, dv, h, min, s_ns))
+}
+
+/// Divide a duration by a floating-point number.
+pub fn duration_div_num_str(dur: &str, num: f64) -> Option<String> {
+    if num == 0.0 {
+        return None;
+    }
+    duration_mul_num_str(dur, 1.0 / num)
+}
+
+// ── Duration carry helpers ────────────────────────────────────────────────────
+
+/// Carry nanoseconds into whole minutes + sub-minute ns.
+/// Returns (carry_minutes: i64, remaining_ns_in_i128_for_dur_fmt).
+fn ns_carry(total_ns: i128) -> (i64, i128) {
+    let s_whole = if total_ns >= 0 {
+        total_ns / 1_000_000_000
+    } else {
+        -((-total_ns) / 1_000_000_000)
+    };
+    let remain_ns = total_ns - s_whole * 1_000_000_000;
+    let carry_min = if s_whole >= 0 { s_whole / 60 } else { -((-s_whole) / 60) };
+    let s_final = s_whole - carry_min * 60;
+    (carry_min as i64, s_final * 1_000_000_000 + remain_ns)
+}
+
+/// Carry whole minutes into whole hours + remaining minutes.
+fn min_carry(total_min: i64) -> (i64, i64) {
+    let carry_h = if total_min >= 0 { total_min / 60 } else { -((-total_min) / 60) };
+    let min = total_min - carry_h * 60;
+    (carry_h, min)
+}
+
 /// Parse an ISO 8601 duration string into its numeric components.
 /// Returns None if the string is not a valid duration.
 fn parse_duration_components(s: &str) -> Option<ParsedDuration> {
     if !s.starts_with('P') {
         return None;
     }
+
     let body = &s[1..];
     let t_pos = body.find('T');
     let date_str = t_pos.map_or(body, |p| &body[..p]);

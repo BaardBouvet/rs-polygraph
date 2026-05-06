@@ -2364,10 +2364,12 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
     // unknown-custom-function errors don't break the pow null-propagation tests.
     // When either operand is unbound (Cypher null), spareval returns None before
     // calling the function, so null propagation still works correctly.
+    // Also register duration arithmetic custom functions for L2 runtime evaluation.
     #[expect(deprecated)]
     match store.0.query_opt(
         sparql.as_str(),
-        SparqlEvaluator::new().with_custom_function(
+        SparqlEvaluator::new()
+        .with_custom_function(
             oxigraph::model::NamedNode::new_unchecked("urn:polygraph:unsupported-pow"),
             |args| {
                 use oxigraph::model::Term as OxTerm;
@@ -2387,6 +2389,46 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
                         ),
                     ),
                 ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-add"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let a = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let b = match args.get(1)?  { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let result = polygraph::translator::cypher::duration_add_str(&a, &b)?;
+                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(result)))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-sub"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let a = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let b = match args.get(1)?  { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let result = polygraph::translator::cypher::duration_sub_str(&a, &b)?;
+                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(result)))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-mul-num"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let dur = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let num = match args.get(1)?  { OxTerm::Literal(l) => l.value().parse::<f64>().ok()?, _ => return None };
+                let result = polygraph::translator::cypher::duration_mul_num_str(&dur, num)?;
+                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(result)))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-div-num"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let dur = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                let num = match args.get(1)?  { OxTerm::Literal(l) => l.value().parse::<f64>().ok()?, _ => return None };
+                let result = polygraph::translator::cypher::duration_div_num_str(&dur, num)?;
+                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(result)))
             },
         ),
     ) {
