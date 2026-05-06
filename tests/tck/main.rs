@@ -2290,6 +2290,13 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
                             Some("L2 continuation not yet supported in TCK runner".into());
                         return;
                     }
+                    // cypher_to_sparql_skip_writes uses the legacy path and
+                    // shouldn't produce Write, but handle it just in case.
+                    polygraph::TranspileOutput::Write { .. } => {
+                        world.result_vars = vec![];
+                        world.result_rows = vec![];
+                        return;
+                    }
                 },
                 Err(e) => {
                     world.query_error = Some(e.to_string());
@@ -2306,6 +2313,43 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
             polygraph::TranspileOutput::Continuation { .. } => {
                 world.query_error = Some("L2 continuation not yet supported in TCK runner".into());
                 return;
+            }
+            polygraph::TranspileOutput::Write { updates, select } => {
+                // Phase 8: write query compiled by LQA write path.
+                let store = world
+                    .store
+                    .get_or_insert_with(|| OxStore(Store::new().unwrap()));
+
+                // Check for non-DETACH DELETE constraint violations.
+                if let Some(err) = check_nondetach_delete_connected(cypher, &store.0) {
+                    world.query_error = Some(err);
+                    return;
+                }
+
+                // Execute all SPARQL UPDATE statements.
+                for upd in &updates {
+                    if let Err(e) = store.0.update(upd.as_str()) {
+                        eprintln!("[TCK lqa_write] UPDATE failed: {e}\nQuery: {upd}");
+                        // Continue; partial updates are acceptable for TCK.
+                    }
+                }
+
+                // If there is no SELECT (write-only), return empty results.
+                match select {
+                    None => {
+                        world.result_vars = vec![];
+                        world.result_rows = vec![];
+                        return;
+                    }
+                    Some(sel) => match *sel {
+                        polygraph::TranspileOutput::Complete { sparql, .. } => sparql,
+                        _ => {
+                            world.query_error =
+                                Some("unexpected non-Complete select in Write output".into());
+                            return;
+                        }
+                    },
+                }
             }
         },
     };

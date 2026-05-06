@@ -182,6 +182,61 @@ fn try_lqa_path(
         Err(e) => return Err(e),
     };
 
+    // ── Write path ────────────────────────────────────────────────────────
+    if lqa::write::contains_write(&op) {
+        let base_iri = engine.base_iri();
+        let cw = match lqa::write::compile_write(&op, base_iri.as_deref()) {
+            Ok(cw) => cw,
+            Err(PolygraphError::Unsupported { ref construct, .. }) => {
+                if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
+                    eprintln!("[LEGACY] lqa_write_compile=Unsupported construct={construct}");
+                }
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        // For the SELECT part (RETURN clause), use translate_skip_writes so that
+        // SET-rewritten WHERE conditions are handled correctly.  The LQA write
+        // compiler deliberately does NOT generate the SELECT (see CompiledWrite::has_return).
+        let select = if cw.has_return {
+            let result = match translator::cypher::translate_skip_writes(
+                ast,
+                engine.base_iri().as_deref(),
+                engine.supports_rdf_star(),
+            ) {
+                Ok(r) => r,
+                Err(PolygraphError::Unsupported { ref construct, .. })
+                | Err(PolygraphError::UnsupportedFeature {
+                    feature: ref construct,
+                }) => {
+                    if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
+                        eprintln!(
+                            "[LEGACY] lqa_write_select=Unsupported construct={construct}"
+                        );
+                    }
+                    return Ok(None); // fall back entirely to legacy path
+                }
+                Err(e) => return Err(e),
+            };
+            let sparql = match engine.finalize(result.sparql) {
+                Ok(s) => s,
+                Err(PolygraphError::Unsupported { .. })
+                | Err(PolygraphError::UnsupportedFeature { .. }) => {
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            };
+            Some(Box::new(TranspileOutput::complete(sparql, result.schema)))
+        } else {
+            None
+        };
+        return Ok(Some(TranspileOutput::Write {
+            updates: cw.update_strings,
+            select,
+        }));
+    }
+
+    // ── Read path ─────────────────────────────────────────────────────────
     let compiled = match lqa::sparql::compile(&op, engine.base_iri().as_deref()) {
         Ok(c) => c,
         Err(PolygraphError::Unsupported { ref construct, .. })
@@ -368,22 +423,30 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                 }
             }
             Clause::Unwind(_) => clause_kinds.push("unwind"),
-            Clause::Create(_) => return Some("write_create"),
-            Clause::Set(_) => return Some("write_set"),
-            Clause::Remove(_) => return Some("write_remove"),
-            Clause::Delete(_) => return Some("write_delete"),
-            Clause::Merge(_) => return Some("write_merge"),
+            Clause::Create(_) => clause_kinds.push("write"),
+            Clause::Set(_) => clause_kinds.push("write"),
+            Clause::Remove(_) => clause_kinds.push("write"),
+            Clause::Delete(_) => clause_kinds.push("write"),
+            Clause::Merge(_) => clause_kinds.push("write"),
             Clause::Call(_) => return Some("write_call"),
             Clause::Union { .. } => clause_kinds.push("union"),
         }
     }
 
-    // Route queries through LQA for any shape ending in "return".
-    // A bare-RETURN UNION (RETURN…UNION…RETURN) is also handled by LQA since
-    // lower_clauses() splits on UNION markers.
-    {
+    // Determine whether this is a write query or a pure-read query.
+    let has_write = clause_kinds.iter().any(|&k| k == "write");
+
+    // Route queries through LQA:
+    // - Pure-read queries must end with "return".
+    // - Write queries can end with "write" (no RETURN) or "return" (RETURN clause after write).
+    if !has_write {
         let last = clause_kinds.last().copied();
         if last != Some("return") {
+            return Some("clause_shape");
+        }
+    } else {
+        let last = clause_kinds.last().copied();
+        if last != Some("write") && last != Some("return") {
             return Some("clause_shape");
         }
     }
@@ -590,27 +653,37 @@ fn expr_has_real_aggregate(expr: &ast::cypher::Expression) -> bool {
         | Expression::Or(a, b)
         | Expression::Xor(a, b)
         | Expression::Comparison(a, _, b)
-        | Expression::Subscript(a, b) => {
-            expr_has_real_aggregate(a) || expr_has_real_aggregate(b)
-        }
-        Expression::Not(e) | Expression::Negate(e) | Expression::IsNull(e) | Expression::IsNotNull(e) => {
-            expr_has_real_aggregate(e)
-        }
+        | Expression::Subscript(a, b) => expr_has_real_aggregate(a) || expr_has_real_aggregate(b),
+        Expression::Not(e)
+        | Expression::Negate(e)
+        | Expression::IsNull(e)
+        | Expression::IsNotNull(e) => expr_has_real_aggregate(e),
         Expression::Property(e, _) => expr_has_real_aggregate(e),
         Expression::FunctionCall { args, .. } => args.iter().any(expr_has_real_aggregate),
-        Expression::CaseExpression { operand, whens, else_expr } => {
+        Expression::CaseExpression {
+            operand,
+            whens,
+            else_expr,
+        } => {
             operand.as_deref().map_or(false, expr_has_real_aggregate)
-                || whens.iter().any(|(w, t)| {
-                    expr_has_real_aggregate(w) || expr_has_real_aggregate(t)
-                })
+                || whens
+                    .iter()
+                    .any(|(w, t)| expr_has_real_aggregate(w) || expr_has_real_aggregate(t))
                 || else_expr.as_deref().map_or(false, expr_has_real_aggregate)
         }
-        Expression::ListComprehension { list, predicate, projection, .. } => {
+        Expression::ListComprehension {
+            list,
+            predicate,
+            projection,
+            ..
+        } => {
             expr_has_real_aggregate(list)
                 || predicate.as_deref().map_or(false, expr_has_real_aggregate)
                 || projection.as_deref().map_or(false, expr_has_real_aggregate)
         }
-        Expression::QuantifierExpr { list, predicate, .. } => {
+        Expression::QuantifierExpr {
+            list, predicate, ..
+        } => {
             expr_has_real_aggregate(list)
                 || predicate.as_deref().map_or(false, expr_has_real_aggregate)
         }

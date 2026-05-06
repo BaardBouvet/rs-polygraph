@@ -93,6 +93,50 @@ pub fn run_one(spec: &QuerySpec) -> RunReport {
                 error: Some("L2 continuation: out of scope for curated suite".into()),
             }
         }
+        Ok(TranspileOutput::Write { updates, select }) => {
+            // Execute UPDATE statements.
+            for upd in &updates {
+                if let Err(e) = store.update(upd.as_str()) {
+                    return RunReport {
+                        name: spec.name.clone(),
+                        spec_ref: spec.spec_ref.clone(),
+                        outcome: ComparisonOutcome::Match,
+                        sparql: upd.clone(),
+                        actual_columns: vec![],
+                        actual_rows: vec![],
+                        error: Some(format!("write update: {e}")),
+                    };
+                }
+            }
+            match select {
+                None => {
+                    // Write-only: return empty results (no ComparisonOutcome needed).
+                    return RunReport {
+                        name: spec.name.clone(),
+                        spec_ref: spec.spec_ref.clone(),
+                        outcome: ComparisonOutcome::Match,
+                        sparql: String::new(),
+                        actual_columns: vec![],
+                        actual_rows: vec![],
+                        error: None,
+                    };
+                }
+                Some(sel) => match *sel {
+                    TranspileOutput::Complete { sparql, .. } => sparql,
+                    _ => {
+                        return RunReport {
+                            name: spec.name.clone(),
+                            spec_ref: spec.spec_ref.clone(),
+                            outcome: ComparisonOutcome::Match,
+                            sparql: String::new(),
+                            actual_columns: vec![],
+                            actual_rows: vec![],
+                            error: Some("unexpected non-Complete select in Write output".into()),
+                        };
+                    }
+                },
+            }
+        }
         Err(e) => {
             return RunReport {
                 name: spec.name.clone(),

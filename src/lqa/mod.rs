@@ -49,6 +49,7 @@ pub mod lower;
 pub mod normalize;
 pub mod op;
 pub mod sparql;
+pub mod write;
 
 // Re-export the most commonly used types for ergonomic use at the crate root.
 pub use expr::{AggKind, CmpOp, Expr, Literal, QuantKind, SortDir, Type, UnaryOp};

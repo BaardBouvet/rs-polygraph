@@ -29,6 +29,8 @@ pub type BindingRow = Vec<(String, Option<String>)>;
 /// - [`TranspileOutput::Complete`]: a single SPARQL query ready to execute.
 /// - [`TranspileOutput::Continuation`]: a two-phase (or N-phase) execution
 ///   pipeline where phase-1 results are fed back to produce phase-2 query.
+/// - [`TranspileOutput::Write`]: a write query (CREATE/SET/DELETE/MERGE/REMOVE)
+///   that produces one or more SPARQL UPDATE strings plus an optional SELECT.
 ///
 /// For single-phase queries (the common case), callers access `.sparql`
 /// and `.schema` via the accessor methods or `match`. The [`Transpiler`]
@@ -56,6 +58,19 @@ pub enum TranspileOutput {
         continue_fn:
             Box<dyn FnOnce(Vec<BindingRow>) -> Result<TranspileOutput, PolygraphError> + Send>,
     },
+
+    /// Write-clause output: one or more SPARQL UPDATE strings to execute,
+    /// plus an optional SELECT for queries that also have a `RETURN` clause.
+    ///
+    /// Callers must execute each UPDATE in order, then (if `select` is `Some`)
+    /// run the SELECT and map its results normally.
+    Write {
+        /// Ordered SPARQL UPDATE strings to execute.
+        updates: Vec<String>,
+        /// When the Cypher query has a `RETURN` clause: the `Complete` SELECT
+        /// to run after all updates have been applied.
+        select: Option<Box<TranspileOutput>>,
+    },
 }
 
 impl std::fmt::Debug for TranspileOutput {
@@ -71,6 +86,11 @@ impl std::fmt::Debug for TranspileOutput {
                 .field("phase1", phase1)
                 .field("continue_fn", &"<closure>")
                 .finish(),
+            Self::Write { updates, select } => f
+                .debug_struct("Write")
+                .field("updates", updates)
+                .field("select", select)
+                .finish(),
         }
     }
 }
@@ -81,7 +101,7 @@ impl TranspileOutput {
         matches!(self, Self::Complete { .. })
     }
 
-    /// Unwrap as a `Complete` output, panicking on `Continuation`.
+    /// Unwrap as a `Complete` output, panicking on `Continuation` or `Write`.
     ///
     /// Prefer using the [`crate::runtime`] module to drive continuation
     /// chains automatically.
@@ -91,16 +111,19 @@ impl TranspileOutput {
             Self::Continuation { .. } => panic!(
                 "called TranspileOutput::unwrap_complete() on a Continuation"
             ),
+            Self::Write { .. } => panic!(
+                "called TranspileOutput::unwrap_complete() on a Write"
+            ),
         }
     }
 
     /// Convenience: access the SPARQL string when this is `Complete`.
     ///
-    /// Returns `None` for `Continuation` outputs.
+    /// Returns `None` for `Continuation` and `Write` outputs.
     pub fn sparql(&self) -> Option<&str> {
         match self {
             Self::Complete { sparql, .. } => Some(sparql.as_str()),
-            Self::Continuation { .. } => None,
+            Self::Continuation { .. } | Self::Write { .. } => None,
         }
     }
 
@@ -108,7 +131,7 @@ impl TranspileOutput {
     pub fn schema(&self) -> Option<&ProjectionSchema> {
         match self {
             Self::Complete { schema, .. } => Some(schema),
-            Self::Continuation { .. } => None,
+            Self::Continuation { .. } | Self::Write { .. } => None,
         }
     }
 
@@ -126,6 +149,11 @@ impl TranspileOutput {
             Self::Continuation { .. } => Err(PolygraphError::UnsupportedFeature {
                 feature: "map_results() called on a Continuation output; \
                           use the runtime driver instead"
+                    .to_string(),
+            }),
+            Self::Write { .. } => Err(PolygraphError::UnsupportedFeature {
+                feature: "map_results() called on a Write output; \
+                          execute the updates first, then call map_results() on the select"
                     .to_string(),
             }),
         }
