@@ -194,6 +194,14 @@ struct Compiler {
     /// Stores the key-value pairs so that `m.k` can be constant-folded at
     /// compile time without emitting a runtime SPARQL lookup.
     scalar_map_exprs: HashMap<String, Vec<(String, Expr)>>,
+    /// For `collect()` aggregates: maps output alias → raw GROUP_CONCAT variable.
+    /// After the GROUP pattern, each entry is used to emit
+    /// `BIND(CONCAT("[", COALESCE(?raw, ""), "]") AS ?alias)`.
+    collect_post_wraps: Vec<(String, Variable)>,
+    /// BINDs that must be emitted inside a GROUP body for collect() args.
+    /// Each entry is `(proj_var, arg_expr)` → `BIND(arg_expr AS proj_var)`
+    /// inserted into `group_inner` before the GROUP is assembled.
+    collect_group_binds: Vec<(Variable, SparExpr)>,
 }
 
 impl Compiler {
@@ -222,6 +230,8 @@ impl Compiler {
             const_int_vars: HashMap::new(),
             list_size_vars: HashMap::new(),
             scalar_map_exprs: HashMap::new(),
+            collect_post_wraps: Vec::new(),
+            collect_group_binds: Vec::new(),
         }
     }
 
@@ -830,6 +840,17 @@ impl Compiler {
             // Flush all pending triples (group-key property triples +
             // agg-arg property triples) into the inner pattern.
             let mut group_inner = self.flush_pending(flushed);
+            // Apply collect() arg BINDs inside the group body.
+            // These must come before complex_group_binds so the collect proj
+            // variables are in scope for any group-key expression that might
+            // reference them (edge case, but safe to order first).
+            for (var, expr) in std::mem::take(&mut self.collect_group_binds) {
+                group_inner = GraphPattern::Extend {
+                    inner: Box::new(group_inner),
+                    variable: var,
+                    expression: expr,
+                };
+            }
             // Apply complex group-key BIND expressions inside the group body.
             for (var, expr) in complex_group_binds {
                 group_inner = GraphPattern::Extend {
@@ -843,16 +864,35 @@ impl Compiler {
             // containing null. Without this, Oxigraph's MAX/MIN/SUM over a VALUES
             // block that has UNDEF rows may return null instead of the correct
             // aggregate of non-null values (non-conformant with SPARQL 1.1 §18.5.1).
+            // NOTE: do NOT add FILTER for variables used exclusively in collect()
+            // aggregates: collect() ignores nulls naturally via GROUP_CONCAT's UNDEF
+            // skip, and adding FILTER would cause GROUP BY () to return 0 rows on
+            // all-null input (instead of 1 row with empty collect result).
+            let collect_agg_vars: std::collections::HashSet<&str> = agg_items
+                .iter()
+                .filter(|ai| matches!(&ai.expr, Expr::Aggregate { kind: AggKind::Collect, .. }))
+                .filter_map(|ai| {
+                    if let Expr::Aggregate { arg: Some(a), .. } = &ai.expr {
+                        if let Expr::Variable { name, .. } = a.as_ref() {
+                            return Some(name.as_str());
+                        }
+                    }
+                    None
+                })
+                .collect();
             for null_var_name in &self.unwind_null_vars {
                 // Only filter if this variable actually appears in the aggregation.
-                let var_appears_in_agg = agg_items.iter().any(|ai| {
+                let var_appears_in_non_collect_agg = agg_items.iter().any(|ai| {
+                    if collect_agg_vars.contains(null_var_name.as_str()) {
+                        return false; // this var is only used in collect(), skip filter
+                    }
                     if let Expr::Aggregate { arg: Some(a), .. } = &ai.expr {
                         matches!(a.as_ref(), Expr::Variable { name, .. } if name == null_var_name)
                     } else {
                         false
                     }
                 });
-                if var_appears_in_agg {
+                if var_appears_in_non_collect_agg {
                     let bound_filter = SparExpr::Bound(Self::var(null_var_name));
                     group_inner = GraphPattern::Filter {
                         expr: bound_filter,
@@ -869,9 +909,32 @@ impl Compiler {
 
             // Emit any remaining non-group, non-agg proj items as Extends
             // (aggregate output aliases need no Extend; they're bound by the Group).
+            // collect() aliases also get their projected_columns pushed here
+            // (the Extend was already added in the collect_post_wraps loop above).
             let agg_alias_set: std::collections::HashSet<&str> =
                 agg_items.iter().map(|a| a.alias.as_str()).collect();
             let mut extended = group_pattern;
+            // Wrap collect() outputs in "[…]" and register their projected columns.
+            for (alias, raw_gc_var) in std::mem::take(&mut self.collect_post_wraps) {
+                let wrapped = SparExpr::FunctionCall(
+                    Function::Concat,
+                    vec![
+                        SparExpr::Literal(SparLit::new_simple_literal("[")),
+                        SparExpr::Coalesce(vec![
+                            SparExpr::Variable(raw_gc_var),
+                            SparExpr::Literal(SparLit::new_simple_literal("")),
+                        ]),
+                        SparExpr::Literal(SparLit::new_simple_literal("]")),
+                    ],
+                );
+                let alias_var = Self::var(&alias);
+                extended = GraphPattern::Extend {
+                    inner: Box::new(extended),
+                    variable: alias_var,
+                    expression: wrapped,
+                };
+                self.projected_columns.push(scalar_col(alias));
+            }
             for pi in proj_items {
                 if agg_alias_set.contains(pi.alias.as_str()) {
                     // Aggregate output: variable bound by the Group pattern.
@@ -1139,15 +1202,93 @@ impl Compiler {
                     distinct: *distinct,
                 },
                 AggKind::Collect => {
-                    // collect() maps to SPARQL GROUP_CONCAT which serialises to a
-                    // string, not a list.  Cypher `collect()` semantics require a
-                    // true list type which the LQA path doesn't yet encode; fall
-                    // back to the legacy translator for any query using collect().
-                    return Err(PolygraphError::Unsupported {
-                        construct: "collect() aggregate".into(),
-                        spec_ref: "openCypher 9 §3.4.6".into(),
-                        reason: "collect() requires list encoding not yet in LQA path; legacy fallback applies".into(),
-                    });
+                    // collect() → SPARQL GROUP_CONCAT with Cypher list serialisation.
+                    // Values are encoded as: number/boolean → STR(?v),
+                    // string → CONCAT("'", STR(?v), "'"), null/UNDEF → "null".
+                    // The raw GROUP_CONCAT output is wrapped in "[" … "]" via a
+                    // post-GROUP Extend (stored in self.collect_post_wraps).
+                    let arg_expr = match arg {
+                        Some(a) => a.as_ref(),
+                        None => return Err(PolygraphError::Translation {
+                            message: "collect() requires an argument".into(),
+                        }),
+                    };
+                    let opt_before_inner = self.pending_optional_triples.len();
+                    let arg_spar = self.lower_expr(arg_expr)?;
+                    // If lower_expr added optional triples, the arg involves a nullable
+                    // variable (e.g. collect(n.prop) where n comes from OPTIONAL MATCH).
+                    // This creates incorrect cross-join semantics in a single GROUP BY;
+                    // fall back to legacy for correct handling.
+                    if self.pending_optional_triples.len() > opt_before_inner {
+                        self.pending_optional_triples.drain(opt_before_inner..);
+                        return Err(PolygraphError::Unsupported {
+                            construct: "collect() aggregate".into(),
+                            spec_ref: "openCypher 9 §3.4.6".into(),
+                            reason: "collect() on nullable (OPTIONAL MATCH) property requires legacy path".into(),
+                        });
+                    }
+                    // For node/relationship variables, fall back to legacy: we cannot
+                    // serialise graph elements to the "[...]" list string format here.
+                    if let SparExpr::Variable(ref v) = arg_spar {
+                        if self.scan_vars.contains(v.as_str()) {
+                            return Err(PolygraphError::Unsupported {
+                                construct: "collect() aggregate".into(),
+                                spec_ref: "openCypher 9 §3.4.6".into(),
+                                reason: "collect() on node/relationship variable requires legacy path".into(),
+                            });
+                        }
+                    }
+                    // Bind the arg expression to a fresh variable inside the GROUP body.
+                    let proj_var = self.fresh("gc_proj");
+                    self.collect_group_binds.push((proj_var.clone(), arg_spar));
+                    let v = SparExpr::Variable(proj_var.clone());
+                    // Value encoding: numbers/booleans → STR, strings → quoted.
+                    // No BOUND check: openCypher's collect() ignores null values, and
+                    // GROUP_CONCAT naturally skips UNDEF rows, so null values are
+                    // excluded from the collected list automatically.
+                    let dt = SparExpr::FunctionCall(Function::Datatype, vec![v.clone()]);
+                    let mk_nn = |iri: &str| SparExpr::NamedNode(NamedNode::new_unchecked(iri));
+                    let is_num_or_bool = SparExpr::And(
+                        Box::new(SparExpr::FunctionCall(Function::IsLiteral, vec![v.clone()])),
+                        Box::new(SparExpr::Or(
+                            Box::new(SparExpr::Or(
+                                Box::new(SparExpr::Equal(Box::new(dt.clone()), Box::new(mk_nn(XSD_INTEGER)))),
+                                Box::new(SparExpr::Equal(Box::new(dt.clone()), Box::new(mk_nn(XSD_DOUBLE)))),
+                            )),
+                            Box::new(SparExpr::Or(
+                                Box::new(SparExpr::Equal(Box::new(dt.clone()), Box::new(mk_nn(XSD_BOOLEAN)))),
+                                Box::new(SparExpr::Or(
+                                    Box::new(SparExpr::Equal(Box::new(dt.clone()), Box::new(mk_nn("http://www.w3.org/2001/XMLSchema#long")))),
+                                    Box::new(SparExpr::Or(
+                                        Box::new(SparExpr::Equal(Box::new(dt.clone()), Box::new(mk_nn("http://www.w3.org/2001/XMLSchema#decimal")))),
+                                        Box::new(SparExpr::Equal(Box::new(dt), Box::new(mk_nn("http://www.w3.org/2001/XMLSchema#float")))),
+                                    )),
+                                )),
+                            )),
+                        )),
+                    );
+                    let enc = SparExpr::If(
+                        Box::new(is_num_or_bool),
+                        Box::new(SparExpr::FunctionCall(Function::Str, vec![v.clone()])),
+                        Box::new(SparExpr::FunctionCall(Function::Concat, vec![
+                            SparExpr::Literal(SparLit::new_simple_literal("'")),
+                            SparExpr::FunctionCall(Function::Str, vec![v]),
+                            SparExpr::Literal(SparLit::new_simple_literal("'")),
+                        ])),
+                    );
+                    let raw_gc_var = self.fresh("gc_raw");
+                    self.collect_post_wraps.push((ai.alias.clone(), raw_gc_var.clone()));
+                    let gc_agg = AggregateExpression::FunctionCall {
+                        name: AggregateFunction::GroupConcat {
+                            separator: Some(", ".to_string()),
+                        },
+                        expr: enc,
+                        distinct: *distinct,
+                    };
+                    // Return raw_gc_var (not out_var/alias) so the GROUP pattern binds
+                    // the raw separated string.  The alias gets the "[…]" wrapper via
+                    // collect_post_wraps applied after the GROUP pattern is built.
+                    return Ok((raw_gc_var, gc_agg));
                 }
                 AggKind::CountStar => AggregateExpression::CountSolutions {
                     distinct: *distinct,

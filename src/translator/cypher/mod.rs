@@ -2458,9 +2458,9 @@ impl TranslationState {
                         // (x IN (?list) ≡ x = ?list), so we use our custom list-contains function
                         // which correctly parses the list string for membership checking.
                         SparExpr::FunctionCall(
-                            spargebra::algebra::Function::Custom(
-                                NamedNode::new_unchecked("urn:polygraph:list-contains"),
-                            ),
+                            spargebra::algebra::Function::Custom(NamedNode::new_unchecked(
+                                "urn:polygraph:list-contains",
+                            )),
                             vec![r, l], // list string first, needle second
                         )
                     }
