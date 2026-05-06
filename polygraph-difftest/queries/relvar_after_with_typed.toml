@@ -1,0 +1,24 @@
+name = "relvar_after_with_typed"
+description = "Relationship variable bound in MATCH survives WITH and constrains a second MATCH."
+spec_ref = "openCypher 9 §4.4 WITH — passing bound relationship variables"
+
+cypher = """
+MATCH (a1)-[r:T]->()
+WITH r, a1
+MATCH (a1)-[r:T]->(b2)
+RETURN a1.name AS a, b2.name AS b
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["A"], properties = { name = "alice" } },
+    { id = "b", labels = ["B"], properties = { name = "bob"   } },
+]
+edges = [
+    { id = "e1", from = "a", to = "b", rel_type = "T", properties = {} },
+]
+
+[expected]
+columns = ["a", "b"]
+rows = [["alice", "bob"]]
+order = "bag"

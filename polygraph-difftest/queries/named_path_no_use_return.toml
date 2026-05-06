@@ -1,18 +1,28 @@
+name = "named_path_no_use_return"
+description = "Named path variable used only for length(), not returned directly."
+spec_ref = "openCypher 9 §6.3.2 — length(path)"
+
 cypher = """
 MATCH p = (a:Person)-[:KNOWS]->(b:Person)
 RETURN a.name AS name, length(p) AS hops
 ORDER BY name
 """
 
-[[graphs]]
-triples = [
-  ["ex:alice", "rdf:type", "ex:Person"],
-  ["ex:bob",   "rdf:type", "ex:Person"],
-  ["ex:alice", "ex:name",  "\"Alice\""],
-  ["ex:bob",   "ex:name",  "\"Bob\""],
-  ["ex:alice", "ex:KNOWS", "ex:bob"],
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
 ]
-expected = [
-  [{ name = "Alice", hops = "1" }],
-  [{ name = "Bob",   hops = "1" }],
+edges = [
+    { id = "e1", from = "alice", to = "bob",   rel_type = "KNOWS", properties = {} },
+    { id = "e2", from = "bob",   to = "carol", rel_type = "KNOWS", properties = {} },
 ]
+
+[expected]
+columns = ["name", "hops"]
+rows = [
+    ["Alice", 1],
+    ["Bob",   1],
+]
+order = "ordered"

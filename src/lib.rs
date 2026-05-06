@@ -390,13 +390,48 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
 
     let mut bound_vars: HashSet<&str> = HashSet::new();
     let mut seen_with = false;
+    // Track which named rel-vars are currently "live" for cross-WITH reuse.
+    // A rel-var survives a WITH only if it appears as a simple identity
+    // passthrough item (alias == original name, expression is a plain variable).
+    // Any WITH that renames a variable (alias != source) makes the flat SPARQL
+    // variable chain unreliable, so we clear live_rel_vars entirely.
+    let mut live_rel_vars: HashSet<&str> = HashSet::new();
     for c in &ast.clauses {
         match c {
             Clause::With(w) => {
                 seen_with = true;
                 use ast::cypher::ReturnItems;
+                let mut new_bound: HashSet<&str> = HashSet::new();
                 if let ReturnItems::Explicit(items) = &w.items {
-                    let mut new_bound: HashSet<&str> = HashSet::new();
+                    // Detect variable renames (alias ≠ source var name).
+                    let has_rename = items.iter().any(|item| {
+                        if let ast::cypher::Expression::Variable(v) = &item.expression {
+                            item.alias.as_deref().map_or(false, |a| a != v.as_str())
+                        } else {
+                            false
+                        }
+                    });
+                    if has_rename {
+                        // With-variable renames break LQA's flat variable model;
+                        // cross-WITH rel-var reuse is unsafe after any rename.
+                        live_rel_vars.clear();
+                    } else {
+                        // No renames: rel-vars survive if they are identity-passthrough
+                        // items in this WITH (regardless of whether aggregates also appear).
+                        let surviving: HashSet<&str> = items
+                            .iter()
+                            .filter_map(|item| {
+                                if let ast::cypher::Expression::Variable(v) = &item.expression {
+                                    let alias = item.alias.as_deref().unwrap_or(v.as_str());
+                                    if alias == v.as_str() && live_rel_vars.contains(v.as_str()) {
+                                        return Some(v.as_str());
+                                    }
+                                }
+                                None
+                            })
+                            .collect();
+                        live_rel_vars = surviving;
+                    }
                     for item in items {
                         if let Some(alias) = item.alias.as_deref() {
                             new_bound.insert(alias);
@@ -429,8 +464,22 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                                 if pattern.variable.is_some() && r.range.is_some() {
                                     return Some("named_path_varlen");
                                 }
-                                if r.variable.is_some() && seen_with {
-                                    return Some("relvar_after_with");
+                                // Cross-WITH rel-var handling: if a named rel-var appears
+                                // after a WITH clause, only allow LQA when the var was
+                                // explicitly passed through all preceding WITHs as an
+                                // identity item (live_rel_vars).  Any other case (fresh
+                                // var after WITH, aggregated-away var reused, renamed var)
+                                // is routed to legacy to avoid BIND conflicts and
+                                // cross-product issues in LQA's flat WHERE model.
+                                if let Some(rv) = r.variable.as_deref() {
+                                    if seen_with && !live_rel_vars.contains(rv) {
+                                        return Some("relvar_after_with");
+                                    }
+                                    // Register this rel-var as live for potential future
+                                    // cross-WITH reuse (unsafe cast away lifetime: the
+                                    // string is borrowed from ast which lives for the
+                                    // duration of this function).
+                                    live_rel_vars.insert(rv);
                                 }
                                 if let Some(range) = &r.range {
                                     if range.upper.is_none() {

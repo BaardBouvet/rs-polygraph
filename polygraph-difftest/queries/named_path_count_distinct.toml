@@ -1,11 +1,26 @@
+name = "named_path_count_distinct"
+description = "count(distinct p) on a named path counts matched paths."
+spec_ref = "openCypher 9 §3.4.2 — COUNT"
+
 cypher = """
-MATCH p = (n)-->(b)
-RETURN count(distinct p) AS c
+MATCH (n:Item)-->(b:Item)
+MATCH q = (n)-->(b)
+RETURN count(distinct q) AS c
 """
 
-[[graphs]]
-triples = [
-  ["ex:n1", "ex:rel", "ex:b1"],
-  ["ex:n2", "ex:rel", "ex:b2"],
+[fixture]
+nodes = [
+    { id = "n1", labels = ["Item"], properties = {} },
+    { id = "b1", labels = ["Item"], properties = {} },
+    { id = "n2", labels = ["Item"], properties = {} },
+    { id = "b2", labels = ["Item"], properties = {} },
 ]
-expected = [[{ c = "2" }]]
+edges = [
+    { id = "e1", from = "n1", to = "b1", rel_type = "REL", properties = {} },
+    { id = "e2", from = "n2", to = "b2", rel_type = "REL", properties = {} },
+]
+
+[expected]
+columns = ["c"]
+rows = [[2]]
+order = "bag"

@@ -1,7 +1,8 @@
 # Spec-First Pivot — From TCK-Driven Patches to Semantics-Driven Translation
 
 **Status**: in progress
-**Updated**: 2026-05-05 (Phase 7 in progress: Bucket 4 temporal done, Bucket 7 range() done, keys() done, Buckets 1+2 Expr::List/Map done; TCK 3757/3828; difftest 224/224; read fallbacks 545 lqa_compile=Unsupported — see Phase 7 progress)
+**Status**: in progress
+**Updated**: 2026-05-06 (Phase 7 in progress: Bucket 4 temporal done, Bucket 7 range() done, keys() done, Buckets 1+2 Expr::List/Map done, Bucket 5 named-path done, Bucket 8 relvar_after_with partially done — 10 of 21 fallbacks eliminated, 11 remain for rename/aggregate/cross-product edge cases; TCK 3757/3828; difftest 226/226; read fallbacks reduced)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,
@@ -673,6 +674,7 @@ Difftest:         220/220
 | 2026-05-05 | 11 — keys() IN expression | −1 | 'literal' IN keys(node_var) → EXISTS { ?n <base:prop> ?_kv } |
 | 2026-05-05 | 5 — named path (fixed-hop) | ~43 LQA-routed | removed `named_path` guard; added `named_path_varlen` + `named_path_with_real_agg` guards; `count(p)→COUNT(*)`, `nodes(p)→CONCAT`, `RETURN p→Err`; 3 difftest queries added |
 | 2026-05-05 | 1+2 — Expr::List + Expr::Map | −59 net | String serialisation ported; null/ordering/dynamic-concat guards added; 4 difftest queries added (224 total) |
+| 2026-05-06 | 8 — relvar_after_with (partial) | 0 net TCK (all 21 were already passing via legacy) | `lower_expand_relvar_reuse` added; `live_rel_vars` tracking in `is_lqa_safe` enables safe identity-passthrough reuse; 10 of 21 fallbacks eliminated; 2 difftest queries added (226 total); 11 rename/aggregate/cross-product cases kept in legacy |
 
 **Ordered queue (next-up first):**
 
@@ -680,9 +682,12 @@ Permanent constructs only — L2-deferred buckets (3, 6, 9) are NOT in this queu
 
 1. ~~**Buckets 1+2 — `Expr::List` and `Expr::Map`** (272). DONE — −59 net.~~
 2. ~~**Bucket 5 — named path** (87). DONE — ~43 queries now LQA-routed.~~
-3. **Bucket 8 — `relvar_after_with`** (19 of 41). Port legacy's treatment of
-   relationship variables that cross a WITH boundary. The `varlen_named_relvar` (12)
-   and `unbounded_varlen_unlabeled` (9) sub-buckets map to failing scenarios — keep those guards.
+3. ~~**Bucket 8 — `relvar_after_with`** (19 of 41). PARTIAL — 10 of 21 fallbacks~~
+   ~~eliminated. Simple identity-passthrough reuse now LQA-routed via~~
+   ~~`lower_expand_relvar_reuse`. Remaining 11 fallbacks are unsafe cases~~
+   ~~(variable renames in WITH, aggregated-away vars, fresh rel var after~~
+   ~~non-aggregating WITH = cross-product LQA bug). The `varlen_named_relvar`~~
+   ~~(12) and `unbounded_varlen_unlabeled` (9) sub-buckets keep their guards.~~
 4. **Bucket 7 remainder — `range()` with non-literal args** (26). Port whatever
    the legacy translator emits; this is a pure arithmetic lowering, not list-dependent.
 5. **Bucket 11 — `keys()`, `properties()`, `labels()`** (22). Port from

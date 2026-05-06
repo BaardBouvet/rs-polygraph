@@ -1189,6 +1189,18 @@ impl Compiler {
                     // an existing variable" error.
                     self.scan_vars.insert(rv.clone());
 
+                    // Cross-WITH re-use: if this rel-var was already registered by a
+                    // prior Op::Expand (from an earlier MATCH before a WITH clause),
+                    // ?rv is already in scope in the flat WHERE block.  Attempting to
+                    // BIND it again would raise a SPARQL "cannot bind an already-bound
+                    // variable" error.  Instead, emit only the constraint triple and
+                    // skip the BIND and uniqueness filter (same edge ≡ same constraint).
+                    if self.edge_vars.contains_key(rv.as_str()) {
+                        let edge_bgp =
+                            self.lower_expand_relvar_reuse(from, to, rel_types, direction, rv);
+                        return Ok(join(inner_pat, edge_bgp));
+                    }
+
                     // Snapshot edge_vars to detect prior named edges in the same MATCH.
                     let prior_edge_vars: Vec<(String, EdgeVarInfo)> = self
                         .edge_vars
@@ -2318,6 +2330,61 @@ impl Compiler {
             | Expr::Property(e, _) => self.expr_contains_nullable_var(e),
             Expr::List(items) => items.iter().any(|e| self.expr_contains_nullable_var(e)),
             _ => false,
+        }
+    }
+
+    /// Emit a constraint-only triple for a relationship variable that was already
+    /// bound in a prior MATCH clause and is being reused after a WITH boundary.
+    ///
+    /// In this case `?rv` is already bound in the SPARQL scope and must NOT be
+    /// re-BIND'd (SPARQL engines reject re-binding a variable already in scope).
+    /// We emit only the triple that constrains the match, relying on SPARQL's
+    /// natural-join semantics to enforce the existing binding.
+    ///
+    /// - Typed edges:  emit `?from <base:T> ?to` with the static IRI.  `?rv` was
+    ///   bound to `"base:T"^^xsd:anyURI` (a literal marker), which is consistent.
+    /// - Untyped edges: `?rv` was bound to the *actual predicate IRI* (not a
+    ///   literal) by the first MATCH, so it can be used directly as the predicate
+    ///   variable in the triple `?from ?rv ?to`.
+    /// - Multi-type:   emit a UNION of one triple per type without any BIND.
+    ///
+    /// `edge_vars` is NOT updated — the original registration is preserved.
+    fn lower_expand_relvar_reuse(
+        &mut self,
+        from: &str,
+        to: &str,
+        rel_types: &[String],
+        direction: &Direction,
+        rv: &str,
+    ) -> GraphPattern {
+        let from_tp = TermPattern::Variable(Self::var(from));
+        let to_tp = TermPattern::Variable(Self::var(to));
+
+        if rel_types.is_empty() {
+            // Untyped: ?rv IS a predicate IRI (bound from the first MATCH's triple).
+            // Use it directly in predicate position — SPARQL join will constrain.
+            let rv_var = Self::var(rv);
+            self.lower_expand_any_type(from_tp, rv_var, to_tp, direction)
+        } else if rel_types.len() == 1 {
+            let iri = NamedNode::new_unchecked(format!("{}{}", self.base_iri, &rel_types[0]));
+            let pred = NamedNodePattern::NamedNode(iri);
+            self.lower_expand_typed(from_tp, pred, to_tp, direction)
+        } else {
+            let pats: Vec<GraphPattern> = rel_types
+                .iter()
+                .map(|rt| {
+                    let iri =
+                        NamedNode::new_unchecked(format!("{}{}", self.base_iri, rt));
+                    let pred = NamedNodePattern::NamedNode(iri);
+                    self.lower_expand_typed(from_tp.clone(), pred, to_tp.clone(), direction)
+                })
+                .collect();
+            pats.into_iter()
+                .reduce(|a, b| GraphPattern::Union {
+                    left: Box::new(a),
+                    right: Box::new(b),
+                })
+                .unwrap_or(GraphPattern::Bgp { patterns: vec![] })
         }
     }
 

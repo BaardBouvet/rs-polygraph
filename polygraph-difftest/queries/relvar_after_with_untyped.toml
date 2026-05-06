@@ -1,0 +1,24 @@
+name = "relvar_after_with_untyped"
+description = "Untyped relationship variable bound in MATCH survives WITH and constrains an OPTIONAL MATCH."
+spec_ref = "openCypher 9 §4.4 WITH — passing bound untyped relationship variables"
+
+cypher = """
+MATCH ()-[r]->()
+WITH r
+OPTIONAL MATCH (a)-[r]->(b)
+RETURN type(r) AS rel_type
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["A"], properties = {} },
+    { id = "b", labels = ["B"], properties = {} },
+]
+edges = [
+    { id = "e1", from = "a", to = "b", rel_type = "T", properties = {} },
+]
+
+[expected]
+columns = ["rel_type"]
+rows = [["T"]]
+order = "bag"

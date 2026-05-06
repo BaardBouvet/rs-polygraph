@@ -1,12 +1,22 @@
+name = "named_path_length"
+description = "length(p) on a fixed-hop named path returns the hop count."
+spec_ref = "openCypher 9 §6.3.2 — length(path)"
+
 cypher = """
 MATCH p = (a:A)-[:REL]->(b:B)
 RETURN length(p) AS l
 """
 
-[[graphs]]
-triples = [
-  ["ex:a1", "rdf:type", "ex:A"],
-  ["ex:b1", "rdf:type", "ex:B"],
-  ["ex:a1", "ex:REL", "ex:b1"],
+[fixture]
+nodes = [
+    { id = "a", labels = ["A"], properties = {} },
+    { id = "b", labels = ["B"], properties = {} },
 ]
-expected = [[{ l = "1" }]]
+edges = [
+    { id = "e1", from = "a", to = "b", rel_type = "REL", properties = {} },
+]
+
+[expected]
+columns = ["l"]
+rows = [[1]]
+order = "bag"
