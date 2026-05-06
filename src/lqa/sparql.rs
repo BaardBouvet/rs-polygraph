@@ -3743,7 +3743,18 @@ impl Compiler {
                         Box::new(bool_to_int_for_order(la)),
                         Box::new(bool_to_int_for_order(lb)),
                     ),
-                    CmpOp::In => SparExpr::In(Box::new(la), vec![lb]),
+                    CmpOp::In => {
+                        // When the RHS is not a literal Expr::List, use our custom
+                        // list-contains function so that ?lb is treated as a Cypher
+                        // list string (our "[item1, item2, …]" encoding) rather than
+                        // as a SPARQL value-set singleton (?b IN (?c) ≡ ?b = ?c).
+                        SparExpr::FunctionCall(
+                            Function::Custom(NamedNode::new_unchecked(
+                                "urn:polygraph:list-contains",
+                            )),
+                            vec![lb, la],  // list string first, needle second
+                        )
+                    }
                     CmpOp::StartsWith | CmpOp::EndsWith | CmpOp::Contains | CmpOp::RegexMatch => {
                         return Err(PolygraphError::Unsupported {
                             construct: format!("string comparison op {op:?}"),

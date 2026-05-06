@@ -2452,13 +2452,17 @@ impl TranslationState {
                         Box::new(bool_to_int_for_order(r)),
                     ),
                     CompOp::In => {
-                        // `n.foo IN [a, b, c]` — the rhs was already translated.
-                        // For a proper list literal we should have a vec of expressions.
-                        // Since rhs came from translate_expr, which returns a single SparExpr,
-                        // we wrap it in a vec. For inline list literals,
-                        // we intercept before translation (see Expression::List arm above).
-                        // Real list IN is handled: build SparExpr::In(lhs, vec![each item]).
-                        SparExpr::In(Box::new(l), vec![r])
+                        // When the list could not be resolved to compile-time items, the RHS is
+                        // a SPARQL variable/expression containing our Cypher list string encoding
+                        // ("[item1, item2, …]").  SPARQL's `IN` operator treats it as a scalar
+                        // (x IN (?list) ≡ x = ?list), so we use our custom list-contains function
+                        // which correctly parses the list string for membership checking.
+                        SparExpr::FunctionCall(
+                            spargebra::algebra::Function::Custom(
+                                NamedNode::new_unchecked("urn:polygraph:list-contains"),
+                            ),
+                            vec![r, l], // list string first, needle second
+                        )
                     }
                     CompOp::StartsWith | CompOp::EndsWith | CompOp::Contains => {
                         // openCypher: returns null if either operand is not a plain string.

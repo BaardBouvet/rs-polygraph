@@ -1679,6 +1679,60 @@ struct ParsedDuration {
 
 // ── Duration arithmetic ───────────────────────────────────────────────────────
 
+/// Check whether a Cypher-serialized value string is contained in a Cypher
+/// list string (our `"[item1, item2, …]"` format).
+///
+/// Items are split by `", "` with bracket/quote-depth tracking so that nested
+/// lists and single-quoted strings are handled correctly.
+pub fn list_contains_str(list: &str, value: &str) -> bool {
+    let inner = match list
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+    {
+        Some(s) => s,
+        None => return false,
+    };
+    if inner.is_empty() {
+        return false;
+    }
+    let bytes = inner.as_bytes();
+    let n = bytes.len();
+    let mut depth: i32 = 0;
+    let mut in_quote = false;
+    let mut item_start = 0usize;
+    let mut i = 0usize;
+    loop {
+        // Determine whether we're at a top-level separator or end-of-string.
+        let at_sep = !in_quote
+            && depth == 0
+            && i + 1 < n
+            && bytes[i] == b','
+            && bytes[i + 1] == b' ';
+        if at_sep || i == n {
+            let item = &inner[item_start..i];
+            if item == value {
+                return true;
+            }
+            if at_sep {
+                item_start = i + 2;
+                i += 2;
+                continue;
+            } else {
+                break; // end of string
+            }
+        }
+        match bytes[i] {
+            b'[' | b'{' if !in_quote => depth += 1,
+            b']' | b'}' if !in_quote => depth -= 1,
+            b'\'' if !in_quote => in_quote = true,
+            b'\'' if in_quote => in_quote = false,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Add two ISO 8601 duration strings and return the result.
 /// Returns `None` if either string is not a valid duration.
 /// Carries ns→seconds→minutes→hours (but NOT hours→days or months→years).
