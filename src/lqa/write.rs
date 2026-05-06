@@ -612,6 +612,26 @@ fn expr_to_sparql_lit(expr: &Expr, _base: &str) -> Option<String> {
             let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
             Some(format!("\"{escaped}\""))
         }
+        // Concatenation of two constant lists: [1,2] + [3,4] → "[1, 2, 3, 4]"
+        Expr::Add(a, b) => {
+            let sa = lqa_write_serialize_literal(a)?;
+            let sb = lqa_write_serialize_literal(b)?;
+            // Only fold if both sides look like lists (start with '[')
+            if sa.starts_with('[') && sb.starts_with('[') {
+                let inner_a = sa.trim_matches(|c| c == '[' || c == ']').trim();
+                let inner_b = sb.trim_matches(|c| c == '[' || c == ']').trim();
+                let combined = match (inner_a.is_empty(), inner_b.is_empty()) {
+                    (true, true) => "[]".to_owned(),
+                    (true, _) => format!("[{inner_b}]"),
+                    (_, true) => format!("[{inner_a}]"),
+                    _ => format!("[{inner_a}, {inner_b}]"),
+                };
+                let escaped = combined.replace('\\', "\\\\").replace('"', "\\\"");
+                Some(format!("\"{escaped}\""))
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -647,6 +667,23 @@ fn lqa_write_serialize_literal(e: &Expr) -> Option<String> {
             Expr::Literal(Literal::Float(f)) => Some(format!("{}", -f)),
             _ => None,
         },
+        // List concatenation: [1,2] + [3,4] → "[1, 2, 3, 4]"
+        Expr::Add(a, b) => {
+            let sa = lqa_write_serialize_literal(a)?;
+            let sb = lqa_write_serialize_literal(b)?;
+            if sa.starts_with('[') && sb.starts_with('[') {
+                let inner_a = sa.trim_matches(|c| c == '[' || c == ']').trim();
+                let inner_b = sb.trim_matches(|c| c == '[' || c == ']').trim();
+                Some(match (inner_a.is_empty(), inner_b.is_empty()) {
+                    (true, true) => "[]".to_owned(),
+                    (true, _) => format!("[{inner_b}]"),
+                    (_, true) => format!("[{inner_a}]"),
+                    _ => format!("[{inner_a}, {inner_b}]"),
+                })
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
