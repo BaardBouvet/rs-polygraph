@@ -2341,6 +2341,9 @@ impl Compiler {
                             if !is_node_rename {
                                 self.scalar_vars.insert(pi.alias.clone());
                             }
+                            // Populate const_int_vars for integer literals so that
+                            // subscript/slice handlers can resolve e.g. `WITH 0 AS idx`.
+                            self.update_const_int_vars(&pi.alias, &pi.expr);
                             // Store map literal pairs for compile-time property access
                             // (e.g. `WITH {k: v} AS m RETURN m.k`).
                             // Also handle null scalar: `WITH null AS m` — any property
@@ -3625,7 +3628,20 @@ impl Compiler {
             // When both base and key are literals (constant-folding), evaluate directly.
             Expr::Subscript(base, key) => {
                 // Resolve scalar-literal variable keys (e.g. `WITH 'x' AS idx; map[idx]`).
+                // Resolve scalar-literal variable keys (e.g. `WITH 'x' AS idx; map[idx]`).
+                // IMPORTANT: prefer integer resolution over string resolution.  When `idx`
+                // was bound to an integer literal (e.g. `WITH 0 AS idx`), it is stored as
+                // both const_int_vars["idx"]=0 AND scalar_lit_vals["idx"]="0".  Without
+                // the integer check first, the string "0" would be used as a property-
+                // access key rather than a list index, producing a spurious fallback.
                 let resolved_key;
+                let resolved_int_key: Option<i64>;
+                // First: resolve the key to an integer via const_int_vars (if it's a var).
+                resolved_int_key = if let Expr::Variable { name, .. } = key.as_ref() {
+                    self.const_int_vars.get(name.as_str()).copied()
+                } else {
+                    lqa_eval_int_expr(key)
+                };
                 let key = if let Expr::Variable { name, .. } = key.as_ref() {
                     if let Some(s) = self.scalar_lit_vals.get(name.as_str()).cloned() {
                         resolved_key = Expr::Literal(Literal::String(s));
@@ -3636,6 +3652,32 @@ impl Compiler {
                 } else {
                     key.as_ref()
                 };
+                // Constant integer index on a variable known to be a compile-time literal
+                // list — handle BEFORE the string-key path to avoid treating integer 0 as
+                // a property name "0".
+                if let Expr::Variable { name: vname, .. } = base.as_ref() {
+                    if let Some(items) = self.scalar_list_exprs.get(vname.as_str()).cloned() {
+                        if let Some(idx) = resolved_int_key {
+                            let len = items.len() as i64;
+                            let i = if idx < 0 { len + idx } else { idx };
+                            if i >= 0 && (i as usize) < items.len() {
+                                return self.lower_expr(&items[i as usize]);
+                            }
+                            // Out of bounds → null.
+                            let null_var = self.fresh("null");
+                            return Ok(SparExpr::Variable(null_var));
+                        }
+                        // Key is not an integer → indexing a list with non-integer is a
+                        // TypeError.  Return Translation error (not Unsupported) so it
+                        // surfaces as an error rather than silently falling back to legacy.
+                        if lqa_eval_string_expr(key).is_some() {
+                            return Err(PolygraphError::Translation {
+                                message: "list subscript index must be an integer".into(),
+                            });
+                        }
+                    }
+                }
+
                 // Constant-fold: Map[string_key] → look up key in the map.
                 if let Expr::Map(pairs) = base.as_ref() {
                     if let Some(key_str) = lqa_eval_string_expr(key) {
@@ -3652,6 +3694,22 @@ impl Compiler {
                 // Dynamic string key on a variable → treat as property access.
                 // Also handles scalar_map_exprs variables via try_get_map_pairs.
                 if let Some(key_str) = lqa_eval_string_expr(key) {
+                    // If the base is a non-list scalar var and the key originated from an
+                    // integer (e.g. `WITH true AS list, 0 AS idx RETURN list[idx]`), this
+                    // is a subscript-on-non-list error → TypeError.
+                // Integer index on non-list scalar → TypeError.
+                    if resolved_int_key.is_some() {
+                        if let Expr::Variable { name: vname, .. } = base.as_ref() {
+                            if self.scalar_vars.contains(vname.as_str())
+                                && !self.scalar_list_exprs.contains_key(vname.as_str())
+                                && !self.scalar_map_exprs.contains_key(vname.as_str())
+                            {
+                                return Err(PolygraphError::Translation {
+                                    message: "subscript index on a non-list scalar value".into(),
+                                });
+                            }
+                        }
+                    }
                     // Delegate to the Property handler by synthesising the expression.
                     return self.lower_expr(&Expr::Property(base.clone(), key_str));
                 }
