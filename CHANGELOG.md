@@ -3,6 +3,36 @@
 All notable changes to `polygraph` are documented here.  
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.1] — 2025-08-01 — Write-clause public API
+
+### Added
+- **`Transpiler::cypher_to_sparql_update(cypher, engine)`** — new public API
+  that transpiles CREATE / MERGE / SET / REMOVE / DETACH DELETE Cypher
+  statements into SPARQL 1.1 Update strings ready for execution against any
+  compliant engine.  DELETE/DETACH DELETE are routed through the LQA write
+  path; CREATE/MERGE/SET/REMOVE through the static write generator in
+  `translator::cypher::write_update`.
+- **`Transpiler::gql_to_sparql_update(gql, engine)`** — same, for ISO GQL
+  input (GQL is lowered to the same IR before write generation).
+- **`translator::cypher::write_update`** module (public within crate) — static
+  write-clause generator extracted from the TCK test harness, parameterised
+  over `base: &str` instead of a hard-coded constant.  Handles:
+  - `CREATE` — blank-node INSERT DATA;
+  - `MERGE (node)` — idempotent INSERT...WHERE FILTER NOT EXISTS;
+  - `MERGE (n)-[:R]->(m)` — edge INSERT matching existing src/dst nodes;
+  - `MATCH...SET` — property update via DELETE/INSERT...WHERE;
+  - `MATCH...REMOVE` — property removal via DELETE...WHERE.
+- **`tests/integration/movie_graph.rs`** — end-to-end integration test that
+  populates a mini Neo4j movie graph (3 movies + 6 people), validates MERGE
+  idempotency, adds relationships, runs read queries, exercises SET/REMOVE, and
+  tears down with DETACH DELETE.
+
+### Changed
+- `cypher_to_sparql_update` routes only DELETE/DETACH DELETE through the LQA
+  write path; CREATE/MERGE/SET/REMOVE now use the static write generator, which
+  correctly implements idempotent MERGE semantics that the LQA write path did
+  not preserve for relationship patterns.
+
 ## [0.7.0] — 2025-08-01 — Spec-anchored LQA + differential testing milestone
 
 This release completes the spec-first pivot (Phase 8): the primary translation

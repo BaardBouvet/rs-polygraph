@@ -1,6 +1,6 @@
 [package]
 name = "polygraph"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 authors = ["rs-polygraph contributors"]
 license = "Apache-2.0"
@@ -82,6 +82,10 @@ path = "tests/integration/gql_to_sparql.rs"
 [[test]]
 name = "result_mapping"
 path = "tests/integration/result_mapping.rs"
+
+[[test]]
+name = "movie_graph"
+path = "tests/integration/movie_graph.rs"
 
 [dependencies]
 pest = "2.7"

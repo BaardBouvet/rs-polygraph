@@ -120,6 +120,98 @@ impl Transpiler {
         let sparql = engine.finalize(result.sparql)?;
         Ok(TranspileOutput::complete(sparql, result.schema))
     }
+
+    /// Transpile the write clauses of an openCypher query into SPARQL 1.1 Update strings.
+    ///
+    /// Execute the returned updates **in order** against your SPARQL endpoint before
+    /// running the SELECT produced by [`Self::cypher_to_sparql`] for the same query.
+    ///
+    /// For pure-read queries this returns `Ok(vec![])`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolygraphError::UnsupportedFeature`] for constructs with no
+    /// SPARQL Update equivalent (`CREATE CONSTRAINT`, `CREATE INDEX`).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use polygraph::{Transpiler, sparql_engine::GenericSparql11};
+    ///
+    /// let engine = GenericSparql11;
+    /// let updates = Transpiler::cypher_to_sparql_update(
+    ///     "CREATE (n:Person {name: 'Alice'})",
+    ///     &engine,
+    /// ).unwrap();
+    /// assert!(!updates.is_empty());
+    /// ```
+    pub fn cypher_to_sparql_update(
+        cypher: &str,
+        engine: &dyn sparql_engine::TargetEngine,
+    ) -> Result<Vec<String>, PolygraphError> {
+        translator::cypher::write_update::detect_unsupported_ddl(cypher)?;
+        let base = engine.base_iri().unwrap_or("");
+        let ast = parser::parse_cypher(cypher)?;
+
+        // DELETE / DETACH DELETE have no legacy-path implementation: route through
+        // the LQA write path which knows how to compile them to SPARQL Delete.
+        let has_delete = ast
+            .clauses
+            .iter()
+            .any(|c| matches!(c, ast::cypher::Clause::Delete(_)));
+
+        if has_delete {
+            match try_lqa_path(&ast, engine)? {
+                Some(TranspileOutput::Write { updates, .. }) => return Ok(updates),
+                Some(TranspileOutput::Complete { .. })
+                | Some(TranspileOutput::Continuation { .. }) => return Ok(vec![]),
+                None => {} // LQA unsupported → no deletes produced
+            }
+        }
+
+        // Legacy path handles CREATE / MERGE / SET / REMOVE correctly.
+        translator::cypher::write_update::cypher_clauses_to_updates(&ast.clauses, base)
+    }
+
+    /// Transpile the write clauses of an ISO GQL query into SPARQL 1.1 Update strings.
+    ///
+    /// GQL clauses are Cypher-equivalent after parsing, so this delegates to the
+    /// same write-generation machinery as [`Self::cypher_to_sparql_update`].
+    ///
+    /// Execute the returned updates **in order** before running the SELECT from
+    /// [`Self::gql_to_sparql`] for the same query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolygraphError::UnsupportedFeature`] for DDL constructs without
+    /// a SPARQL Update equivalent (`CREATE CONSTRAINT`, `CREATE INDEX`).
+    pub fn gql_to_sparql_update(
+        gql: &str,
+        engine: &dyn sparql_engine::TargetEngine,
+    ) -> Result<Vec<String>, PolygraphError> {
+        translator::cypher::write_update::detect_unsupported_ddl(gql)?;
+        let base = engine.base_iri().unwrap_or("");
+        let ast = parser::parse_gql(gql)?;
+        let cypher_ast = ast::CypherQuery {
+            clauses: ast.clauses.clone(),
+        };
+
+        let has_delete = ast
+            .clauses
+            .iter()
+            .any(|c| matches!(c, ast::cypher::Clause::Delete(_)));
+
+        if has_delete {
+            match try_lqa_path(&cypher_ast, engine)? {
+                Some(TranspileOutput::Write { updates, .. }) => return Ok(updates),
+                Some(TranspileOutput::Complete { .. })
+                | Some(TranspileOutput::Continuation { .. }) => return Ok(vec![]),
+                None => {}
+            }
+        }
+
+        translator::cypher::write_update::cypher_clauses_to_updates(&ast.clauses, base)
+    }
 }
 
 /// Attempt to transpile `ast` via the LQA IR path.

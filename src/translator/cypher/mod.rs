@@ -29,6 +29,8 @@ use spargebra::Query;
 
 use crate::rdf_mapping;
 
+pub mod write_update;
+
 use crate::ast::cypher::{
     AggregateExpr, Clause, CompOp, CypherQuery, Expression, Literal, MatchClause, NodePattern,
     Pattern, PatternElement, PatternList, RelationshipPattern, ReturnClause, ReturnItem,
