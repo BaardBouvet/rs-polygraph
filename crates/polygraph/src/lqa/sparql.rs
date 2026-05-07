@@ -5571,6 +5571,29 @@ impl Compiler {
                 }
 
                 // Non-literal argument (runtime temporal expression) — fall back to legacy.
+                // Special case: temporal_f(toString(v)) where v is a scalar literal.
+                // toString of a temporal value is the ISO string itself, so this is
+                // equivalent to temporal_f(v_string) and we can fold it.
+                if let Some(Expr::FunctionCall {
+                    name: inner_name,
+                    args: inner_args,
+                    ..
+                }) = args.first()
+                {
+                    let is_tostring = inner_name.eq_ignore_ascii_case("tostring")
+                        || inner_name.eq_ignore_ascii_case("string");
+                    if is_tostring {
+                        if let Some(Expr::Variable {
+                            name: v_name, ..
+                        }) = inner_args.first()
+                        {
+                            if let Some(s) = self.scalar_lit_vals.get(v_name.as_str()).cloned() {
+                                let folded = Expr::Literal(Literal::String(s));
+                                return self.lower_function_call(name, &[folded]);
+                            }
+                        }
+                    }
+                }
                 Err(PolygraphError::Unsupported {
                     construct: format!("{name}()"),
                     spec_ref: "openCypher 9 §3.5".into(),
@@ -5620,6 +5643,17 @@ impl Compiler {
                             }
                         }
                     }
+                }
+                // Third check: if all arguments are statically-evaluatable (no free
+                // variables) but both eval paths failed, the call is definitely
+                // erroneous (wrong type or step == 0).  Return Err(Translation) so
+                // the error propagates to the caller without falling back to legacy.
+                if args.iter().all(range_arg_is_static) {
+                    return Err(PolygraphError::Translation {
+                        message: "range() called with invalid argument: \
+                                  step must be non-zero and all arguments must be integers"
+                            .into(),
+                    });
                 }
                 Err(PolygraphError::Unsupported {
                     construct: "range()".into(),
@@ -7216,6 +7250,28 @@ fn eval_range_to_integers(args: &[Expr]) -> Option<Vec<i64>> {
         }
     }
     Some(items)
+}
+
+/// Returns `true` when `expr` is a purely compile-time constant that contains no
+/// free (runtime) variables.  Used by the `range()` handler to distinguish
+/// "definitely erroneous literal call" from "might be valid with runtime args".
+fn range_arg_is_static(expr: &Expr) -> bool {
+    use Expr as E;
+    match expr {
+        // Any literal is static (integer, float, boolean, string, null).
+        E::Literal(_) => true,
+        // A list or map literal with static elements is itself static.
+        E::List(items) => items.iter().all(range_arg_is_static),
+        E::Map(pairs) => pairs.iter().all(|(_, v)| range_arg_is_static(v)),
+        // Unary arithmetic is static if its operand is.
+        E::Unary(_, inner) => range_arg_is_static(inner),
+        // Binary arithmetic is static if both operands are.
+        E::Add(a, b) | E::Sub(a, b) | E::Mul(a, b) | E::Div(a, b) | E::Mod(a, b) => {
+            range_arg_is_static(a) && range_arg_is_static(b)
+        }
+        // Variables and all other nodes are NOT static (might be runtime).
+        _ => false,
+    }
 }
 
 /// Evaluate a constant boolean `Expr`. Returns `Some(Some(bool))` if the expression
