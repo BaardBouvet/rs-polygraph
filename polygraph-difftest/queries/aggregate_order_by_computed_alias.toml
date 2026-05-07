@@ -1,0 +1,27 @@
+name = "aggregate_order_by_computed_alias"
+description = "ORDER BY on a computed aggregate alias — the alias must be resolvable in the ORDER BY clause."
+spec_ref = "openCypher 9 §7.3 — ORDER BY on aggregation aliases"
+
+cypher = """
+MATCH (n:Product)
+WITH n.category AS cat, sum(n.price) AS revenue
+RETURN cat, revenue
+ORDER BY revenue DESC
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Product"], properties = { name = "Widget", category = "Gadgets", price = 100 } },
+    { id = "b", labels = ["Product"], properties = { name = "Donut",  category = "Food",    price = 2   } },
+    { id = "c", labels = ["Product"], properties = { name = "Phone",  category = "Gadgets", price = 800 } },
+    { id = "d", labels = ["Product"], properties = { name = "Bread",  category = "Food",    price = 3   } },
+]
+edges = []
+
+[expected]
+columns = ["cat", "revenue"]
+rows = [
+    ["Gadgets", 900],
+    ["Food",    5],
+]
+order = "ordered"

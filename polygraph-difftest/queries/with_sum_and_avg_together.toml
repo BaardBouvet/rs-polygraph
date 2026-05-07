@@ -1,0 +1,22 @@
+name = "with_sum_and_avg_together"
+description = "Single WITH clause computing both sum() and avg() of the same numeric property."
+spec_ref = "openCypher 9 §3.4 — aggregation functions — sum and avg"
+
+cypher = """
+MATCH (n:Player)
+WITH sum(n.score) AS total, avg(n.score) AS mean
+RETURN total, mean
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Player"], properties = { name = "Alice", score = 10 } },
+    { id = "b", labels = ["Player"], properties = { name = "Bob",   score = 20 } },
+    { id = "c", labels = ["Player"], properties = { name = "Carol", score = 30 } },
+]
+edges = []
+
+[expected]
+columns = ["total", "mean"]
+rows = [[60, 20.0]]
+order = "bag"

@@ -1,0 +1,23 @@
+name = "gql_label_not_filter"
+description = "GQL-style NOT n:Label in WHERE excludes nodes with the given label."
+spec_ref = "GQL ISO 39075 §16.6 label expressions — negation in WHERE"
+
+cypher = """
+MATCH (n)
+WHERE NOT n:Employee
+RETURN n.name AS name
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"],   properties = { name = "Alice" } },
+    { id = "b", labels = ["Employee"], properties = { name = "Bob"   } },
+    { id = "c", labels = ["City"],     properties = { name = "Carol" } },
+]
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [["Alice"], ["Carol"]]
+order = "bag"

@@ -1,0 +1,24 @@
+name = "count_with_having_filter"
+description = "WITH aggregation followed by a WHERE filter acts as a HAVING clause."
+spec_ref = "openCypher 9 §7.4 — WITH … WHERE as HAVING"
+
+cypher = """
+MATCH (n:Person)
+WITH n.dept AS dept, count(n) AS cnt
+WHERE cnt > 1
+RETURN dept
+ORDER BY dept
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", dept = "Eng" } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob",   dept = "Eng" } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol", dept = "HR"  } },
+]
+edges = []
+
+[expected]
+columns = ["dept"]
+rows = [["Eng"]]
+order = "ordered"

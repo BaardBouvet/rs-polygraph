@@ -1,0 +1,17 @@
+name = "write_create_node_return"
+description = "CREATE a node and RETURN its literal properties via the LQA write path."
+spec_ref = "openCypher 9 §14.1 — CREATE"
+
+cypher = """
+CREATE (n:Person {name: "Alice", age: 30})
+RETURN n.name AS name, n.age AS age
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["name", "age"]
+rows = [["Alice", 30]]
+order = "bag"

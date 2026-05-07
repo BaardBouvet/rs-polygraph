@@ -1,0 +1,17 @@
+name = "write_merge_creates_node"
+description = "MERGE on an empty graph creates a new node; RETURN confirms property via LQA write path."
+spec_ref = "openCypher 9 §14.5 — MERGE node semantics"
+
+cypher = """
+MERGE (n:City {name: "Stockholm"})
+RETURN n.name AS name
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["name"]
+rows = [["Stockholm"]]
+order = "bag"

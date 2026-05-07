@@ -1,0 +1,20 @@
+name = "write_match_set_property_return"
+description = "MATCH a node, SET a new property, RETURN updated values via the LQA write path."
+spec_ref = "openCypher 9 §14.3 — SET"
+
+cypher = """
+MATCH (n:Person {name: "Alice"})
+SET n.age = 30
+RETURN n.name AS name, n.age AS age
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+]
+edges = []
+
+[expected]
+columns = ["name", "age"]
+rows = [["Alice", 30]]
+order = "bag"

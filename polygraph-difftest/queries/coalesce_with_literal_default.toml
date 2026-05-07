@@ -1,0 +1,26 @@
+name = "coalesce_with_literal_default"
+description = "coalesce(n.missing_prop, 'default') returns the literal default for missing properties."
+spec_ref = "openCypher 9 §6.3.5 — coalesce()"
+
+cypher = """
+MATCH (n:Person)
+RETURN n.name AS name, coalesce(n.dept, "unknown") AS dept
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice", dept = "Engineering" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol", dept = "Sales" } },
+]
+edges = []
+
+[expected]
+columns = ["name", "dept"]
+rows = [
+    ["Alice", "Engineering"],
+    ["Bob",   "unknown"],
+    ["Carol", "Sales"],
+]
+order = "ordered"

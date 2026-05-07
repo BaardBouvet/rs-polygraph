@@ -1,0 +1,23 @@
+name = "named_path_one_hop_length"
+description = "Named path p = (a)-[:KNOWS]->(b); length(p) = 1 for a single-hop path."
+spec_ref = "openCypher 9 §3.7.9 — length() on named paths"
+
+cypher = """
+MATCH p = (a:Person)-[:KNOWS]->(b:Person)
+RETURN length(p) AS len
+ORDER BY len
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob", rel_type = "KNOWS", properties = {} },
+]
+
+[expected]
+columns = ["len"]
+rows = [[1]]
+order = "bag"

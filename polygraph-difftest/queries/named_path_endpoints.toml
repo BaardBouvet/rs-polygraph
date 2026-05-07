@@ -1,0 +1,28 @@
+name = "named_path_endpoints"
+description = "Named path p = (a)-[:KNOWS]->(b); return start and end node names alongside the path variable."
+spec_ref = "openCypher 9 §3.7.9 — named path with endpoint access"
+
+cypher = """
+MATCH p = (a:Person)-[:KNOWS]->(b:Person)
+RETURN a.name AS start_name, b.name AS end_name, length(p) AS hops
+ORDER BY start_name
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"], properties = { name = "Carol" } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "bob",   rel_type = "KNOWS", properties = {} },
+    { id = "e2", from = "carol", to = "bob",   rel_type = "KNOWS", properties = {} },
+]
+
+[expected]
+columns = ["start_name", "end_name", "hops"]
+rows = [
+    ["Alice", "Bob", 1],
+    ["Carol", "Bob", 1],
+]
+order = "ordered"

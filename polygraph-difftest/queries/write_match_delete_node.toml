@@ -1,0 +1,20 @@
+name = "write_match_delete_node"
+description = "MATCH and DELETE a node; write-only, no result comparison needed — verifies transpile + execute."
+spec_ref = "openCypher 9 §14.6 — DELETE"
+
+cypher = """
+MATCH (n:Person {name: "Bob"})
+DELETE n
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"], properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"], properties = { name = "Bob"   } },
+]
+edges = []
+
+[expected]
+columns = []
+rows = []
+order = "bag"

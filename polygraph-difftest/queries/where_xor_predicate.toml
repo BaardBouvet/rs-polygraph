@@ -1,0 +1,26 @@
+name = "where_xor_predicate"
+description = "XOR of two predicates is true when exactly one is true."
+spec_ref = "openCypher 9 §6.2 — XOR boolean operator"
+
+cypher = """
+MATCH (n:Person)
+WHERE n.age > 25 XOR n.name = "Alice"
+RETURN n.name AS name
+ORDER BY name
+"""
+
+[fixture]
+nodes = [
+    { id = "a", labels = ["Person"], properties = { name = "Alice", age = 30 } },
+    { id = "b", labels = ["Person"], properties = { name = "Bob",   age = 20 } },
+    { id = "c", labels = ["Person"], properties = { name = "Carol", age = 35 } },
+]
+edges = []
+
+# Alice: age>25 AND name="Alice" → both true → XOR false
+# Bob:   age<=25 AND name!="Alice" → both false → XOR false
+# Carol: age>25 AND name!="Alice" → first true, second false → XOR true
+[expected]
+columns = ["name"]
+rows = [["Carol"]]
+order = "bag"

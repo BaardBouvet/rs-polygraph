@@ -1,0 +1,17 @@
+name = "write_create_relationship_return"
+description = "CREATE two nodes and a relationship; RETURN literal properties via LQA write path."
+spec_ref = "openCypher 9 §14.1 — CREATE relationship"
+
+cypher = """
+CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})
+RETURN a.name AS person, b.name AS friend
+"""
+
+[fixture]
+nodes = []
+edges = []
+
+[expected]
+columns = ["person", "friend"]
+rows = [["Alice", "Bob"]]
+order = "bag"

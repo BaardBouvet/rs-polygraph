@@ -1,0 +1,34 @@
+name = "two_hop_chain_intermediate_filter"
+description = "Two-hop MATCH chain with a property filter on the intermediate node."
+spec_ref = "openCypher 9 §5.2 — patterns: multi-hop with WHERE on intermediate variable"
+
+cypher = """
+MATCH (a:Person)-[:WORKS_AT]->(c:Company)<-[:WORKS_AT]-(b:Person)
+WHERE a <> b AND c.name = "Acme"
+RETURN a.name AS person1, b.name AS person2
+ORDER BY person1, person2
+"""
+
+[fixture]
+nodes = [
+    { id = "alice", labels = ["Person"],  properties = { name = "Alice" } },
+    { id = "bob",   labels = ["Person"],  properties = { name = "Bob"   } },
+    { id = "carol", labels = ["Person"],  properties = { name = "Carol" } },
+    { id = "acme",  labels = ["Company"], properties = { name = "Acme"  } },
+    { id = "beta",  labels = ["Company"], properties = { name = "Beta"  } },
+]
+edges = [
+    { id = "e1", from = "alice", to = "acme",  rel_type = "WORKS_AT", properties = {} },
+    { id = "e2", from = "bob",   to = "acme",  rel_type = "WORKS_AT", properties = {} },
+    { id = "e3", from = "carol", to = "beta",  rel_type = "WORKS_AT", properties = {} },
+]
+
+# Alice and Bob both work at Acme; Carol works at Beta (excluded)
+# Pairs: (Alice, Bob) and (Bob, Alice) — both are valid since a<>b and both point to Acme
+[expected]
+columns = ["person1", "person2"]
+rows = [
+    ["Alice", "Bob"],
+    ["Bob",   "Alice"],
+]
+order = "ordered"
