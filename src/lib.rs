@@ -528,8 +528,16 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                                 // Named paths with varlen relationships cannot be
                                 // statically resolved in the LQA path (hop count and
                                 // node list are dynamic).  Fall back to legacy.
+                                // Exception: exact-hop bounded paths (*n..n) are
+                                // handled in LQA since the hop count is known.
                                 if pattern.variable.is_some() && r.range.is_some() {
-                                    return Some("named_path_varlen");
+                                    let is_exact_hop = r.range.as_ref().map_or(false, |rq| {
+                                        let lower_val = rq.lower.unwrap_or(1);
+                                        rq.upper == Some(lower_val)
+                                    });
+                                    if !is_exact_hop {
+                                        return Some("named_path_varlen");
+                                    }
                                 }
                                 // Cross-WITH rel-var handling: if a named rel-var appears
                                 // after a WITH clause, only allow LQA when the var was
