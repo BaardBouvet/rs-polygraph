@@ -1366,23 +1366,21 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
                                 Rule::with_clause => {
                                     has_with = true;
                                 }
-                                Rule::match_clause => {
-                                    if !has_with {
-                                        // Simple path: collect match/where for ExistsSubquery.
-                                        if found_match.is_some() {
-                                            // Promote to full form.
-                                            has_with = true;
-                                        } else {
-                                            for mc_inner in inner_cl.into_inner() {
-                                                match mc_inner.as_rule() {
-                                                    Rule::pattern_list => {
-                                                        found_match = Some(mc_inner);
-                                                    }
-                                                    Rule::where_clause => {
-                                                        found_where = Some(mc_inner);
-                                                    }
-                                                    _ => {}
+                                Rule::match_clause if !has_with => {
+                                    // Simple path: collect match/where for ExistsSubquery.
+                                    if found_match.is_some() {
+                                        // Promote to full form.
+                                        has_with = true;
+                                    } else {
+                                        for mc_inner in inner_cl.into_inner() {
+                                            match mc_inner.as_rule() {
+                                                Rule::pattern_list => {
+                                                    found_match = Some(mc_inner);
                                                 }
+                                                Rule::where_clause => {
+                                                    found_where = Some(mc_inner);
+                                                }
+                                                _ => {}
                                             }
                                         }
                                     }

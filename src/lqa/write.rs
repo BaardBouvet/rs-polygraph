@@ -198,10 +198,10 @@ fn compile_write_recursive(
         | Op::Selection { inner, .. }
         | Op::Unwind { inner, .. }
         | Op::Expand { inner, .. }
-        | Op::Projection { inner, .. } => {
-            if contains_write(inner) {
-                compile_write_recursive(inner, base, counter, bnode_map, out)?;
-            }
+        | Op::Projection { inner, .. }
+            if contains_write(inner) =>
+        {
+            compile_write_recursive(inner, base, counter, bnode_map, out)?;
         }
         // Pure read op with no writes below — nothing to generate.
         _ => {}

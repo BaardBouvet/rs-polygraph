@@ -1,25 +1,5 @@
 #![forbid(unsafe_code)]
-
-//! `polygraph` — transpile openCypher and ISO GQL queries to SPARQL 1.1.
-//!
-//! Phases 1–4 are complete:
-//! - Phase 1: openCypher parser + AST
-//! - Phase 2: SPARQL algebra translator (MATCH/WHERE/RETURN/WITH/OPTIONAL)
-//! - Phase 3: RDF-star and reification edge property encoding
-//! - Phase 4: ORDER BY/SKIP/LIMIT, aggregation, UNWIND, variable-length paths,
-//!   multi-type relationships, IN list literals, write clause stubs
-//!
-//! Use [`sparql_engine::RdfStar`] for engines that support SPARQL-star natively, or
-//! [`sparql_engine::GenericSparql11`] for standard SPARQL 1.1.
-//!
-//! # Example
-//!
-//! ```rust
-//! use polygraph::parser::parse_cypher;
-//!
-//! let ast = parse_cypher("MATCH (n:Person) WHERE n.age > 30 RETURN n.name").unwrap();
-//! println!("{ast:#?}");
-//! ```
+#![doc = include_str!("../README.md")]
 
 pub mod ast;
 pub mod error;

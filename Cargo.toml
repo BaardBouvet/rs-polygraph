@@ -1,11 +1,19 @@
 [package]
 name = "polygraph"
-version = "0.1.0"
+version = "0.7.0"
 edition = "2021"
 authors = ["rs-polygraph contributors"]
 license = "Apache-2.0"
 description = "A Rust library that transpiles openCypher and ISO GQL queries into SPARQL 1.1 algebra"
 repository = "https://github.com/BaardBouvet/rs-polygraph"
+readme = "README.md"
+keywords = ["cypher", "sparql", "gql", "transpiler", "graph"]
+categories = ["parser-implementations", "database-interfaces"]
+rust-version = "1.80"
+exclude = ["tests/tck/features/**", "plans/**"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [workspace]
 members = ["polygraph-difftest"]

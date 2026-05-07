@@ -868,7 +868,7 @@ impl TranslationState {
     fn apply_pending_binds(&mut self, mut pattern: GraphPattern) -> GraphPattern {
         let exprs = std::mem::take(&mut self.pending_bind_checks);
         let vars = std::mem::take(&mut self.pending_bind_targets);
-        for (var, expr) in vars.into_iter().zip(exprs.into_iter()) {
+        for (var, expr) in vars.into_iter().zip(exprs) {
             pattern = GraphPattern::Extend {
                 inner: Box::new(pattern),
                 variable: var,

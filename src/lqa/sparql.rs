@@ -6668,13 +6668,9 @@ fn lqa_scalar_temporal_prop(val: &str, component: &str) -> Option<SparExpr> {
         "hour" => comps.hour?,
         "minute" => comps.minute?,
         "second" => comps.second?,
-        "millisecond" | "millisecondOfSecond" | "millisecondsOfSecond" => {
-            (comps.ns? / 1_000_000) as i64
-        }
-        "microsecond" | "microsecondOfSecond" | "microsecondsOfSecond" => {
-            (comps.ns? / 1_000) as i64
-        }
-        "nanosecond" | "nanosecondOfSecond" | "nanosecondsOfSecond" => comps.ns? as i64,
+        "millisecond" | "millisecondOfSecond" | "millisecondsOfSecond" => comps.ns? / 1_000_000,
+        "microsecond" | "microsecondOfSecond" | "microsecondsOfSecond" => comps.ns? / 1_000,
+        "nanosecond" | "nanosecondOfSecond" | "nanosecondsOfSecond" => comps.ns?,
         "week" => {
             let y = comps.year?;
             let m = comps.month?;
@@ -6695,7 +6691,7 @@ fn lqa_scalar_temporal_prop(val: &str, component: &str) -> Option<SparExpr> {
             let d = comps.day?;
             let epoch_d = crate::translator::cypher::temporal_epoch(y, m, d);
             let epoch_y = crate::translator::cypher::temporal_epoch(y, 1, 1);
-            (epoch_d - epoch_y + 1) as i64
+            epoch_d - epoch_y + 1
         }
         "quarter" => {
             let m = comps.month?;
@@ -6734,8 +6730,7 @@ fn lqa_scalar_temporal_prop(val: &str, component: &str) -> Option<SparExpr> {
             let d = comps.day?;
             // temporal_epoch returns absolute day count from year 1; subtract Unix epoch offset.
             const UNIX_EPOCH_DAY: i64 = 719163; // temporal_epoch(1970, 1, 1)
-            let epoch_days =
-                crate::translator::cypher::temporal_epoch(y, mo, d) as i64 - UNIX_EPOCH_DAY;
+            let epoch_days = crate::translator::cypher::temporal_epoch(y, mo, d) - UNIX_EPOCH_DAY;
             let h = comps.hour.unwrap_or(0);
             let mi = comps.minute.unwrap_or(0);
             let s = comps.second.unwrap_or(0);
@@ -6747,12 +6742,11 @@ fn lqa_scalar_temporal_prop(val: &str, component: &str) -> Option<SparExpr> {
             let mo = comps.month?;
             let d = comps.day?;
             const UNIX_EPOCH_DAY: i64 = 719163; // temporal_epoch(1970, 1, 1)
-            let epoch_days =
-                crate::translator::cypher::temporal_epoch(y, mo, d) as i64 - UNIX_EPOCH_DAY;
+            let epoch_days = crate::translator::cypher::temporal_epoch(y, mo, d) - UNIX_EPOCH_DAY;
             let h = comps.hour.unwrap_or(0);
             let mi = comps.minute.unwrap_or(0);
             let s = comps.second.unwrap_or(0);
-            let ns = comps.ns.unwrap_or(0) as i64;
+            let ns = comps.ns.unwrap_or(0);
             let secs = epoch_days * 86_400 + h * 3600 + mi * 60 + s;
             secs * 1_000 + ns / 1_000_000
         }
