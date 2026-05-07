@@ -5209,6 +5209,10 @@ impl Compiler {
                 Ok(SparExpr::FunctionCall(Function::Regex, vec![a, b]))
             }
             "type" => {
+                // type(null) → null.
+                if matches!(args.first(), Some(Expr::Literal(Literal::Null))) {
+                    return Ok(SparExpr::Variable(self.fresh("_null")));
+                }
                 if let Some(Expr::Variable { name: rv, .. }) = args.first() {
                     let rv = rv.as_str();
                     // Fast path: single static type known at compile time.
@@ -5790,16 +5794,35 @@ impl Compiler {
                     }
                     Expr::Variable { name: vname, .. } => {
                         // Only handle scan_vars (MATCH-bound graph nodes).
-                        // Variables that are path names, relationship variables, computed
-                        // aliases, or anything not from a graph scan must fall back to
-                        // legacy so that the correct SyntaxError/TypeError is raised.
+                        // Path variables, relationship variables, and scalar variables
+                        // are definite TypeErrors in Cypher.
                         if !self.scan_vars.contains(vname.as_str()) {
+                            // Path variables: labels(path) is always a TypeError.
+                            if self.path_lengths.contains_key(vname.as_str()) {
+                                return Err(PolygraphError::Translation {
+                                    message: format!(
+                                        "labels() applied to path variable '{vname}'; \
+                                         expected a node (InvalidArgumentType)"
+                                    ),
+                                });
+                            }
+                            // Relationship variables: labels(rel) is always a TypeError.
+                            if self.edge_vars.contains_key(vname.as_str()) {
+                                return Err(PolygraphError::Translation {
+                                    message: format!(
+                                        "labels() applied to relationship variable '{vname}'; \
+                                         expected a node (InvalidArgumentType)"
+                                    ),
+                                });
+                            }
+                            // Other non-scan-var (computed alias, subscript result, etc.):
+                            // fall back to legacy so the correct error/result is produced.
                             return Err(PolygraphError::Unsupported {
                                 construct: "labels()".into(),
                                 spec_ref: "openCypher 9 §6.3.5".into(),
                                 reason: format!(
                                     "labels({vname}) on non-scan-var requires legacy path \
-                                     (may be a path variable or relationship variable)"
+                                     (may be a computed alias or subscript result)"
                                 ),
                             });
                         }
