@@ -48,7 +48,6 @@ pub fn union_all<T>(left: Bag<T>, right: Bag<T>) -> Bag<T> {
 /// openCypher 9 §4.7: `UNION` (without `ALL`) removes duplicates from the
 /// combined result.  Requires `T: Eq + Hash`.
 pub fn union_distinct<T: Eq + Hash + Clone>(left: &[T], right: &[T]) -> Bag<T> {
-    use std::collections::LinkedList;
     // Preserve first-occurrence order while deduplicating.
     let mut seen: HashMap<&T, ()> = HashMap::new();
     let mut out: Vec<T> = Vec::new();

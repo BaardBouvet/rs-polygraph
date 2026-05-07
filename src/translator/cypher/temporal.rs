@@ -83,7 +83,9 @@ fn tc_parse_sub_second_and_tz(tail: &str) -> (Option<i64>, Option<String>) {
     }
     if tail.starts_with('.') {
         // Find end of digit run after the dot
-        let frac_end = 1 + tail[1..].find(|c: char| !c.is_ascii_digit()).unwrap_or(tail.len() - 1);
+        let frac_end = 1 + tail[1..]
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(tail.len() - 1);
         let frac = &tail[1..frac_end];
         let mut buf = frac.to_string();
         while buf.len() < 9 {
@@ -92,7 +94,11 @@ fn tc_parse_sub_second_and_tz(tail: &str) -> (Option<i64>, Option<String>) {
         let ns: i64 = buf[..9].parse().unwrap_or(0);
         let tz = {
             let after = &tail[frac_end..];
-            if after.is_empty() { None } else { Some(after.to_string()) }
+            if after.is_empty() {
+                None
+            } else {
+                Some(after.to_string())
+            }
         };
         (Some(ns), tz)
     } else {
@@ -284,7 +290,7 @@ fn tc_tz_suffix_month(tz: &str, month: i64) -> String {
     }
     // Named timezone lookup — approximate DST by month:
     // Central European Time: +01:00 (Oct-Mar), +02:00 (Apr-Sep)
-    let is_summer = matches!(month, 4 | 5 | 6 | 7 | 8 | 9);
+    let is_summer = matches!(month, 4..=9);
     let (winter, summer) = tc_tz_winter_summer(tz);
     let offset = if is_summer { summer } else { winter };
     if offset == "Z" {
@@ -342,36 +348,7 @@ fn tc_tz_winter_summer(tz: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// Determine if a European-DST timezone is currently observing DST for the given date.
-/// Uses historically-approximate rules:
-/// - Spring forward: last Sunday of March (consistent since DST adoption)
-/// - Fall back: last Sunday of September (before 1996) or last Sunday of October (1996+)
-fn tc_is_eu_dst(tz: &str, y: i64, m: i64, d: i64) -> bool {
-    match tz {
-        "Europe/Stockholm" | "Europe/Paris" | "Europe/Berlin" | "Europe/Rome" | "Europe/Madrid"
-        | "Europe/Amsterdam" | "Europe/Brussels" | "Europe/Copenhagen" | "Europe/Warsaw"
-        | "Europe/Vienna" | "Europe/Zurich" | "Europe/Prague" | "Europe/Budapest"
-        | "Europe/London" | "Europe/Dublin" | "Europe/Lisbon" => {}
-        _ => return false,
-    }
-    // EU harmonized to last-Sunday-of-October fall-back from 1996 onward;
-    // before that, most countries used last Sunday of September.
-    let fall_month: i64 = if y >= 1996 { 10 } else { 9 };
-    if m > 3 && m < fall_month {
-        return true;
-    }
-    if m < 3 || m > fall_month {
-        return false;
-    }
-    let last_sun = tc_last_sunday_of_month(y, m);
-    if m == 3 {
-        d >= last_sun // spring forward: from last Sunday of March onward
-    } else {
-        d < last_sun // fall back: before last Sunday of fall_month
-    }
-}
-
-/// Hour-aware EU DST check.  Identical to [`tc_is_eu_dst`] except that on the
+/// Hour-aware EU DST check.  Identical to a date-only DST check except that on the
 /// exact transition day it uses the local wall-clock hour to resolve the
 /// ambiguity around the clock change:
 /// - Spring (last Sunday of March): advance at **2 AM** local → h < 2 = winter, h ≥ 2 = summer
@@ -393,14 +370,22 @@ fn tc_is_eu_dst_h(tz: &str, y: i64, m: i64, d: i64, h: i64) -> bool {
     }
     let last_sun = tc_last_sunday_of_month(y, m);
     if m == 3 {
-        if d < last_sun { return false; }
-        if d > last_sun { return true; }
+        if d < last_sun {
+            return false;
+        }
+        if d > last_sun {
+            return true;
+        }
         // On the transition day: clocks spring forward at 2 AM local.
         h >= 2
     } else {
         // fall_month
-        if d < last_sun { return true; }
-        if d > last_sun { return false; }
+        if d < last_sun {
+            return true;
+        }
+        if d > last_sun {
+            return false;
+        }
         // On the transition day: clocks fall back at 3 AM local (summer time).
         h < 3
     }
@@ -1085,11 +1070,8 @@ fn extract_base_time_with_tz(v: &Expression) -> Option<(String, bool)> {
             // Detect if s has an explicit timezone suffix.
             let has_tz = s.ends_with('Z')
                 || s.contains('+')
-                || s.rfind('-').map_or(false, |p| {
-                    p > 8
-                        && s.as_bytes()
-                            .get(p + 1)
-                            .map_or(false, |b| b.is_ascii_digit())
+                || s.rfind('-').is_some_and(|p| {
+                    p > 8 && s.as_bytes().get(p + 1).is_some_and(|b| b.is_ascii_digit())
                 });
             if has_tz {
                 temporal_parse_time(s).map(|t| (t, true))
@@ -1258,12 +1240,9 @@ pub(crate) fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<S
                     // whether the original string ends with 'Z' or has +/-.
                     let has_tz = s.ends_with('Z')
                         || s.contains('+')
-                        || s.rfind('-').map_or(false, |p| {
+                        || s.rfind('-').is_some_and(|p| {
                             // '-' after position 8 is likely TZ sign, not date separator
-                            p > 8
-                                && s.as_bytes()
-                                    .get(p + 1)
-                                    .map_or(false, |b| b.is_ascii_digit())
+                            p > 8 && s.as_bytes().get(p + 1).is_some_and(|b| b.is_ascii_digit())
                         });
                     if has_tz {
                         temporal_parse_time(s).map(|t| (t, true))
@@ -1309,7 +1288,7 @@ pub(crate) fn temporal_time_from_map(pairs: &[(String, Expression)]) -> Option<S
         let new_tz_str = override_tz.as_deref().map(tc_tz_suffix);
         let new_tz_s = new_tz_str
             .as_deref()
-            .and_then(|tz| parse_tz_offset_s(tz))
+            .and_then(parse_tz_offset_s)
             .unwrap_or(base_tz_s);
         // For time() values, named timezone brackets are stripped; only numeric offsets remain.
         let tz_str = new_tz_str.unwrap_or_else(|| {
@@ -1555,7 +1534,7 @@ pub(crate) fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Opti
             );
             let (bh, bmin, bsec, bns) = parse_localtime_to_parts(time_body).unwrap_or((0, 0, 0, 0));
             // Apply date overrides
-            let year = temporal_get_i(pairs, "year").unwrap_or(by);
+            let _year = temporal_get_i(pairs, "year").unwrap_or(by);
             let month = temporal_get_i(pairs, "month").unwrap_or(bm);
             let day = temporal_get_i(pairs, "day").unwrap_or(bd);
             let year = temporal_get_i(pairs, "year").unwrap_or(by);
@@ -1701,7 +1680,7 @@ pub(crate) fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Opti
         // the hour (if provided), so that the DST boundary on the transition day
         // is resolved correctly (e.g. Oct 29 00:00 = summer, 04:00 = winter).
         let dp: Vec<&str> = date_part.splitn(3, '-').collect();
-        let y: i64 = dp.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let y: i64 = dp.first().and_then(|s| s.parse().ok()).unwrap_or(0);
         let m: i64 = dp.get(1).and_then(|s| s.parse().ok()).unwrap_or(month);
         let d: i64 = dp.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
         // Peek at the hour override (if any) for hour-aware DST.  Use noon
@@ -1727,7 +1706,7 @@ pub(crate) fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Opti
             let effective_tz = if let Some(brk) = norm.find('[') {
                 let tz_name = &norm[brk + 1..norm.len().saturating_sub(1)];
                 let dp: Vec<&str> = date_part.splitn(3, '-').collect();
-                let y: i64 = dp.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let y: i64 = dp.first().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let m: i64 = dp.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                 let d: i64 = dp.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
                 tc_tz_suffix_ymd(tz_name, y, m, d)
@@ -1751,7 +1730,7 @@ pub(crate) fn temporal_datetime_from_map(pairs: &[(String, Expression)]) -> Opti
                 if let Some(brk) = norm.find('[') {
                     let tz_name = &norm[brk + 1..norm.len().saturating_sub(1)];
                     let dp: Vec<&str> = date_part.splitn(3, '-').collect();
-                    let y: i64 = dp.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let y: i64 = dp.first().and_then(|s| s.parse().ok()).unwrap_or(0);
                     let m: i64 = dp.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                     let d: i64 = dp.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
                     tc_tz_suffix_ymd(tz_name, y, m, d)
@@ -1832,10 +1811,7 @@ struct ParsedDuration {
 /// Items are split by `", "` with bracket/quote-depth tracking so that nested
 /// lists and single-quoted strings are handled correctly.
 pub fn list_contains_str(list: &str, value: &str) -> bool {
-    let inner = match list
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-    {
+    let inner = match list.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         Some(s) => s,
         None => return false,
     };
@@ -1850,11 +1826,8 @@ pub fn list_contains_str(list: &str, value: &str) -> bool {
     let mut i = 0usize;
     loop {
         // Determine whether we're at a top-level separator or end-of-string.
-        let at_sep = !in_quote
-            && depth == 0
-            && i + 1 < n
-            && bytes[i] == b','
-            && bytes[i + 1] == b' ';
+        let at_sep =
+            !in_quote && depth == 0 && i + 1 < n && bytes[i] == b',' && bytes[i + 1] == b' ';
         if at_sep || i == n {
             let item = &inner[item_start..i];
             if item == value {
@@ -1884,10 +1857,7 @@ pub fn list_contains_str(list: &str, value: &str) -> bool {
 /// Example: `"['B', 'C']"` → `"['b', 'c']"`.
 /// Non-string elements (numbers, booleans) pass through unchanged.
 pub fn list_map_lower_str(list: &str) -> String {
-    let inner = match list
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-    {
+    let inner = match list.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         Some(s) => s,
         None => return "[]".to_owned(),
     };
@@ -1903,11 +1873,8 @@ pub fn list_map_lower_str(list: &str) -> String {
     let mut i = 0usize;
     let mut elements: Vec<&str> = Vec::new();
     loop {
-        let at_sep = !in_quote
-            && depth == 0
-            && i + 1 < n
-            && bytes[i] == b','
-            && bytes[i + 1] == b' ';
+        let at_sep =
+            !in_quote && depth == 0 && i + 1 < n && bytes[i] == b',' && bytes[i + 1] == b' ';
         if at_sep || i == n {
             elements.push(&inner[item_start..i]);
             if at_sep {
@@ -1953,8 +1920,16 @@ pub fn duration_sub_str(a: &str, b: &str) -> Option<String> {
 }
 
 fn duration_arith_str(a: &str, b: &str, subtract: bool) -> Option<String> {
-    let (a_neg, a_str) = if a.starts_with('-') { (true, &a[1..]) } else { (false, a) };
-    let (b_neg, b_str) = if b.starts_with('-') { (true, &b[1..]) } else { (false, b) };
+    let (a_neg, a_str) = if a.starts_with('-') {
+        (true, &a[1..])
+    } else {
+        (false, a)
+    };
+    let (b_neg, b_str) = if b.starts_with('-') {
+        (true, &b[1..])
+    } else {
+        (false, b)
+    };
     let da = parse_duration_components(a_str)?;
     let db = parse_duration_components(b_str)?;
 
@@ -1963,14 +1938,14 @@ fn duration_arith_str(a: &str, b: &str, subtract: bool) -> Option<String> {
     let sign_b: i64 = if b_neg { -1 } else { 1 };
     let sign_b = if subtract { -sign_b } else { sign_b };
 
-    let y  = sign_a * da.years   + sign_b * db.years;
-    let mo = sign_a * da.months  + sign_b * db.months;
-    let d  = sign_a * da.days    + sign_b * db.days;
+    let y = sign_a * da.years + sign_b * db.years;
+    let mo = sign_a * da.months + sign_b * db.months;
+    let d = sign_a * da.days + sign_b * db.days;
 
     // Time: accumulate in nanoseconds then carry ns→s→min→h
-    let total_ns: i128 =
-        (sign_a as i128) * (da.seconds as i128 * 1_000_000_000 + da.subsec_ns as i128)
-      + (sign_b as i128) * (db.seconds as i128 * 1_000_000_000 + db.subsec_ns as i128);
+    let total_ns: i128 = (sign_a as i128)
+        * (da.seconds as i128 * 1_000_000_000 + da.subsec_ns as i128)
+        + (sign_b as i128) * (db.seconds as i128 * 1_000_000_000 + db.subsec_ns as i128);
     let (carry_min_from_s, s_ns) = ns_carry(total_ns);
 
     let total_min = sign_a * da.minutes + sign_b * db.minutes + carry_min_from_s;
@@ -1987,27 +1962,30 @@ pub fn duration_mul_num_str(dur: &str, num: f64) -> Option<String> {
     if num == 1.0 {
         return Some(dur.to_owned());
     }
-    let (neg, abs_str) = if dur.starts_with('-') { (true, &dur[1..]) } else { (false, dur) };
+    let (neg, abs_str) = if dur.starts_with('-') {
+        (true, &dur[1..])
+    } else {
+        (false, dur)
+    };
     let d = parse_duration_components(abs_str)?;
     let eff = if neg { -num } else { num };
 
     // Scale with cascading (same logic as temporal_duration_from_map).
-    let years_f      = d.years   as f64 * eff;
-    let months_f     = d.months  as f64 * eff + years_f.fract()  * 12.0;
-    let days_f       = d.days    as f64 * eff + months_f.fract() * 30.436875;
-    let hours_f      = d.hours   as f64 * eff + days_f.fract()   * 24.0;
-    let minutes_f    = d.minutes as f64 * eff + hours_f.fract()  * 60.0;
-    let secs_f       = d.seconds as f64 * eff + minutes_f.fract() * 60.0;
-    let ns_extra_f   = d.subsec_ns as f64 * eff;
+    let years_f = d.years as f64 * eff;
+    let months_f = d.months as f64 * eff + years_f.fract() * 12.0;
+    let days_f = d.days as f64 * eff + months_f.fract() * 30.436875;
+    let hours_f = d.hours as f64 * eff + days_f.fract() * 24.0;
+    let minutes_f = d.minutes as f64 * eff + hours_f.fract() * 60.0;
+    let secs_f = d.seconds as f64 * eff + minutes_f.fract() * 60.0;
+    let ns_extra_f = d.subsec_ns as f64 * eff;
 
-    let y  = years_f.trunc()  as i64;
+    let y = years_f.trunc() as i64;
     let mo = months_f.trunc() as i64;
-    let dv = days_f.trunc()   as i64;
+    let dv = days_f.trunc() as i64;
 
     // Seconds + ns → carry into minutes then hours.
     // Truncate sub-nanosecond fractions: 0.5 ns → 0 ns (Cypher semantics).
-    let total_ns: i128 = (secs_f * 1_000_000_000.0).round() as i128
-                       + ns_extra_f as i128;
+    let total_ns: i128 = (secs_f * 1_000_000_000.0).round() as i128 + ns_extra_f as i128;
     let (carry_min, s_ns) = ns_carry(total_ns);
 
     let total_min = minutes_f.trunc() as i64 + carry_min;
@@ -2036,14 +2014,22 @@ fn ns_carry(total_ns: i128) -> (i64, i128) {
         -((-total_ns) / 1_000_000_000)
     };
     let remain_ns = total_ns - s_whole * 1_000_000_000;
-    let carry_min = if s_whole >= 0 { s_whole / 60 } else { -((-s_whole) / 60) };
+    let carry_min = if s_whole >= 0 {
+        s_whole / 60
+    } else {
+        -((-s_whole) / 60)
+    };
     let s_final = s_whole - carry_min * 60;
     (carry_min as i64, s_final * 1_000_000_000 + remain_ns)
 }
 
 /// Carry whole minutes into whole hours + remaining minutes.
 fn min_carry(total_min: i64) -> (i64, i64) {
-    let carry_h = if total_min >= 0 { total_min / 60 } else { -((-total_min) / 60) };
+    let carry_h = if total_min >= 0 {
+        total_min / 60
+    } else {
+        -((-total_min) / 60)
+    };
     let min = total_min - carry_h * 60;
     (carry_h, min)
 }
@@ -2659,7 +2645,7 @@ pub(crate) fn temporal_parse_datetime(s: &str) -> Option<String> {
         // Named timezone without an explicit numeric offset: compute DST-aware offset from date.
         let tz_name = &tz_raw[1..tz_raw.len().saturating_sub(1)]; // strip '[' and ']'
         let dp: Vec<&str> = date_s.splitn(3, '-').collect();
-        let y: i64 = dp.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+        let y: i64 = dp.first().and_then(|s| s.parse().ok()).unwrap_or(0);
         let m: i64 = dp.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
         let d: i64 = dp.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
         tc_tz_suffix_ymd(tz_name, y, m, d)
@@ -2699,15 +2685,15 @@ fn parse_duration_alternative(body: &str) -> Option<String> {
     let time_part = &body[t_pos + 1..];
     // Parse date: YYYY-MM-DD
     let date_parts: Vec<&str> = date_part.splitn(3, '-').collect();
-    if date_parts.len() < 1 {
+    if date_parts.is_empty() {
         return None;
     }
-    let y: i64 = date_parts.get(0)?.parse().ok()?;
+    let y: i64 = date_parts.first()?.parse().ok()?;
     let mo: i64 = date_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
     let d: i64 = date_parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
     // Parse time: HH:MM:SS.sss
     let time_parts: Vec<&str> = time_part.splitn(3, ':').collect();
-    let h: i64 = time_parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let h: i64 = time_parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
     let min: i64 = time_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
     let sec_str = time_parts.get(2).copied().unwrap_or("0");
     let sec_s = format_duration_seconds(sec_str.parse::<f64>().ok()?);
@@ -3408,7 +3394,7 @@ fn parse_time_ns_ext(s: &str) -> Option<(i128, i64, bool)> {
     };
     // Detect trailing TZ offset: Z or ±HH[:MM], starting at pos ≥ 5
     let tz_start = s
-        .rfind(|c: char| c == 'Z' || c == '+' || c == '-')
+        .rfind(['Z', '+', '-'])
         .filter(|&p| p >= 5)
         .unwrap_or(s.len());
     let tz_raw = &s[tz_start..];
@@ -3624,9 +3610,9 @@ fn split_ns_to_hms(total_ns: i128) -> (i64, i64, i128) {
     let m = (rem / 60_000_000_000) as i64;
     let s = (rem % 60_000_000_000) as i128;
     if neg {
-        (-(h as i64), -(m as i64), -(s))
+        (-h, -m, -(s))
     } else {
-        (h as i64, m as i64, s)
+        (h, m, s)
     }
 }
 
@@ -3814,8 +3800,8 @@ pub(crate) fn temporal_duration_in_seconds(lhs: &str, rhs: &str) -> Option<Strin
             } else {
                 0i64 // midnight
             };
-            let r_off_s = parse_tz_offset_s(&tc_tz_suffix_ymdh(named_tz, ry, rm, rd, r_hour))
-                .unwrap_or(0);
+            let r_off_s =
+                parse_tz_offset_s(&tc_tz_suffix_ymdh(named_tz, ry, rm, rd, r_hour)).unwrap_or(0);
             let r_utc = r.local_time_ns - r_off_s as i128 * 1_000_000_000;
             (l.utc_time_ns, r_utc)
         } else {
@@ -3835,8 +3821,8 @@ pub(crate) fn temporal_duration_in_seconds(lhs: &str, rhs: &str) -> Option<Strin
             } else {
                 0i64 // midnight
             };
-            let l_off_s = parse_tz_offset_s(&tc_tz_suffix_ymdh(named_tz, ly, lm, ld, l_hour))
-                .unwrap_or(0);
+            let l_off_s =
+                parse_tz_offset_s(&tc_tz_suffix_ymdh(named_tz, ly, lm, ld, l_hour)).unwrap_or(0);
             let l_utc = l.local_time_ns - l_off_s as i128 * 1_000_000_000;
             (l_utc, r.utc_time_ns)
         } else {

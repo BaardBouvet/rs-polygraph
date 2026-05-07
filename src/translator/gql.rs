@@ -19,6 +19,8 @@ pub fn translate(
     base_iri: Option<&str>,
     rdf_star: bool,
 ) -> Result<TranslationResult, PolygraphError> {
-    let cypher_query = CypherQuery { clauses: query.clauses.clone() };
+    let cypher_query = CypherQuery {
+        clauses: query.clauses.clone(),
+    };
     crate::translator::cypher::translate(&cypher_query, base_iri, rdf_star)
 }

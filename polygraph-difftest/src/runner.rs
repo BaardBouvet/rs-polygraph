@@ -247,35 +247,54 @@ pub fn run_one(spec: &QuerySpec) -> RunReport {
             .with_custom_function(
                 oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-contains"),
                 |args| {
-                    let list = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                    let list = match args.first()? {
+                        OxTerm::Literal(l) => l.value().to_owned(),
+                        _ => return None,
+                    };
                     let value_str = match args.get(1)? {
                         OxTerm::Literal(l) => {
                             let dt = l.datatype().as_str();
-                            if dt.ends_with("#boolean") || dt.ends_with("#integer")
-                                || dt.ends_with("#long") || dt.ends_with("#double")
-                                || dt.ends_with("#float") || dt.ends_with("#decimal")
+                            if dt.ends_with("#boolean")
+                                || dt.ends_with("#integer")
+                                || dt.ends_with("#long")
+                                || dt.ends_with("#double")
+                                || dt.ends_with("#float")
+                                || dt.ends_with("#decimal")
                             {
                                 l.value().to_owned()
                             } else {
-                                format!("'{}'", l.value().replace('\\', "\\\\").replace('\'', "\\'"))
+                                format!(
+                                    "'{}'",
+                                    l.value().replace('\\', "\\\\").replace('\'', "\\'")
+                                )
                             }
                         }
                         _ => return None,
                     };
-                    let result = polygraph::translator::cypher::list_contains_str(&list, &value_str);
-                    Some(OxTerm::Literal(oxigraph::model::Literal::new_typed_literal(
-                        result.to_string(),
-                        oxigraph::model::NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#boolean"),
-                    )))
+                    let result =
+                        polygraph::translator::cypher::list_contains_str(&list, &value_str);
+                    Some(OxTerm::Literal(
+                        oxigraph::model::Literal::new_typed_literal(
+                            result.to_string(),
+                            oxigraph::model::NamedNode::new_unchecked(
+                                "http://www.w3.org/2001/XMLSchema#boolean",
+                            ),
+                        ),
+                    ))
                 },
             )
             .with_custom_function(
                 oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-map-lower"),
                 |args| {
                     use oxigraph::model::Term as OxTerm;
-                    let list = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
+                    let list = match args.first()? {
+                        OxTerm::Literal(l) => l.value().to_owned(),
+                        _ => return None,
+                    };
                     let result = polygraph::translator::cypher::list_map_lower_str(&list);
-                    Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(result)))
+                    Some(OxTerm::Literal(
+                        oxigraph::model::Literal::new_simple_literal(result),
+                    ))
                 },
             ),
     );

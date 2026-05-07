@@ -40,6 +40,12 @@ pub struct AstLowerer {
     list_const_map: HashMap<String, Expr>,
 }
 
+impl Default for AstLowerer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AstLowerer {
     pub fn new() -> Self {
         Self {
@@ -151,9 +157,11 @@ impl AstLowerer {
                 //   WITH [1, 2] AS prows  UNWIND prows AS p
                 // to be handled entirely in the LQA path without a legacy fallback.
                 let list = match &list {
-                    Expr::Variable { name: vname, .. } => {
-                        self.list_const_map.get(vname.as_str()).cloned().unwrap_or(list)
-                    }
+                    Expr::Variable { name: vname, .. } => self
+                        .list_const_map
+                        .get(vname.as_str())
+                        .cloned()
+                        .unwrap_or(list),
                     // Also substitute for UNWIND list[idx] where `list` is a known
                     // constant list variable: UNWIND qrows[p] AS q
                     Expr::Subscript(box_list, box_idx) => {
@@ -482,7 +490,8 @@ impl AstLowerer {
             projected
         };
 
-        let ordered = self.maybe_order_by_with_aggs(filtered, w.order_by.as_ref(), &agg_items_for_order)?;
+        let ordered =
+            self.maybe_order_by_with_aggs(filtered, w.order_by.as_ref(), &agg_items_for_order)?;
         let skipped = self.maybe_skip(ordered, w.skip.as_ref())?;
         self.maybe_limit(skipped, w.limit.as_ref())
     }
@@ -518,7 +527,8 @@ impl AstLowerer {
 
         // Use agg-aware ORDER BY so that `ORDER BY max(n.age)` resolves to
         // the alias variable bound by the GROUP BY rather than a bare aggregate.
-        let ordered = self.maybe_order_by_with_aggs(projected, r.order_by.as_ref(), &agg_items_for_order)?;
+        let ordered =
+            self.maybe_order_by_with_aggs(projected, r.order_by.as_ref(), &agg_items_for_order)?;
         let skipped = self.maybe_skip(ordered, r.skip.as_ref())?;
         let limited = self.maybe_limit(skipped, r.limit.as_ref())?;
 
@@ -534,6 +544,7 @@ impl AstLowerer {
     // ── Return / WITH items ───────────────────────────────────────────────────
 
     /// Split the item list into (projection items, aggregate items).
+    #[allow(clippy::type_complexity)]
     fn lower_return_items(
         &mut self,
         items: &ast::ReturnItems,
@@ -629,7 +640,8 @@ impl AstLowerer {
                         // Compound expression containing aggregate(s): extract each
                         // aggregate sub-expression, replacing it with a fresh variable.
                         // E.g. `count(a) + 3` → agg[_agg_0=count(a)], proj[_agg_0 + 3].
-                        let extracted = extract_nested_aggregates(expr, &mut aggs, &mut gen_counter);
+                        let extracted =
+                            extract_nested_aggregates(expr, &mut aggs, &mut gen_counter);
                         // Mark this alias as a post-group computation (not a group key).
                         post_group_aliases.push(alias.clone());
                         proj.push(ProjItem {
@@ -656,15 +668,8 @@ impl AstLowerer {
 
     // ── ORDER BY / SKIP / LIMIT helpers ──────────────────────────────────────
 
-    fn maybe_order_by(
-        &mut self,
-        op: Op,
-        order_by: Option<&ast::OrderByClause>,
-    ) -> Result<Op, PolygraphError> {
-        self.maybe_order_by_with_aggs(op, order_by, &[])
-    }
-
-    /// Like `maybe_order_by`, but when ORDER BY expressions are aggregates that
+    /// Like `maybe_order_by_with_aggs` but without pre-existing aggregate items (common case).
+    /// When ORDER BY expressions are aggregates that
     /// already appear in `agg_items` (e.g. `ORDER BY max(n.age)` when the RETURN
     /// clause also has `max(n.age)`), they are replaced by the corresponding alias
     /// variable rather than re-emitting the aggregate — which would be invalid
@@ -943,7 +948,8 @@ impl AstLowerer {
                                 Some(Expr::Literal(lit))
                             }
                             // Null propagation
-                            else if matches!(args.first(), Some(AE::Literal(ast::Literal::Null))) {
+                            else if matches!(args.first(), Some(AE::Literal(ast::Literal::Null)))
+                            {
                                 Some(Expr::Literal(LLit::Null))
                             }
                             // Map arg: call temporal helpers with ORIGINAL AST Map pairs.
@@ -951,32 +957,35 @@ impl AstLowerer {
                             // caller may have WITH-bound substitutions we don't track
                             // here — fall through to legacy (return None).
                             else if let Some(AE::Map(pairs)) = args.first() {
-                                let has_var = pairs.iter().any(|(_, v)| {
-                                    matches!(v, AE::Variable(_))
-                                });
+                                let has_var =
+                                    pairs.iter().any(|(_, v)| matches!(v, AE::Variable(_)));
                                 if has_var {
                                     None
                                 } else {
-                                let result = match base {
-                                    "date" => tc::temporal_date_from_map(pairs)
-                                        .map(|s| LLit::TypedLiteral(s, XSD_DATE.into())),
-                                    "localtime" => tc::temporal_localtime_from_map(pairs)
-                                        .map(|s| LLit::TypedLiteral(s, XSD_TIME.into())),
-                                    "time" => tc::temporal_time_from_map(pairs)
-                                        .map(|s| LLit::TypedLiteral(s, XSD_TIME.into())),
-                                    "localdatetime" => tc::temporal_localdatetime_from_map(pairs)
-                                        .map(|s| LLit::TypedLiteral(s, XSD_DATETIME.into())),
-                                    "datetime" => tc::temporal_datetime_from_map(pairs)
-                                        .map(|s| LLit::TypedLiteral(s, XSD_DATETIME.into())),
-                                    "duration" => tc::temporal_duration_from_map(pairs)
-                                        .map(LLit::String),
-                                    _ => None,
-                                };
-                                result.map(|lit| Expr::Literal(lit))
+                                    let result = match base {
+                                        "date" => tc::temporal_date_from_map(pairs)
+                                            .map(|s| LLit::TypedLiteral(s, XSD_DATE.into())),
+                                        "localtime" => tc::temporal_localtime_from_map(pairs)
+                                            .map(|s| LLit::TypedLiteral(s, XSD_TIME.into())),
+                                        "time" => tc::temporal_time_from_map(pairs)
+                                            .map(|s| LLit::TypedLiteral(s, XSD_TIME.into())),
+                                        "localdatetime" => {
+                                            tc::temporal_localdatetime_from_map(pairs)
+                                                .map(|s| LLit::TypedLiteral(s, XSD_DATETIME.into()))
+                                        }
+                                        "datetime" => tc::temporal_datetime_from_map(pairs)
+                                            .map(|s| LLit::TypedLiteral(s, XSD_DATETIME.into())),
+                                        "duration" => {
+                                            tc::temporal_duration_from_map(pairs).map(LLit::String)
+                                        }
+                                        _ => None,
+                                    };
+                                    result.map(Expr::Literal)
                                 }
                             }
                             // String arg: call temporal string parse helper
-                            else if let Some(AE::Literal(ast::Literal::String(s))) = args.first() {
+                            else if let Some(AE::Literal(ast::Literal::String(s))) = args.first()
+                            {
                                 let result = match base {
                                     "date" => tc::temporal_parse_date(s)
                                         .map(|v| LLit::TypedLiteral(v, XSD_DATE.into())),
@@ -988,11 +997,10 @@ impl AstLowerer {
                                         .map(|v| LLit::TypedLiteral(v, XSD_DATETIME.into())),
                                     "datetime" => tc::temporal_parse_datetime(s)
                                         .map(|v| LLit::TypedLiteral(v, XSD_DATETIME.into())),
-                                    "duration" => tc::temporal_parse_duration(s)
-                                        .map(LLit::String),
+                                    "duration" => tc::temporal_parse_duration(s).map(LLit::String),
                                     _ => None,
                                 };
-                                result.map(|lit| Expr::Literal(lit))
+                                result.map(Expr::Literal)
                             } else {
                                 None
                             }
@@ -1019,19 +1027,15 @@ impl AstLowerer {
                                     };
                                 if let (Some(unit), Some(overrides)) = (unit, overrides_pairs) {
                                     // Build TcComponents from the "other" arg (args[1])
-                                    let mut comps =
-                                        tc::tc_from_expr(&args[1])
-                                            .or_else(|| {
-                                                // Fallback: try tc_from_iso_string for
-                                                // string-literal "other" arg
-                                                if let AE::Literal(ast::Literal::String(s)) =
-                                                    &args[1]
-                                                {
-                                                    tc::tc_from_iso_string(s)
-                                                } else {
-                                                    None
-                                                }
-                                            });
+                                    let mut comps = tc::tc_from_expr(&args[1]).or_else(|| {
+                                        // Fallback: try tc_from_iso_string for
+                                        // string-literal "other" arg
+                                        if let AE::Literal(ast::Literal::String(s)) = &args[1] {
+                                            tc::tc_from_iso_string(s)
+                                        } else {
+                                            None
+                                        }
+                                    });
                                     if let Some(ref mut c) = comps {
                                         tc::tc_apply_truncation(&unit, c);
                                         tc::tc_apply_overrides(overrides, c);
@@ -1197,9 +1201,7 @@ impl AstLowerer {
                                 _ => None,
                             };
                             let nanos = match &largs[1] {
-                                Expr::Literal(LLit::Integer(n)) => {
-                                    u32::try_from(*n).ok()
-                                }
+                                Expr::Literal(LLit::Integer(n)) => u32::try_from(*n).ok(),
                                 _ => None,
                             };
                             if let (Some(s), Some(ns)) = (secs, nanos) {
@@ -1212,7 +1214,7 @@ impl AstLowerer {
                                 None
                             }
                         }
-                        "datetime.fromepochmillis" if largs.len() >= 1 => {
+                        "datetime.fromepochmillis" if !largs.is_empty() => {
                             let ms = match &largs[0] {
                                 Expr::Literal(LLit::Integer(n)) => Some(*n),
                                 _ => None,
@@ -1635,7 +1637,13 @@ fn lower_literal(l: &ast::Literal) -> Literal {
 fn is_size_null_ne_listcomp(expr: &Expr) -> bool {
     if let Expr::FunctionCall { name, args, .. } = expr {
         if name.eq_ignore_ascii_case("size") && args.len() == 1 {
-            if let Expr::ListComprehension { variable, predicate: Some(pred), projection: None, .. } = &args[0] {
+            if let Expr::ListComprehension {
+                variable,
+                predicate: Some(pred),
+                projection: None,
+                ..
+            } = &args[0]
+            {
                 return is_null_ne_pred_lqa(pred, variable);
             }
         }
@@ -1775,23 +1783,47 @@ fn rewrite_aggs_to_vars(expr: Expr, agg_items: &[AggItem]) -> Expr {
 fn expr_contains_aggregate(expr: &Expr) -> bool {
     match expr {
         Expr::Aggregate { .. } => true,
-        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b)
-        | Expr::Mod(a, b) | Expr::Pow(a, b) | Expr::And(a, b) | Expr::Or(a, b)
-        | Expr::Xor(a, b) | Expr::Comparison(_, a, b) => {
-            expr_contains_aggregate(a) || expr_contains_aggregate(b)
-        }
-        Expr::Unary(_, e) | Expr::Not(e) | Expr::IsNull(e) | Expr::IsNotNull(e)
+        Expr::Add(a, b)
+        | Expr::Sub(a, b)
+        | Expr::Mul(a, b)
+        | Expr::Div(a, b)
+        | Expr::Mod(a, b)
+        | Expr::Pow(a, b)
+        | Expr::And(a, b)
+        | Expr::Or(a, b)
+        | Expr::Xor(a, b)
+        | Expr::Comparison(_, a, b) => expr_contains_aggregate(a) || expr_contains_aggregate(b),
+        Expr::Unary(_, e)
+        | Expr::Not(e)
+        | Expr::IsNull(e)
+        | Expr::IsNotNull(e)
         | Expr::Property(e, _) => expr_contains_aggregate(e),
         Expr::FunctionCall { args, .. } => args.iter().any(expr_contains_aggregate),
         Expr::List(items) => items.iter().any(expr_contains_aggregate),
-        Expr::CaseSearched { branches, else_expr } => {
-            branches.iter().any(|(w, t)| expr_contains_aggregate(w) || expr_contains_aggregate(t))
-                || else_expr.as_ref().map_or(false, |e| expr_contains_aggregate(e))
+        Expr::CaseSearched {
+            branches,
+            else_expr,
+        } => {
+            branches
+                .iter()
+                .any(|(w, t)| expr_contains_aggregate(w) || expr_contains_aggregate(t))
+                || else_expr
+                    .as_ref()
+                    .is_some_and(|e| expr_contains_aggregate(e))
         }
-        Expr::ListComprehension { list, predicate, projection, .. } => {
+        Expr::ListComprehension {
+            list,
+            predicate,
+            projection,
+            ..
+        } => {
             expr_contains_aggregate(list)
-                || predicate.as_ref().map_or(false, |p| expr_contains_aggregate(p))
-                || projection.as_ref().map_or(false, |p| expr_contains_aggregate(p))
+                || predicate
+                    .as_ref()
+                    .is_some_and(|p| expr_contains_aggregate(p))
+                || projection
+                    .as_ref()
+                    .is_some_and(|p| expr_contains_aggregate(p))
         }
         _ => false,
     }
@@ -1805,7 +1837,10 @@ fn extract_nested_aggregates(expr: Expr, aggs: &mut Vec<AggItem>, counter: &mut 
         Expr::Aggregate { .. } => {
             let alias = format!("_agg_ex_{}", *counter);
             *counter += 1;
-            aggs.push(AggItem { expr, alias: alias.clone() });
+            aggs.push(AggItem {
+                expr,
+                alias: alias.clone(),
+            });
             Expr::var(&alias)
         }
         Expr::Add(a, b) => Expr::Add(
@@ -1832,21 +1867,33 @@ fn extract_nested_aggregates(expr: Expr, aggs: &mut Vec<AggItem>, counter: &mut 
             Box::new(extract_nested_aggregates(*a, aggs, counter)),
             Box::new(extract_nested_aggregates(*b, aggs, counter)),
         ),
-        Expr::Unary(op, e) => Expr::Unary(op, Box::new(extract_nested_aggregates(*e, aggs, counter))),
+        Expr::Unary(op, e) => {
+            Expr::Unary(op, Box::new(extract_nested_aggregates(*e, aggs, counter)))
+        }
         Expr::Not(e) => Expr::Not(Box::new(extract_nested_aggregates(*e, aggs, counter))),
-        Expr::FunctionCall { name, distinct, args } => Expr::FunctionCall {
+        Expr::FunctionCall {
             name,
             distinct,
-            args: args.into_iter().map(|a| extract_nested_aggregates(a, aggs, counter)).collect(),
+            args,
+        } => Expr::FunctionCall {
+            name,
+            distinct,
+            args: args
+                .into_iter()
+                .map(|a| extract_nested_aggregates(a, aggs, counter))
+                .collect(),
         },
-        Expr::ListComprehension { variable, list, predicate, projection } => {
-            Expr::ListComprehension {
-                variable,
-                list: Box::new(extract_nested_aggregates(*list, aggs, counter)),
-                predicate: predicate.map(|p| Box::new(extract_nested_aggregates(*p, aggs, counter))),
-                projection: projection.map(|p| Box::new(extract_nested_aggregates(*p, aggs, counter))),
-            }
-        }
+        Expr::ListComprehension {
+            variable,
+            list,
+            predicate,
+            projection,
+        } => Expr::ListComprehension {
+            variable,
+            list: Box::new(extract_nested_aggregates(*list, aggs, counter)),
+            predicate: predicate.map(|p| Box::new(extract_nested_aggregates(*p, aggs, counter))),
+            projection: projection.map(|p| Box::new(extract_nested_aggregates(*p, aggs, counter))),
+        },
         _ => expr,
     }
 }

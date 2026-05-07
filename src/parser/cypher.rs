@@ -176,6 +176,7 @@ fn build_with_clause(pair: Pair<Rule>) -> Result<WithClause, PolygraphError> {
 // ── Projection body ──────────────────────────────────────────────────────────
 
 /// Returns (distinct, items, order_by, skip, limit).
+#[allow(clippy::type_complexity)]
 fn build_projection_body(
     pair: Pair<Rule>,
 ) -> Result<
@@ -590,7 +591,9 @@ fn build_set_item(pair: Pair<Rule>) -> Result<SetItem, PolygraphError> {
             let mut acc_inner = children.remove(0).into_inner();
             // Skip any leading "(" — the first variable is what we want.
             let variable = {
-                let first = acc_inner.next().expect("prop_access_expr has variable or paren");
+                let first = acc_inner
+                    .next()
+                    .expect("prop_access_expr has variable or paren");
                 if first.as_rule() == Rule::variable {
                     ident_text(&first)
                 } else {
@@ -960,7 +963,9 @@ fn build_comparison_suffix(
                 .expect("comp_op is followed by comparison_expr");
 
             // Check whether any inner comparison_suffix starts with comp_op.
-            let inner_has_comp_suffix = rhs_pair.clone().into_inner()
+            let inner_has_comp_suffix = rhs_pair
+                .clone()
+                .into_inner()
                 .filter(|p| p.as_rule() == Rule::comparison_suffix)
                 .any(|sfx| {
                     sfx.into_inner()
@@ -1131,36 +1136,14 @@ fn build_unary_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
                 .map(|n| n == MIN_INT_MAG)
                 .unwrap_or(false)
                 || raw
-                    .starts_with("0x")
-                    .then(|| {
-                        u64::from_str_radix(&raw[2..], 16)
-                            .map(|n| n == MIN_INT_MAG)
-                            .unwrap_or(false)
-                    })
+                    .strip_prefix("0x")
+                    .or_else(|| raw.strip_prefix("0X"))
+                    .and_then(|h| u64::from_str_radix(h, 16).map(|n| n == MIN_INT_MAG).ok())
                     .unwrap_or(false)
                 || raw
-                    .starts_with("0X")
-                    .then(|| {
-                        u64::from_str_radix(&raw[2..], 16)
-                            .map(|n| n == MIN_INT_MAG)
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false)
-                || raw
-                    .starts_with("0o")
-                    .then(|| {
-                        u64::from_str_radix(&raw[2..], 8)
-                            .map(|n| n == MIN_INT_MAG)
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false)
-                || raw
-                    .starts_with("0O")
-                    .then(|| {
-                        u64::from_str_radix(&raw[2..], 8)
-                            .map(|n| n == MIN_INT_MAG)
-                            .unwrap_or(false)
-                    })
+                    .strip_prefix("0o")
+                    .or_else(|| raw.strip_prefix("0O"))
+                    .and_then(|o| u64::from_str_radix(o, 8).map(|n| n == MIN_INT_MAG).ok())
                     .unwrap_or(false);
             if is_min_int {
                 return Ok(Expression::Literal(Literal::Integer(i64::MIN)));
@@ -1413,10 +1396,8 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
                             // Full form: parse all clauses via build_clause.
                             let mut full_clauses = Vec::new();
                             for cl_pair in all_clause_pairs {
-                                let inner_cl = cl_pair
-                                    .into_inner()
-                                    .next()
-                                    .expect("clause has inner rule");
+                                let inner_cl =
+                                    cl_pair.into_inner().next().expect("clause has inner rule");
                                 full_clauses.push(build_clause(inner_cl)?);
                             }
                             return Ok(Expression::ExistsFullSubquery {
@@ -1424,9 +1405,10 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
                             });
                         }
 
-                        let pl_pair = found_match.ok_or_else(|| PolygraphError::UnsupportedFeature {
-                            feature: "EXISTS subquery without MATCH".to_string(),
-                        })?;
+                        let pl_pair =
+                            found_match.ok_or_else(|| PolygraphError::UnsupportedFeature {
+                                feature: "EXISTS subquery without MATCH".to_string(),
+                            })?;
                         patterns = Some(build_pattern_list(pl_pair)?);
                         if let Some(wp) = found_where {
                             where_expr = Some(Box::new(build_where_clause(wp)?.expression));

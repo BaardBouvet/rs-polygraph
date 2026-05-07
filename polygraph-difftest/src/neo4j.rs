@@ -75,7 +75,11 @@ pub fn run_against_neo4j(
     fixture: &PropertyGraph,
     cypher: &str,
 ) -> Result<Neo4jResult, String> {
-    let endpoint = format!("{}/db/{}/tx/commit", cfg.url.trim_end_matches('/'), cfg.database);
+    let endpoint = format!(
+        "{}/db/{}/tx/commit",
+        cfg.url.trim_end_matches('/'),
+        cfg.database
+    );
     let auth = format!(
         "Basic {}",
         base64_encode(&format!("{}:{}", cfg.user, cfg.password))

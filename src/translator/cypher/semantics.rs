@@ -384,14 +384,13 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
             Clause::Return(r) => {
                 // NoVariablesInScope: RETURN * with no bound variables from MATCH/WITH/UNWIND.
                 // Only fire when there was at least one MATCH clause (tracked by seen_match).
-                if matches!(&r.items, ReturnItems::All) && seen_match {
-                    if bound_vars.is_empty() {
+                if matches!(&r.items, ReturnItems::All) && seen_match
+                    && bound_vars.is_empty() {
                         return Err(PolygraphError::Translation {
                             message: "NoVariablesInScope: RETURN * with no variables in scope"
                                 .to_string(),
                         });
                     }
-                }
 
                 // UnexpectedSyntax: pattern predicate directly used as return expression.
                 if let ReturnItems::Explicit(items) = &r.items {
@@ -484,15 +483,13 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                         } else if !matches!(&item.expression, Expression::Aggregate(_))
                             && expr_contains_aggregate(&item.expression)
                             && expr_has_free_var_outside_agg(&item.expression)
-                        {
-                            if is_ambiguous_aggregation(&item.expression, &non_agg_items) {
+                            && is_ambiguous_aggregation(&item.expression, &non_agg_items) {
                                 return Err(PolygraphError::Translation {
                                     message: "AmbiguousAggregationExpression: mix of aggregate \
                                               and non-aggregate in RETURN expression"
                                         .to_string(),
                                 });
                             }
-                        }
                     }
                 }
 
@@ -580,7 +577,7 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                             .chain(proj_aliases.iter().copied())
                             .collect();
                         for sort in &ob.items {
-                            let is_projected = proj_exprs.iter().any(|pe| *pe == &sort.expression)
+                            let is_projected = proj_exprs.contains(&&sort.expression)
                                 || if let Expression::Variable(v) = &sort.expression {
                                     proj_vars.contains(v.as_str())
                                 } else {
@@ -591,15 +588,14 @@ fn validate_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
                                     if let Expression::Variable(v) = base.as_ref() {
                                         // Only error if the base variable is NOT projected directly
                                         // (i.e., `b` not in projection, and `b.property` is used)
-                                        if !proj_vars.contains(v.as_str()) {
-                                            if kinds.contains_key(v.as_str())
-                                                || bound_vars.contains(v.as_str())
+                                        if !proj_vars.contains(v.as_str())
+                                            && (kinds.contains_key(v.as_str())
+                                                || bound_vars.contains(v.as_str()))
                                             {
                                                 return Err(PolygraphError::Translation {
                                                     message: format!("UndefinedVariable: variable '{v}' not defined"),
                                                 });
                                             }
-                                        }
                                     }
                                 }
                             }

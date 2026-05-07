@@ -24,7 +24,6 @@ use crate::error::PolygraphError;
 use crate::lqa::expr::{CmpOp, Expr, Literal, UnaryOp};
 use crate::lqa::op::{CreateEdge, CreateNode, Direction, MergeClause, Op, RemoveItem, SetItem};
 
-
 /// Convenience macro to construct an `Unsupported` error for write-clause
 /// constructs.  All write fallbacks use the same spec reference.
 macro_rules! write_unsupported {
@@ -96,7 +95,9 @@ pub fn compile_write(op: &Op, base_iri: Option<&str>) -> Result<CompiledWrite, P
 
     // Make sure this is actually a write-containing tree.
     if !contains_write(op) {
-        return Err(write_unsupported!("compile_write: op tree has no write operator"));
+        return Err(write_unsupported!(
+            "compile_write: op tree has no write operator"
+        ));
     }
 
     // ── Generate UPDATE strings ───────────────────────────────────────────
@@ -105,7 +106,10 @@ pub fn compile_write(op: &Op, base_iri: Option<&str>) -> Result<CompiledWrite, P
     let mut updates = Vec::new();
     compile_write_recursive(op, base, &mut counter, &mut bnode_map, &mut updates)?;
 
-    Ok(CompiledWrite { update_strings: updates, has_return })
+    Ok(CompiledWrite {
+        update_strings: updates,
+        has_return,
+    })
 }
 
 // ── Recursive write-op visitor ────────────────────────────────────────────────
@@ -120,7 +124,11 @@ fn compile_write_recursive(
     out: &mut Vec<String>,
 ) -> Result<(), PolygraphError> {
     match op {
-        Op::Create { inner, nodes, edges } => {
+        Op::Create {
+            inner,
+            nodes,
+            edges,
+        } => {
             let match_ctx = read_context(inner);
             let where_parts = op_to_where_parts(match_ctx, base)?;
 
@@ -141,7 +149,11 @@ fn compile_write_recursive(
 
             compile_set_items(items, &where_parts, base, out)?;
         }
-        Op::Delete { inner, detach, exprs } => {
+        Op::Delete {
+            inner,
+            detach,
+            exprs,
+        } => {
             let match_ctx = read_context(inner);
             let where_parts = op_to_where_parts(match_ctx, base)?;
 
@@ -202,10 +214,15 @@ fn compile_write_recursive(
 /// Return a copy of `op` with all write operators removed, keeping the
 /// Projection and the innermost read-only subtree.
 ///
-/// Used to extract the SELECT op for RETURN-clause queries.
+/// Used to extract the SELECT op for RETURN-clause queries (Phase 8.7).
+#[allow(dead_code)]
 fn strip_writes(op: &Op) -> Op {
     match op {
-        Op::Projection { inner, items, distinct } => Op::Projection {
+        Op::Projection {
+            inner,
+            items,
+            distinct,
+        } => Op::Projection {
             inner: Box::new(strip_writes(inner)),
             items: items.clone(),
             distinct: *distinct,
@@ -335,7 +352,11 @@ fn op_to_where_parts(op: &Op, base: &str) -> Result<Vec<String>, PolygraphError>
     match op {
         Op::Unit => Ok(Vec::new()),
 
-        Op::Scan { variable, label, extra_labels } => {
+        Op::Scan {
+            variable,
+            label,
+            extra_labels,
+        } => {
             let mut parts = Vec::new();
             // Universal node-existence sentinel.
             parts.push(format!("?{variable} <{base}__node> <{base}__node>"));
@@ -354,7 +375,16 @@ fn op_to_where_parts(op: &Op, base: &str) -> Result<Vec<String>, PolygraphError>
             Ok(parts)
         }
 
-        Op::Expand { inner, from, rel_var: _, to, rel_types, direction, range: None, path_var: _ } => {
+        Op::Expand {
+            inner,
+            from,
+            rel_var: _,
+            to,
+            rel_types,
+            direction,
+            range: None,
+            path_var: _,
+        } => {
             let mut parts = op_to_where_parts(inner, base)?;
             if rel_types.is_empty() {
                 // Untyped relationship: use a variable predicate.
@@ -426,8 +456,7 @@ fn op_to_where_parts(op: &Op, base: &str) -> Result<Vec<String>, PolygraphError>
         // or change variable names — just recurse into the inner op.
         // Note: Limit/Skip cannot be transparently stripped because they restrict which rows
         // to update (SPARQL UPDATE has no LIMIT/SKIP concept).
-        Op::OrderBy { inner, .. }
-        | Op::Distinct { inner, .. } => op_to_where_parts(inner, base),
+        Op::OrderBy { inner, .. } | Op::Distinct { inner, .. } => op_to_where_parts(inner, base),
 
         // Projection (WITH clause): only transparent if all items are identity passthroughs
         // (no renames, no expressions). Simple variable renames like `WITH n AS a` appear
@@ -595,17 +624,11 @@ fn lit_to_sparql(lit: &Literal) -> Option<String> {
 fn expr_to_sparql_lit(expr: &Expr, _base: &str) -> Option<String> {
     match expr {
         Expr::Literal(lit) => lit_to_sparql(lit),
-        Expr::Unary(UnaryOp::Neg, inner) => {
-            match inner.as_ref() {
-                Expr::Literal(Literal::Integer(n)) => {
-                    Some(format!("\"{}\"^^<{XSD_INTEGER}>", -n))
-                }
-                Expr::Literal(Literal::Float(f)) => {
-                    Some(format!("\"{}\"^^<{XSD_DOUBLE}>", -f))
-                }
-                _ => None,
-            }
-        }
+        Expr::Unary(UnaryOp::Neg, inner) => match inner.as_ref() {
+            Expr::Literal(Literal::Integer(n)) => Some(format!("\"{}\"^^<{XSD_INTEGER}>", -n)),
+            Expr::Literal(Literal::Float(f)) => Some(format!("\"{}\"^^<{XSD_DOUBLE}>", -f)),
+            _ => None,
+        },
         // Constant list / map literals: serialise as a compact string literal.
         Expr::List(_) | Expr::Map(_) => {
             let s = lqa_write_serialize_literal(expr)?;
@@ -809,9 +832,18 @@ fn compile_create(
 
     for edge in edges {
         let (src_ref, dst_ref) = match edge.direction {
-            Direction::Outgoing => (var_ref_for_create(&edge.from, bnode_map), var_ref_for_create(&edge.to, bnode_map)),
-            Direction::Incoming => (var_ref_for_create(&edge.to, bnode_map), var_ref_for_create(&edge.from, bnode_map)),
-            Direction::Undirected => (var_ref_for_create(&edge.from, bnode_map), var_ref_for_create(&edge.to, bnode_map)),
+            Direction::Outgoing => (
+                var_ref_for_create(&edge.from, bnode_map),
+                var_ref_for_create(&edge.to, bnode_map),
+            ),
+            Direction::Incoming => (
+                var_ref_for_create(&edge.to, bnode_map),
+                var_ref_for_create(&edge.from, bnode_map),
+            ),
+            Direction::Undirected => (
+                var_ref_for_create(&edge.from, bnode_map),
+                var_ref_for_create(&edge.to, bnode_map),
+            ),
         };
         let type_iri = format!("{base}{}", edge.rel_type);
         insert_triples.push(format!("{src_ref} <{type_iri}> {dst_ref}"));
@@ -836,7 +868,9 @@ fn compile_create(
         out.push(format!("INSERT DATA {{ {insert_body} }}"));
     } else {
         let where_body = where_parts.join(" . ");
-        out.push(format!("INSERT {{ {insert_body} }} WHERE {{ {where_body} }}"));
+        out.push(format!(
+            "INSERT {{ {insert_body} }} WHERE {{ {where_body} }}"
+        ));
     }
 
     Ok(())
@@ -864,7 +898,11 @@ fn compile_set_items(
 
     for item in items {
         match item {
-            SetItem::Property { variable, key, value } => {
+            SetItem::Property {
+                variable,
+                key,
+                value,
+            } => {
                 let n_var = format!("?{variable}");
                 let prop_iri = format!("{base}{key}");
                 let old_var = format!("?__{variable}_{key}_old");
@@ -891,8 +929,10 @@ fn compile_set_items(
                     // SET n.prop = <expr>
                     // Need to bind the expression and the old value.
                     let where_with_old = if base_where.is_empty() {
-                        format!("{n_var} <{base}__node> <{base}__node> . \
-                                 OPTIONAL {{ {n_var} <{prop_iri}> {old_var} }}")
+                        format!(
+                            "{n_var} <{base}__node> <{base}__node> . \
+                                 OPTIONAL {{ {n_var} <{prop_iri}> {old_var} }}"
+                        )
                     } else {
                         format!("{base_where} . OPTIONAL {{ {n_var} <{prop_iri}> {old_var} }}")
                     };
@@ -966,18 +1006,13 @@ fn collect_property_bindings(
         Expr::Property(node_expr, key) => {
             if let Expr::Variable { name: var_name, .. } = node_expr.as_ref() {
                 let bound_var = format!("?__{var_name}_{key}_cur");
-                let binding = format!(
-                    "OPTIONAL {{ ?{var_name} <{base}{key}> {bound_var} }}"
-                );
+                let binding = format!("OPTIONAL {{ ?{var_name} <{base}{key}> {bound_var} }}");
                 if !bindings.contains(&binding) {
                     bindings.push(binding);
                 }
             }
         }
-        Expr::Add(a, b)
-        | Expr::Sub(a, b)
-        | Expr::Mul(a, b)
-        | Expr::Div(a, b) => {
+        Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) => {
             collect_property_bindings(a, primary_var, base, bindings);
             collect_property_bindings(b, primary_var, base, bindings);
         }
@@ -1142,14 +1177,24 @@ fn compile_merge(
                 out,
             )?;
         }
-        Op::Expand { inner, from, rel_var: _, to, rel_types, direction, range: None, path_var: _ } => {
+        Op::Expand {
+            inner,
+            from,
+            rel_var: _,
+            to,
+            rel_types,
+            direction,
+            range: None,
+            path_var: _,
+        } => {
             // Relationship MERGE.
             compile_merge_rel(
                 inner,
                 from,
                 to,
                 rel_types,
-                direction.clone(),                &clause.on_match,
+                direction.clone(),
+                &clause.on_match,
                 &clause.on_create,
                 outer_where,
                 base,
@@ -1185,9 +1230,8 @@ fn compile_merge_node_scan(
     }
 
     // Validate that we can parse the scan op's WHERE parts.
-    let _scan_parts = op_to_where_parts(scan_op, base).map_err(|_| {
-        write_unsupported!("write_merge_node_scan_parts")
-    })?;
+    let _scan_parts = op_to_where_parts(scan_op, base)
+        .map_err(|_| write_unsupported!("write_merge_node_scan_parts"))?;
 
     // Determine node variable name from scan.
     let var_name = match scan_op {
@@ -1215,10 +1259,11 @@ fn compile_merge_node_scan(
         // Convert `?var_name <iri> value` to `bnode <iri> value` for INSERT.
         let insert_part = part.replace(&format!("?{var_name}"), &bnode);
         // Skip OPTIONAL and FILTER parts.
-        if !insert_part.contains("OPTIONAL") && !insert_part.contains("FILTER") {
-            if insert_part != format!("{bnode} <{base}__node> <{base}__node>") {
-                insert_parts.push(insert_part);
-            }
+        if !insert_part.contains("OPTIONAL")
+            && !insert_part.contains("FILTER")
+            && insert_part != format!("{bnode} <{base}__node> <{base}__node>")
+        {
+            insert_parts.push(insert_part);
         }
     }
 
@@ -1265,7 +1310,11 @@ fn compile_merge_node_scan(
         let match_where = if outer_where.is_empty() {
             pattern_parts.join(" . ")
         } else {
-            format!("{} . {}", outer_where.join(" . "), pattern_parts.join(" . "))
+            format!(
+                "{} . {}",
+                outer_where.join(" . "),
+                pattern_parts.join(" . ")
+            )
         };
         // Generate SET updates using the match pattern as WHERE.
         let parts_vec: Vec<String> = if outer_where.is_empty() {
@@ -1306,8 +1355,12 @@ fn compile_merge_rel(
     // If the base WHERE doesn't constrain the from/to nodes (both variables
     // would be unbound), the INSERT would generate triples with unbound variables
     // which SPARQL silently ignores. Fall back to legacy in this case.
-    let from_is_constrained = base_where_parts.iter().any(|p| p.contains(&format!("?{from}")));
-    let to_is_constrained = base_where_parts.iter().any(|p| p.contains(&format!("?{to}")));
+    let from_is_constrained = base_where_parts
+        .iter()
+        .any(|p| p.contains(&format!("?{from}")));
+    let to_is_constrained = base_where_parts
+        .iter()
+        .any(|p| p.contains(&format!("?{to}")));
     if !from_is_constrained || !to_is_constrained {
         return Err(write_unsupported!("write_merge_rel_unbound_nodes"));
     }
@@ -1350,7 +1403,9 @@ fn compile_merge_rel(
             format!("{base_where} . FILTER NOT EXISTS {{ {not_exists_str} }}")
         };
 
-        out.push(format!("INSERT {{ {insert_body} }} WHERE {{ {where_body} }}"));
+        out.push(format!(
+            "INSERT {{ {insert_body} }} WHERE {{ {where_body} }}"
+        ));
 
         // ON MATCH SET for the relationship.
         if !on_match.is_empty() {

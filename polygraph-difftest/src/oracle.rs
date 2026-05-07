@@ -85,7 +85,9 @@ impl Comparison {
 
 fn rows_eq(a: &[Value], b: &[Value]) -> bool {
     a.len() == b.len()
-        && a.iter().zip(b.iter()).all(|(x, y)| x.cypher_structural_eq(y))
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.cypher_structural_eq(y))
 }
 
 fn diff_rows(expected: &[Vec<Value>], actual: &[Vec<Value>]) -> ComparisonOutcome {
@@ -137,13 +139,7 @@ mod tests {
 
     #[test]
     fn column_name_diff_caught() {
-        let res = Comparison::compare(
-            &[col("name")],
-            &[],
-            &[col("n.name")],
-            &[],
-            OrderMode::Bag,
-        );
+        let res = Comparison::compare(&[col("name")], &[], &[col("n.name")], &[], OrderMode::Bag);
         match res {
             ComparisonOutcome::Mismatch {
                 column_name_diff: Some(_),

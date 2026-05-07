@@ -14,11 +14,11 @@ use pest::Parser;
 use pest_derive::Parser;
 
 use crate::ast::cypher::{
-    AggregateExpr, CallClause, Clause, CompOp, CreateClause, DeleteClause, Direction,
-    Expression, Ident, Label, Literal, MapLiteral, MatchClause, MergeClause, NodePattern,
-    OrderByClause, Pattern, PatternElement, PatternList, RangeQuantifier, RelationshipPattern,
-    RemoveClause, RemoveItem, ReturnClause, ReturnItem, ReturnItems, SetClause, SetItem, SortItem,
-    UnwindClause, WhereClause, WithClause,
+    AggregateExpr, CallClause, Clause, CompOp, CreateClause, DeleteClause, Direction, Expression,
+    Ident, Label, Literal, MapLiteral, MatchClause, MergeClause, NodePattern, OrderByClause,
+    Pattern, PatternElement, PatternList, RangeQuantifier, RelationshipPattern, RemoveClause,
+    RemoveItem, ReturnClause, ReturnItem, ReturnItems, SetClause, SetItem, SortItem, UnwindClause,
+    WhereClause, WithClause,
 };
 use crate::ast::gql::GqlQuery;
 use crate::error::PolygraphError;
@@ -37,7 +37,10 @@ pub fn parse(input: &str) -> Result<GqlQuery, PolygraphError> {
             pest::error::InputLocation::Pos(p) => format!("pos:{p}"),
             pest::error::InputLocation::Span((s, end)) => format!("span:{s}..{end}"),
         };
-        PolygraphError::Parse { span, message: e.to_string() }
+        PolygraphError::Parse {
+            span,
+            message: e.to_string(),
+        }
     })?;
     let query_pair = pairs.next().unwrap();
     build_query(query_pair)
@@ -114,7 +117,9 @@ fn build_match_clause(pair: Pair<Rule>) -> Result<MatchClause, PolygraphError> {
                     .into_inner()
                     .find(|p| p.as_rule() == Rule::expression)
                     .expect("match_where has expression");
-                where_ = Some(WhereClause { expression: build_expression(expr_pair)? });
+                where_ = Some(WhereClause {
+                    expression: build_expression(expr_pair)?,
+                });
             }
             _ => {}
         }
@@ -147,13 +152,17 @@ fn build_return_clause(pair: Pair<Rule>) -> Result<ReturnClause, PolygraphError>
             Rule::order_by_clause => order_by = Some(build_order_by_clause(inner)?),
             Rule::skip_clause => {
                 skip = Some(build_expression(
-                    inner.into_inner().find(|p| p.as_rule() == Rule::expression)
+                    inner
+                        .into_inner()
+                        .find(|p| p.as_rule() == Rule::expression)
                         .expect("skip_clause has expression"),
                 )?);
             }
             Rule::limit_clause => {
                 limit = Some(build_expression(
-                    inner.into_inner().find(|p| p.as_rule() == Rule::expression)
+                    inner
+                        .into_inner()
+                        .find(|p| p.as_rule() == Rule::expression)
                         .expect("limit_clause has expression"),
                 )?);
             }
@@ -161,7 +170,13 @@ fn build_return_clause(pair: Pair<Rule>) -> Result<ReturnClause, PolygraphError>
         }
     }
     let (distinct, items) = build_return_body(body_pair.expect("grammar guarantees return_body"))?;
-    Ok(ReturnClause { distinct, items, order_by, skip, limit })
+    Ok(ReturnClause {
+        distinct,
+        items,
+        order_by,
+        skip,
+        limit,
+    })
 }
 
 fn build_next_clause(pair: Pair<Rule>) -> Result<Clause, PolygraphError> {
@@ -217,7 +232,9 @@ fn build_create_clause(pair: Pair<Rule>) -> Result<CreateClause, PolygraphError>
         .into_inner()
         .find(|p| p.as_rule() == Rule::pattern_list)
         .expect("create_clause has pattern_list");
-    Ok(CreateClause { pattern: build_pattern_list(pl_pair)? })
+    Ok(CreateClause {
+        pattern: build_pattern_list(pl_pair)?,
+    })
 }
 
 fn build_merge_clause(pair: Pair<Rule>) -> Result<MergeClause, PolygraphError> {
@@ -226,7 +243,10 @@ fn build_merge_clause(pair: Pair<Rule>) -> Result<MergeClause, PolygraphError> {
         .into_inner()
         .find(|p| p.as_rule() == Rule::pattern)
         .expect("merge_clause has pattern");
-    Ok(MergeClause { pattern: build_pattern(pat_pair)?, actions: Vec::new() })
+    Ok(MergeClause {
+        pattern: build_pattern(pat_pair)?,
+        actions: Vec::new(),
+    })
 }
 
 fn build_set_clause(pair: Pair<Rule>) -> Result<SetClause, PolygraphError> {
@@ -251,25 +271,42 @@ fn build_set_item(pair: Pair<Rule>) -> Result<SetItem, PolygraphError> {
                 .trim_matches('`')
                 .to_string();
             let value = build_expression(
-                children.into_iter()
+                children
+                    .into_iter()
                     .find(|p| p.as_rule() == Rule::expression)
                     .expect("set_item property has expression"),
             )?;
-            Ok(SetItem::Property { variable, key, value })
+            Ok(SetItem::Property {
+                variable,
+                key,
+                value,
+            })
         }
         Rule::variable => {
             let var_name = ident_text(&children[0]);
             let has_map = children.iter().any(|p| p.as_rule() == Rule::map_literal);
             if has_map {
                 let map = build_map_literal(
-                    children.into_iter().find(|p| p.as_rule() == Rule::map_literal).unwrap(),
+                    children
+                        .into_iter()
+                        .find(|p| p.as_rule() == Rule::map_literal)
+                        .unwrap(),
                 )?;
-                Ok(SetItem::MergeMap { variable: var_name, map })
+                Ok(SetItem::MergeMap {
+                    variable: var_name,
+                    map,
+                })
             } else {
                 let value = build_expression(
-                    children.into_iter().find(|p| p.as_rule() == Rule::expression).unwrap(),
+                    children
+                        .into_iter()
+                        .find(|p| p.as_rule() == Rule::expression)
+                        .unwrap(),
                 )?;
-                Ok(SetItem::NodeReplace { variable: var_name, value })
+                Ok(SetItem::NodeReplace {
+                    variable: var_name,
+                    value,
+                })
             }
         }
         _ => unreachable!("unexpected set_item start: {:?}", children[0].as_rule()),
@@ -287,7 +324,10 @@ fn build_delete_clause(pair: Pair<Rule>) -> Result<DeleteClause, PolygraphError>
             _ => {}
         }
     }
-    Ok(DeleteClause { detach, expressions: exprs })
+    Ok(DeleteClause {
+        detach,
+        expressions: exprs,
+    })
 }
 
 fn build_remove_clause(pair: Pair<Rule>) -> Result<RemoveClause, PolygraphError> {
@@ -358,7 +398,11 @@ fn build_call_clause(pair: Pair<Rule>) -> Result<CallClause, PolygraphError> {
             _ => {}
         }
     }
-    Ok(CallClause { procedure, args, yields })
+    Ok(CallClause {
+        procedure,
+        args,
+        yields,
+    })
 }
 
 // ── ORDER BY ──────────────────────────────────────────────────────────────────
@@ -476,9 +520,8 @@ fn build_node_pattern_chain(pair: Pair<Rule>) -> Result<Vec<PatternElement>, Pol
             Rule::chain_link => {
                 for link_inner in inner.into_inner() {
                     match link_inner.as_rule() {
-                        Rule::rel_pattern => elements.push(PatternElement::Relationship(
-                            build_rel_pattern(link_inner)?,
-                        )),
+                        Rule::rel_pattern => elements
+                            .push(PatternElement::Relationship(build_rel_pattern(link_inner)?)),
                         Rule::node_pattern => {
                             elements.push(PatternElement::Node(build_node_pattern(link_inner)?))
                         }
@@ -528,7 +571,11 @@ fn build_node_pattern(pair: Pair<Rule>) -> Result<NodePattern, PolygraphError> {
             _ => {}
         }
     }
-    Ok(NodePattern { variable, labels, properties })
+    Ok(NodePattern {
+        variable,
+        labels,
+        properties,
+    })
 }
 
 fn build_rel_pattern(pair: Pair<Rule>) -> Result<RelationshipPattern, PolygraphError> {
@@ -581,27 +628,48 @@ fn build_rel_pattern(pair: Pair<Rule>) -> Result<RelationshipPattern, PolygraphE
         _ => Direction::Both,
     };
 
-    Ok(RelationshipPattern { variable, direction, rel_types, properties, range })
+    Ok(RelationshipPattern {
+        variable,
+        direction,
+        rel_types,
+        properties,
+        range,
+    })
 }
 
 fn build_range_literal(pair: Pair<Rule>) -> Result<RangeQuantifier, PolygraphError> {
     let text = pair.as_str().trim();
     if text == "*" {
-        return Ok(RangeQuantifier { lower: None, upper: None });
+        return Ok(RangeQuantifier {
+            lower: None,
+            upper: None,
+        });
     }
     let rest = text.trim_start_matches('*').trim();
     if rest.is_empty() {
-        return Ok(RangeQuantifier { lower: None, upper: None });
+        return Ok(RangeQuantifier {
+            lower: None,
+            upper: None,
+        });
     }
     if let Some((lo, hi)) = rest.split_once("..") {
-        let lower =
-            if lo.trim().is_empty() { None } else { Some(lo.trim().parse::<u64>().unwrap_or(0)) };
-        let upper =
-            if hi.trim().is_empty() { None } else { Some(hi.trim().parse::<u64>().unwrap_or(0)) };
+        let lower = if lo.trim().is_empty() {
+            None
+        } else {
+            Some(lo.trim().parse::<u64>().unwrap_or(0))
+        };
+        let upper = if hi.trim().is_empty() {
+            None
+        } else {
+            Some(hi.trim().parse::<u64>().unwrap_or(0))
+        };
         Ok(RangeQuantifier { lower, upper })
     } else {
         let n = rest.parse::<u64>().unwrap_or(0);
-        Ok(RangeQuantifier { lower: Some(n), upper: Some(n) })
+        Ok(RangeQuantifier {
+            lower: Some(n),
+            upper: Some(n),
+        })
     }
 }
 
@@ -644,8 +712,10 @@ fn build_expression(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
 }
 
 fn build_or_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    let mut children: Vec<_> =
-        pair.into_inner().filter(|p| p.as_rule() == Rule::xor_expr).collect();
+    let mut children: Vec<_> = pair
+        .into_inner()
+        .filter(|p| p.as_rule() == Rule::xor_expr)
+        .collect();
     let first = build_xor_expr(children.remove(0))?;
     children.into_iter().try_fold(first, |acc, p| {
         Ok(Expression::Or(Box::new(acc), Box::new(build_xor_expr(p)?)))
@@ -653,8 +723,10 @@ fn build_or_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
 }
 
 fn build_xor_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    let mut children: Vec<_> =
-        pair.into_inner().filter(|p| p.as_rule() == Rule::and_expr).collect();
+    let mut children: Vec<_> = pair
+        .into_inner()
+        .filter(|p| p.as_rule() == Rule::and_expr)
+        .collect();
     let first = build_and_expr(children.remove(0))?;
     children.into_iter().try_fold(first, |acc, p| {
         Ok(Expression::Xor(Box::new(acc), Box::new(build_and_expr(p)?)))
@@ -662,8 +734,10 @@ fn build_xor_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
 }
 
 fn build_and_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
-    let mut children: Vec<_> =
-        pair.into_inner().filter(|p| p.as_rule() == Rule::not_expr).collect();
+    let mut children: Vec<_> = pair
+        .into_inner()
+        .filter(|p| p.as_rule() == Rule::not_expr)
+        .collect();
     let first = build_not_expr(children.remove(0))?;
     children.into_iter().try_fold(first, |acc, p| {
         Ok(Expression::And(Box::new(acc), Box::new(build_not_expr(p)?)))
@@ -729,21 +803,37 @@ fn build_comparison_suffix(
         }
         Rule::kw_IN => {
             let rhs = build_add_sub_expr(children.next().expect("IN has rhs"))?;
-            Ok(Expression::Comparison(Box::new(lhs), CompOp::In, Box::new(rhs)))
+            Ok(Expression::Comparison(
+                Box::new(lhs),
+                CompOp::In,
+                Box::new(rhs),
+            ))
         }
         Rule::kw_STARTS => {
             let _kw_with = children.next();
             let rhs = build_add_sub_expr(children.next().expect("STARTS WITH has rhs"))?;
-            Ok(Expression::Comparison(Box::new(lhs), CompOp::StartsWith, Box::new(rhs)))
+            Ok(Expression::Comparison(
+                Box::new(lhs),
+                CompOp::StartsWith,
+                Box::new(rhs),
+            ))
         }
         Rule::kw_ENDS => {
             let _kw_with = children.next();
             let rhs = build_add_sub_expr(children.next().expect("ENDS WITH has rhs"))?;
-            Ok(Expression::Comparison(Box::new(lhs), CompOp::EndsWith, Box::new(rhs)))
+            Ok(Expression::Comparison(
+                Box::new(lhs),
+                CompOp::EndsWith,
+                Box::new(rhs),
+            ))
         }
         Rule::kw_CONTAINS => {
             let rhs = build_add_sub_expr(children.next().expect("CONTAINS has rhs"))?;
-            Ok(Expression::Comparison(Box::new(lhs), CompOp::Contains, Box::new(rhs)))
+            Ok(Expression::Comparison(
+                Box::new(lhs),
+                CompOp::Contains,
+                Box::new(rhs),
+            ))
         }
         _ => unreachable!("unexpected comparison_suffix start: {:?}", first.as_rule()),
     }
@@ -786,7 +876,10 @@ fn build_unary_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
     let inner = pair.into_inner().next().expect("unary_expr has child");
     match inner.as_rule() {
         Rule::unary_minus => {
-            let operand = inner.into_inner().next().expect("unary_minus has unary_expr");
+            let operand = inner
+                .into_inner()
+                .next()
+                .expect("unary_minus has unary_expr");
             Ok(Expression::Negate(Box::new(build_unary_expr(operand)?)))
         }
         Rule::power_expr => build_power_expr(inner),
@@ -798,7 +891,10 @@ fn build_power_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
     let mut children = pair.into_inner();
     let base = build_prop_expr(children.next().expect("power_expr has prop_expr"))?;
     if let Some(exponent) = children.next() {
-        Ok(Expression::Power(Box::new(base), Box::new(build_unary_expr(exponent)?)))
+        Ok(Expression::Power(
+            Box::new(base),
+            Box::new(build_unary_expr(exponent)?),
+        ))
     } else {
         Ok(base)
     }
@@ -841,7 +937,9 @@ fn build_atom(pair: Pair<Rule>) -> Result<Expression, PolygraphError> {
         Rule::string_literal => {
             let raw = inner.as_str();
             let content = &raw[1..raw.len() - 1];
-            Ok(Expression::Literal(Literal::String(unescape_string(content))))
+            Ok(Expression::Literal(Literal::String(unescape_string(
+                content,
+            ))))
         }
         Rule::boolean_literal => {
             let b = inner.as_str().eq_ignore_ascii_case("true");
@@ -879,7 +977,10 @@ fn build_aggregate_expr(pair: Pair<Rule>) -> Result<Expression, PolygraphError> 
                     _ => {}
                 }
             }
-            Ok(Expression::Aggregate(AggregateExpr::Count { distinct, expr }))
+            Ok(Expression::Aggregate(AggregateExpr::Count {
+                distinct,
+                expr,
+            }))
         }
         Rule::agg_call_expr => {
             let mut func_name = String::new();
@@ -982,7 +1083,11 @@ mod tests {
         let q = parse_ok("MATCH (n IS Person) RETURN n");
         if let Clause::Match(m) = &q.clauses[0] {
             if let PatternElement::Node(node) = &m.pattern.0[0].elements[0] {
-                assert_eq!(node.labels, vec!["Person"], "IS label should lower to colon label");
+                assert_eq!(
+                    node.labels,
+                    vec!["Person"],
+                    "IS label should lower to colon label"
+                );
             } else {
                 panic!("expected node");
             }
@@ -1045,7 +1150,11 @@ mod tests {
         let q = parse_ok("MATCH (a)-[r IS KNOWS]->(b) RETURN a");
         if let Clause::Match(m) = &q.clauses[0] {
             if let PatternElement::Relationship(rel) = &m.pattern.0[0].elements[1] {
-                assert_eq!(rel.rel_types, vec!["KNOWS"], "IS type should lower to colon type");
+                assert_eq!(
+                    rel.rel_types,
+                    vec!["KNOWS"],
+                    "IS type should lower to colon type"
+                );
             } else {
                 panic!("expected relationship");
             }

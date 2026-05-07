@@ -2391,104 +2391,155 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
     match store.0.query_opt(
         sparql.as_str(),
         SparqlEvaluator::new()
-        .with_custom_function(
-            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:unsupported-pow"),
-            |args| {
-                use oxigraph::model::Term as OxTerm;
-                let a = match args.first()? {
-                    OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
-                    _ => return None,
-                };
-                let b = match args.get(1)? {
-                    OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
-                    _ => return None,
-                };
-                Some(OxTerm::Literal(
-                    oxigraph::model::Literal::new_typed_literal(
-                        a.powf(b).to_string(),
-                        oxigraph::model::NamedNode::new_unchecked(
-                            "http://www.w3.org/2001/XMLSchema#double",
+            .with_custom_function(
+                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:unsupported-pow"),
+                |args| {
+                    use oxigraph::model::Term as OxTerm;
+                    let a = match args.first()? {
+                        OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                        _ => return None,
+                    };
+                    let b = match args.get(1)? {
+                        OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                        _ => return None,
+                    };
+                    Some(OxTerm::Literal(
+                        oxigraph::model::Literal::new_typed_literal(
+                            a.powf(b).to_string(),
+                            oxigraph::model::NamedNode::new_unchecked(
+                                "http://www.w3.org/2001/XMLSchema#double",
+                            ),
                         ),
-                    ),
-                ))
-            },
-        )
-        .with_custom_function(
-            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-add"),
-            |args| {
-                use oxigraph::model::Term as OxTerm;
-                let a = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
-                let b = match args.get(1)?  { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
-                let result = polygraph::translator::cypher::duration_add_str(&a, &b)?;
-                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(result)))
-            },
-        )
-        .with_custom_function(
-            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-sub"),
-            |args| {
-                use oxigraph::model::Term as OxTerm;
-                let a = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
-                let b = match args.get(1)?  { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
-                let result = polygraph::translator::cypher::duration_sub_str(&a, &b)?;
-                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(result)))
-            },
-        )
-        .with_custom_function(
-            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-mul-num"),
-            |args| {
-                use oxigraph::model::Term as OxTerm;
-                let dur = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
-                let num = match args.get(1)?  { OxTerm::Literal(l) => l.value().parse::<f64>().ok()?, _ => return None };
-                let result = polygraph::translator::cypher::duration_mul_num_str(&dur, num)?;
-                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(result)))
-            },
-        )
-        .with_custom_function(
-            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-div-num"),
-            |args| {
-                use oxigraph::model::Term as OxTerm;
-                let dur = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
-                let num = match args.get(1)?  { OxTerm::Literal(l) => l.value().parse::<f64>().ok()?, _ => return None };
-                let result = polygraph::translator::cypher::duration_div_num_str(&dur, num)?;
-                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(result)))
-            },
-        )
-        .with_custom_function(
-            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-contains"),
-            |args| {
-                use oxigraph::model::Term as OxTerm;
-                let list = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
-                let value_str = match args.get(1)? {
-                    OxTerm::Literal(l) => {
-                        let dt = l.datatype().as_str();
-                        if dt.ends_with("#boolean") || dt.ends_with("#integer")
-                            || dt.ends_with("#long") || dt.ends_with("#double")
-                            || dt.ends_with("#float") || dt.ends_with("#decimal")
-                        {
-                            l.value().to_owned()
-                        } else {
-                            // Plain / xsd:string — wrap in single quotes (Cypher list format)
-                            format!("'{}'", l.value().replace('\\', "\\\\").replace('\'', "\\'"))
+                    ))
+                },
+            )
+            .with_custom_function(
+                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-add"),
+                |args| {
+                    use oxigraph::model::Term as OxTerm;
+                    let a = match args.first()? {
+                        OxTerm::Literal(l) => l.value().to_owned(),
+                        _ => return None,
+                    };
+                    let b = match args.get(1)? {
+                        OxTerm::Literal(l) => l.value().to_owned(),
+                        _ => return None,
+                    };
+                    let result = polygraph::translator::cypher::duration_add_str(&a, &b)?;
+                    Some(OxTerm::Literal(
+                        oxigraph::model::Literal::new_simple_literal(result),
+                    ))
+                },
+            )
+            .with_custom_function(
+                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-sub"),
+                |args| {
+                    use oxigraph::model::Term as OxTerm;
+                    let a = match args.first()? {
+                        OxTerm::Literal(l) => l.value().to_owned(),
+                        _ => return None,
+                    };
+                    let b = match args.get(1)? {
+                        OxTerm::Literal(l) => l.value().to_owned(),
+                        _ => return None,
+                    };
+                    let result = polygraph::translator::cypher::duration_sub_str(&a, &b)?;
+                    Some(OxTerm::Literal(
+                        oxigraph::model::Literal::new_simple_literal(result),
+                    ))
+                },
+            )
+            .with_custom_function(
+                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-mul-num"),
+                |args| {
+                    use oxigraph::model::Term as OxTerm;
+                    let dur = match args.first()? {
+                        OxTerm::Literal(l) => l.value().to_owned(),
+                        _ => return None,
+                    };
+                    let num = match args.get(1)? {
+                        OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                        _ => return None,
+                    };
+                    let result = polygraph::translator::cypher::duration_mul_num_str(&dur, num)?;
+                    Some(OxTerm::Literal(
+                        oxigraph::model::Literal::new_simple_literal(result),
+                    ))
+                },
+            )
+            .with_custom_function(
+                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-div-num"),
+                |args| {
+                    use oxigraph::model::Term as OxTerm;
+                    let dur = match args.first()? {
+                        OxTerm::Literal(l) => l.value().to_owned(),
+                        _ => return None,
+                    };
+                    let num = match args.get(1)? {
+                        OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                        _ => return None,
+                    };
+                    let result = polygraph::translator::cypher::duration_div_num_str(&dur, num)?;
+                    Some(OxTerm::Literal(
+                        oxigraph::model::Literal::new_simple_literal(result),
+                    ))
+                },
+            )
+            .with_custom_function(
+                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-contains"),
+                |args| {
+                    use oxigraph::model::Term as OxTerm;
+                    let list = match args.first()? {
+                        OxTerm::Literal(l) => l.value().to_owned(),
+                        _ => return None,
+                    };
+                    let value_str = match args.get(1)? {
+                        OxTerm::Literal(l) => {
+                            let dt = l.datatype().as_str();
+                            if dt.ends_with("#boolean")
+                                || dt.ends_with("#integer")
+                                || dt.ends_with("#long")
+                                || dt.ends_with("#double")
+                                || dt.ends_with("#float")
+                                || dt.ends_with("#decimal")
+                            {
+                                l.value().to_owned()
+                            } else {
+                                // Plain / xsd:string — wrap in single quotes (Cypher list format)
+                                format!(
+                                    "'{}'",
+                                    l.value().replace('\\', "\\\\").replace('\'', "\\'")
+                                )
+                            }
                         }
-                    }
-                    _ => return None,
-                };
-                let result = polygraph::translator::cypher::list_contains_str(&list, &value_str);
-                Some(OxTerm::Literal(oxigraph::model::Literal::new_typed_literal(
-                    result.to_string(),
-                    oxigraph::model::NamedNode::new_unchecked("http://www.w3.org/2001/XMLSchema#boolean"),
-                )))
-            },
-        )
-        .with_custom_function(
-            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-map-lower"),
-            |args| {
-                use oxigraph::model::Term as OxTerm;
-                let list = match args.first()? { OxTerm::Literal(l) => l.value().to_owned(), _ => return None };
-                let result = polygraph::translator::cypher::list_map_lower_str(&list);
-                Some(OxTerm::Literal(oxigraph::model::Literal::new_simple_literal(result)))
-            },
-        ),
+                        _ => return None,
+                    };
+                    let result =
+                        polygraph::translator::cypher::list_contains_str(&list, &value_str);
+                    Some(OxTerm::Literal(
+                        oxigraph::model::Literal::new_typed_literal(
+                            result.to_string(),
+                            oxigraph::model::NamedNode::new_unchecked(
+                                "http://www.w3.org/2001/XMLSchema#boolean",
+                            ),
+                        ),
+                    ))
+                },
+            )
+            .with_custom_function(
+                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-map-lower"),
+                |args| {
+                    use oxigraph::model::Term as OxTerm;
+                    let list = match args.first()? {
+                        OxTerm::Literal(l) => l.value().to_owned(),
+                        _ => return None,
+                    };
+                    let result = polygraph::translator::cypher::list_map_lower_str(&list);
+                    Some(OxTerm::Literal(
+                        oxigraph::model::Literal::new_simple_literal(result),
+                    ))
+                },
+            ),
     ) {
         Err(e) => {
             world.query_error = Some(e.to_string());

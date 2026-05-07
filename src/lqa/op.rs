@@ -44,7 +44,10 @@ pub struct PathRange {
 
 impl Default for PathRange {
     fn default() -> Self {
-        PathRange { lower: 1, upper: Some(1) }
+        PathRange {
+            lower: 1,
+            upper: Some(1),
+        }
     }
 }
 
@@ -83,13 +86,20 @@ pub struct AggItem {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SetItem {
     /// `n.prop = expr`
-    Property { variable: String, key: String, value: Expr },
+    Property {
+        variable: String,
+        key: String,
+        value: Expr,
+    },
     /// `n += {map}` — merge map into node properties
     MergeMap { variable: String, map: Expr },
     /// `n = expr` — replace all node properties
     Replace { variable: String, value: Expr },
     /// `SET n:Label` — add label(s)
-    Label { variable: String, labels: Vec<String> },
+    Label {
+        variable: String,
+        labels: Vec<String>,
+    },
 }
 
 /// A single item in a `Remove` operator.
@@ -98,7 +108,10 @@ pub enum RemoveItem {
     /// `REMOVE n.prop`
     Property { variable: String, key: String },
     /// `REMOVE n:Label`
-    Label { variable: String, labels: Vec<String> },
+    Label {
+        variable: String,
+        labels: Vec<String>,
+    },
 }
 
 // ── MERGE patterns ───────────────────────────────────────────────────────────
@@ -145,7 +158,6 @@ pub struct CreateEdge {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
     // ── Leaf operators ───────────────────────────────────────────────────────
-
     /// Produces a single empty row (the identity element for joins).
     /// Used for `RETURN` clauses with no preceding `MATCH`.
     Unit,
@@ -188,17 +200,13 @@ pub enum Op {
     },
 
     // ── Unary pipeline operators ─────────────────────────────────────────────
-
     /// Filters rows by a predicate.
     ///
     /// openCypher 9 §4.3 WHERE; openCypher 9 §4.4 WITH … WHERE.
     ///
     /// NULL-PROPAGATION: a row is kept only when `predicate` evaluates to
     /// `true`; `null` and `false` both remove the row.
-    Selection {
-        inner: Box<Op>,
-        predicate: Expr,
-    },
+    Selection { inner: Box<Op>, predicate: Expr },
 
     /// Projects each row to a new set of columns.
     ///
@@ -226,34 +234,23 @@ pub enum Op {
     /// Sorts rows.  `RETURN … ORDER BY` / `WITH … ORDER BY`.
     ///
     /// openCypher 9 §4.5.3 ORDER BY.
-    OrderBy {
-        inner: Box<Op>,
-        keys: Vec<SortKey>,
-    },
+    OrderBy { inner: Box<Op>, keys: Vec<SortKey> },
 
     /// Skips a fixed number of rows.  `SKIP n`.
     ///
     /// openCypher 9 §4.5.4 SKIP.
-    Skip {
-        inner: Box<Op>,
-        count: Expr,
-    },
+    Skip { inner: Box<Op>, count: Expr },
 
     /// Limits the output to at most `count` rows.  `LIMIT n`.
     ///
     /// openCypher 9 §4.5.5 LIMIT.
-    Limit {
-        inner: Box<Op>,
-        count: Expr,
-    },
+    Limit { inner: Box<Op>, count: Expr },
 
     /// Deduplicates rows.  Introduced by `RETURN DISTINCT` / `WITH DISTINCT`.
     ///
     /// openCypher 9 §4.5.2 DISTINCT: two rows are equal iff all column values
     /// compare equal under Cypher equality (null ≠ null; types must match).
-    Distinct {
-        inner: Box<Op>,
-    },
+    Distinct { inner: Box<Op> },
 
     /// Iterates over a list expression and emits one row per element.
     ///
@@ -265,30 +262,20 @@ pub enum Op {
     },
 
     // ── Binary operators ─────────────────────────────────────────────────────
-
     /// UNION ALL — append two relations preserving duplicates.
     ///
     /// openCypher 9 §4.7 UNION ALL.
-    UnionAll {
-        left: Box<Op>,
-        right: Box<Op>,
-    },
+    UnionAll { left: Box<Op>, right: Box<Op> },
 
     /// UNION — append two relations and deduplicate.
     ///
     /// openCypher 9 §4.7 UNION.
-    Union {
-        left: Box<Op>,
-        right: Box<Op>,
-    },
+    Union { left: Box<Op>, right: Box<Op> },
 
     /// Cartesian product of two independent patterns (no shared variables).
     ///
     /// Arises from `MATCH (a), (b)` where `a` and `b` don't overlap.
-    CartesianProduct {
-        left: Box<Op>,
-        right: Box<Op>,
-    },
+    CartesianProduct { left: Box<Op>, right: Box<Op> },
 
     /// Left outer join — implements `OPTIONAL MATCH`.
     ///
@@ -309,17 +296,13 @@ pub enum Op {
     },
 
     // ── Subquery / control flow ───────────────────────────────────────────────
-
     /// `CALL { … }` subquery.
     ///
     /// The inner query is evaluated independently; its result is joined with
     /// the outer query's current row as a lateral join.
     ///
     /// openCypher 9 / Neo4j 5.x CALL subquery.
-    Subquery {
-        outer: Box<Op>,
-        inner: Box<Op>,
-    },
+    Subquery { outer: Box<Op>, inner: Box<Op> },
 
     /// `FOREACH (var IN list | clause+)`.
     ///
@@ -334,7 +317,6 @@ pub enum Op {
     },
 
     // ── Write operators ──────────────────────────────────────────────────────
-
     /// `CREATE (n:Label {…}), (a)-[:T]->(b), …`
     ///
     /// openCypher 9 §6.1 CREATE.
@@ -347,18 +329,12 @@ pub enum Op {
     /// `MERGE pattern [ON MATCH SET …] [ON CREATE SET …]`
     ///
     /// openCypher 9 §6.3 MERGE.
-    Merge {
-        inner: Box<Op>,
-        clause: MergeClause,
-    },
+    Merge { inner: Box<Op>, clause: MergeClause },
 
     /// `SET n.prop = expr, …`
     ///
     /// openCypher 9 §6.4 SET.
-    Set {
-        inner: Box<Op>,
-        items: Vec<SetItem>,
-    },
+    Set { inner: Box<Op>, items: Vec<SetItem> },
 
     /// `[DETACH] DELETE expr, …`
     ///
@@ -389,42 +365,71 @@ pub enum Op {
 impl Op {
     /// Wraps `self` in a `Selection` with the given predicate.
     pub fn filter(self, predicate: Expr) -> Op {
-        Op::Selection { inner: Box::new(self), predicate }
+        Op::Selection {
+            inner: Box::new(self),
+            predicate,
+        }
     }
 
     /// Wraps `self` in a `Projection`.
     pub fn project(self, items: Vec<ProjItem>, distinct: bool) -> Op {
-        Op::Projection { inner: Box::new(self), items, distinct }
+        Op::Projection {
+            inner: Box::new(self),
+            items,
+            distinct,
+        }
     }
 
     /// Wraps `self` in an `OrderBy`.
     pub fn order_by(self, keys: Vec<SortKey>) -> Op {
-        Op::OrderBy { inner: Box::new(self), keys }
+        Op::OrderBy {
+            inner: Box::new(self),
+            keys,
+        }
     }
 
     /// Wraps `self` in a `Limit`.
     pub fn limit(self, count: Expr) -> Op {
-        Op::Limit { inner: Box::new(self), count }
+        Op::Limit {
+            inner: Box::new(self),
+            count,
+        }
     }
 
     /// Wraps `self` in a `Skip`.
     pub fn skip(self, count: Expr) -> Op {
-        Op::Skip { inner: Box::new(self), count }
+        Op::Skip {
+            inner: Box::new(self),
+            count,
+        }
     }
 
     /// Wraps `self` in a `Distinct`.
     pub fn distinct(self) -> Op {
-        Op::Distinct { inner: Box::new(self) }
+        Op::Distinct {
+            inner: Box::new(self),
+        }
     }
 
     /// Wraps `self` in an `Unwind`.
     pub fn unwind(self, list: Expr, variable: impl Into<String>) -> Op {
-        Op::Unwind { inner: Box::new(self), list, variable: variable.into() }
+        Op::Unwind {
+            inner: Box::new(self),
+            list,
+            variable: variable.into(),
+        }
     }
 
     /// Returns `true` if this operator is a write operator (CREATE/MERGE/SET/DELETE/REMOVE).
     pub fn is_write(&self) -> bool {
-        matches!(self, Op::Create { .. } | Op::Merge { .. } | Op::Set { .. } | Op::Delete { .. } | Op::Remove { .. })
+        matches!(
+            self,
+            Op::Create { .. }
+                | Op::Merge { .. }
+                | Op::Set { .. }
+                | Op::Delete { .. }
+                | Op::Remove { .. }
+        )
     }
 
     /// Returns `true` if this operator has no side effects (pure read-only).
@@ -464,14 +469,28 @@ mod tests {
 
     #[test]
     fn project_builder() {
-        let items = vec![ProjItem { expr: Expr::var("n"), alias: "node".into(), display_name: None }];
+        let items = vec![ProjItem {
+            expr: Expr::var("n"),
+            alias: "node".into(),
+            display_name: None,
+        }];
         let op = Op::Unit.project(items, false);
-        assert!(matches!(op, Op::Projection { distinct: false, .. }));
+        assert!(matches!(
+            op,
+            Op::Projection {
+                distinct: false,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn project_distinct_builder() {
-        let items = vec![ProjItem { expr: Expr::var("n"), alias: "node".into(), display_name: None }];
+        let items = vec![ProjItem {
+            expr: Expr::var("n"),
+            alias: "node".into(),
+            display_name: None,
+        }];
         let op = Op::Unit.project(items, true);
         assert!(matches!(op, Op::Projection { distinct: true, .. }));
     }
@@ -559,7 +578,13 @@ mod tests {
             right: Box::new(Op::Unit),
             condition: None,
         };
-        assert!(matches!(op, Op::LeftOuterJoin { condition: None, .. }));
+        assert!(matches!(
+            op,
+            Op::LeftOuterJoin {
+                condition: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -591,7 +616,10 @@ mod tests {
             to: "b".into(),
             rel_types: vec![],
             direction: Direction::Undirected,
-            range: Some(PathRange { lower: 1, upper: None }),
+            range: Some(PathRange {
+                lower: 1,
+                upper: None,
+            }),
             path_var: None,
         };
         assert!(matches!(expand, Op::Expand { range: Some(_), .. }));
@@ -600,10 +628,7 @@ mod tests {
     #[test]
     fn values_literal_binding() {
         let op = Op::Values {
-            bindings: vec![
-                ("a".into(), Expr::int(1)),
-                ("b".into(), Expr::str("hello")),
-            ],
+            bindings: vec![("a".into(), Expr::int(1)), ("b".into(), Expr::str("hello"))],
         };
         assert!(matches!(op, Op::Values { .. }));
     }

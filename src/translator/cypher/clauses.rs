@@ -488,7 +488,7 @@ impl TranslationState {
                         if !extra_triples.is_empty() {
                             const RDF_REIFIES: &str =
                                 "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
-                            let drained: Vec<TriplePattern> = extra_triples.drain(..).collect();
+                            let drained: Vec<TriplePattern> = std::mem::take(&mut extra_triples);
                             let mut i = 0;
                             while i < drained.len() {
                                 let tp = drained[i].clone();
@@ -651,7 +651,7 @@ impl TranslationState {
                             if !extra_triples.is_empty() {
                                 const RDF_REIFIES: &str =
                                     "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
-                                let drained: Vec<TriplePattern> = extra_triples.drain(..).collect();
+                                let drained: Vec<TriplePattern> = std::mem::take(&mut extra_triples);
                                 let mut i = 0;
                                 while i < drained.len() {
                                     let tp = drained[i].clone();
@@ -717,7 +717,7 @@ impl TranslationState {
                                         if let Some(prop_map) =
                                             self.node_props_from_create.get(alias).cloned()
                                         {
-                                            for (_, val_expr) in &prop_map {
+                                            for val_expr in prop_map.values() {
                                                 fn collect_expr_vars(
                                                     e: &Expression,
                                                     out: &mut Vec<Variable>,
@@ -803,29 +803,26 @@ impl TranslationState {
                                                     ))
                                                 {
                                                     let mut ob_extra = Vec::new();
-                                                    match self.translate_expr(
+                                                    if let Ok(SparExpr::Variable(prop_v)) = self.translate_expr(
                                                         &sort_item.expression,
                                                         &mut ob_extra,
                                                     ) {
-                                                        Ok(SparExpr::Variable(prop_v)) => {
-                                                            for tp in ob_extra {
-                                                                current = GraphPattern::LeftJoin {
-                                                                    left: Box::new(current),
-                                                                    right: Box::new(
-                                                                        GraphPattern::Bgp {
-                                                                            patterns: vec![tp],
-                                                                        },
-                                                                    ),
-                                                                    expression: None,
-                                                                };
-                                                            }
-                                                            self.with_prop_subst.insert(
-                                                                (var_name.clone(), key.clone()),
-                                                                prop_v.clone(),
-                                                            );
-                                                            inner_vars.push(prop_v);
+                                                        for tp in ob_extra {
+                                                            current = GraphPattern::LeftJoin {
+                                                                left: Box::new(current),
+                                                                right: Box::new(
+                                                                    GraphPattern::Bgp {
+                                                                        patterns: vec![tp],
+                                                                    },
+                                                                ),
+                                                                expression: None,
+                                                            };
                                                         }
-                                                        _ => {}
+                                                        self.with_prop_subst.insert(
+                                                            (var_name.clone(), key.clone()),
+                                                            prop_v.clone(),
+                                                        );
+                                                        inner_vars.push(prop_v);
                                                     }
                                                 }
                                             }
@@ -1267,7 +1264,7 @@ impl TranslationState {
                     if !extra_triples.is_empty() {
                         const RDF_REIFIES: &str =
                             "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
-                        let drained: Vec<TriplePattern> = extra_triples.drain(..).collect();
+                        let drained: Vec<TriplePattern> = std::mem::take(&mut extra_triples);
                         let mut i = 0;
                         while i < drained.len() {
                             let tp = drained[i].clone();
@@ -1488,27 +1485,24 @@ impl TranslationState {
                                             .contains_key(&(var_name.clone(), key.clone()))
                                         {
                                             let mut ob_extra = Vec::new();
-                                            match self.translate_expr(
+                                            if let Ok(SparExpr::Variable(prop_v)) = self.translate_expr(
                                                 &sort_item.expression,
                                                 &mut ob_extra,
                                             ) {
-                                                Ok(SparExpr::Variable(prop_v)) => {
-                                                    for tp in ob_extra {
-                                                        current = GraphPattern::LeftJoin {
-                                                            left: Box::new(current),
-                                                            right: Box::new(GraphPattern::Bgp {
-                                                                patterns: vec![tp],
-                                                            }),
-                                                            expression: None,
-                                                        };
-                                                    }
-                                                    self.with_prop_subst.insert(
-                                                        (var_name.clone(), key.clone()),
-                                                        prop_v.clone(),
-                                                    );
-                                                    vars.push(prop_v);
+                                                for tp in ob_extra {
+                                                    current = GraphPattern::LeftJoin {
+                                                        left: Box::new(current),
+                                                        right: Box::new(GraphPattern::Bgp {
+                                                            patterns: vec![tp],
+                                                        }),
+                                                        expression: None,
+                                                    };
                                                 }
-                                                _ => {}
+                                                self.with_prop_subst.insert(
+                                                    (var_name.clone(), key.clone()),
+                                                    prop_v.clone(),
+                                                );
+                                                vars.push(prop_v);
                                             }
                                         }
                                     }
@@ -1582,7 +1576,7 @@ impl TranslationState {
                                         self.node_vars.insert(v.clone());
                                         // Record labels.
                                         let labels: Vec<String> =
-                                            n.labels.iter().map(|l| l.clone()).collect();
+                                            n.labels.to_vec();
                                         self.node_labels_from_create.insert(v.clone(), labels);
                                         // Record properties.
                                         if let Some(props) = &n.properties {

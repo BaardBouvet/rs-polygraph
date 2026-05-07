@@ -35,7 +35,7 @@ pub mod value;
 #[cfg(feature = "live-neo4j")]
 pub mod neo4j;
 
-pub use fixture::{PropertyGraph, NodeSpec, EdgeSpec};
+pub use fixture::{EdgeSpec, NodeSpec, PropertyGraph};
 pub use oracle::{Comparison, ComparisonOutcome};
 pub use runner::{run_curated, run_one, RunReport};
 pub use suite::{Expectation, OrderMode, QuerySpec};

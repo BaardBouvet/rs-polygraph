@@ -92,6 +92,7 @@ impl AliasGen {
     }
 
     /// Return the next generated alias name.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> String {
         let name = format!("?gen_{}", self.counter);
         self.counter += 1;
@@ -128,7 +129,11 @@ pub fn desugar_implicit_alias(
         .into_iter()
         .map(|(expr, alias)| {
             let alias = alias.unwrap_or_else(|| gen.next());
-            ProjItem { expr, alias, display_name: None }
+            ProjItem {
+                expr,
+                alias,
+                display_name: None,
+            }
         })
         .collect()
 }

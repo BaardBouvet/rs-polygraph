@@ -1,21 +1,24 @@
-/// openCypher → SPARQL algebra translator.
-///
-/// Implements the [`AstVisitor`] pattern to walk a [`CypherQuery`] AST and
-/// emit a [`spargebra::Query`] (serializable to standard SPARQL 1.1 text).
-///
-/// # RDF mapping strategy (Phase 2)
-///
-/// | Cypher construct          | SPARQL mapping                          |
-/// |---------------------------|-----------------------------------------|
-/// | `(n:Label)`               | `?n rdf:type <base:Label>`              |
-/// | `(n {prop: val})`         | `?n <base:prop> val` (literal in BGP)   |
-/// | `(a)-[:REL]->(b)`         | `?a <base:REL> ?b`                      |
-/// | `WHERE n.prop op val`     | fresh var `?_n_prop_N` + `FILTER`       |
-/// | `RETURN n.prop`           | fresh var `?_n_prop_N` projected        |
-/// | `RETURN n.prop AS alias`  | `?alias` variable projected             |
-/// | `OPTIONAL MATCH`          | `OPTIONAL { }` / `LeftJoin`             |
-/// | `WITH … WHERE`            | `FILTER` applied to current pattern     |
-/// | `RETURN DISTINCT`         | `DISTINCT` wrapper                      |
+// This module and the include!()'d temporal.rs will be deleted in Phase 8.7 (translator removal).
+// Style lints are suppressed here to avoid churn in code slated for deletion.
+#![allow(clippy::manual_strip, clippy::collapsible_match, clippy::borrowed_box)]
+//! openCypher → SPARQL algebra translator.
+//!
+//! Implements the [`AstVisitor`] pattern to walk a [`CypherQuery`] AST and
+//! emit a [`spargebra::Query`] (serializable to standard SPARQL 1.1 text).
+//!
+//! # RDF mapping strategy (Phase 2)
+//!
+//! | Cypher construct          | SPARQL mapping                          |
+//! |---------------------------|-----------------------------------------|
+//! | `(n:Label)`               | `?n rdf:type <base:Label>`              |
+//! | `(n {prop: val})`         | `?n <base:prop> val` (literal in BGP)   |
+//! | `(a)-[:REL]->(b)`         | `?a <base:REL> ?b`                      |
+//! | `WHERE n.prop op val`     | fresh var `?_n_prop_N` + `FILTER`       |
+//! | `RETURN n.prop`           | fresh var `?_n_prop_N` projected        |
+//! | `RETURN n.prop AS alias`  | `?alias` variable projected             |
+//! | `OPTIONAL MATCH`          | `OPTIONAL { }` / `LeftJoin`             |
+//! | `WITH … WHERE`            | `FILTER` applied to current pattern     |
+//! | `RETURN DISTINCT`         | `DISTINCT` wrapper                      |
 use spargebra::algebra::{
     AggregateExpression, AggregateFunction, Expression as SparExpr, GraphPattern, OrderExpression,
 };
@@ -95,7 +98,7 @@ pub fn check_semantics(query: &CypherQuery) -> Result<(), PolygraphError> {
 fn expr_contains_rand(expr: &crate::ast::cypher::Expression) -> bool {
     use crate::ast::cypher::Expression;
     match expr {
-        Expression::FunctionCall { name, .. } if name.to_ascii_lowercase() == "rand" => true,
+        Expression::FunctionCall { name, .. } if name.eq_ignore_ascii_case("rand") => true,
         Expression::Or(a, b)
         | Expression::And(a, b)
         | Expression::Add(a, b)
@@ -115,19 +118,19 @@ fn expr_contains_rand(expr: &crate::ast::cypher::Expression) -> bool {
             ..
         } => {
             expr_contains_rand(list)
-                || predicate.as_deref().map_or(false, expr_contains_rand)
-                || projection.as_deref().map_or(false, expr_contains_rand)
+                || predicate.as_deref().is_some_and(expr_contains_rand)
+                || projection.as_deref().is_some_and(expr_contains_rand)
         }
         Expression::CaseExpression {
             operand,
             whens,
             else_expr,
         } => {
-            operand.as_deref().map_or(false, expr_contains_rand)
+            operand.as_deref().is_some_and(expr_contains_rand)
                 || whens
                     .iter()
                     .any(|(w, t)| expr_contains_rand(w) || expr_contains_rand(t))
-                || else_expr.as_deref().map_or(false, expr_contains_rand)
+                || else_expr.as_deref().is_some_and(expr_contains_rand)
         }
         _ => false,
     }
@@ -160,15 +163,14 @@ fn clause_expr_is_opaque(
             whens.iter().any(|(_, t)| {
                 clause_expr_is_opaque(t, opaque_vars)
                     || matches!(t, Expression::Variable(v) if opaque_vars.contains(v.as_str()))
-            }) || else_expr.as_deref().map_or(false, |e| {
+            }) || else_expr.as_deref().is_some_and(|e| {
                 clause_expr_is_opaque(e, opaque_vars)
                     || matches!(e, Expression::Variable(v) if opaque_vars.contains(v.as_str()))
             })
         }
         Expression::Variable(v) => opaque_vars.contains(v.as_str()),
         Expression::FunctionCall { name, args, .. }
-            if name.to_ascii_lowercase() == "coalesce"
-                || name.to_ascii_lowercase() == "reverse" =>
+            if name.eq_ignore_ascii_case("coalesce") || name.eq_ignore_ascii_case("reverse") =>
         {
             args.iter().any(|a| {
                 clause_expr_is_opaque(a, opaque_vars)
@@ -247,7 +249,7 @@ fn quantifier_canonical(
         // size([x IN L WHERE P | ...]) > 0   → any(P)
         Expression::Comparison(lhs, op, rhs) => {
             if let Expression::FunctionCall { name, args, .. } = lhs.as_ref() {
-                if name.to_ascii_lowercase() == "size" {
+                if name.eq_ignore_ascii_case("size") {
                     if let Some(Expression::ListComprehension {
                         list: lc_list,
                         predicate: lc_pred,
@@ -278,7 +280,7 @@ fn quantifier_canonical(
                                 } = rhs.as_ref()
                                 {
                                     // size([P]) = size(L) → all(P)
-                                    if n2.to_ascii_lowercase() == "size" {
+                                    if n2.eq_ignore_ascii_case("size") {
                                         if let Some(Expression::Variable(lv2)) = a2.first() {
                                             if lv2.as_str() == lv.as_str() {
                                                 return Some((lv, 0u8, base, !neg));
@@ -707,10 +709,10 @@ fn expr_contains_aggregate(expr: &Expression) -> bool {
             expr_contains_aggregate(list)
                 || predicate
                     .as_ref()
-                    .map_or(false, |p| expr_contains_aggregate(p))
+                    .is_some_and(|p| expr_contains_aggregate(p))
                 || projection
                     .as_ref()
-                    .map_or(false, |p| expr_contains_aggregate(p))
+                    .is_some_and(|p| expr_contains_aggregate(p))
         }
         Expression::LabelCheck { .. } => false,
         _ => false,
@@ -1077,10 +1079,10 @@ impl TranslationState {
                 let n = items.len() as i64;
                 let start_is_null = start
                     .as_deref()
-                    .map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
+                    .is_some_and(|e| matches!(e, Expression::Literal(Literal::Null)));
                 let end_is_null = end
                     .as_deref()
-                    .map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
+                    .is_some_and(|e| matches!(e, Expression::Literal(Literal::Null)));
                 if start_is_null || end_is_null {
                     return None; // null range → null, not a list
                 }
@@ -2369,7 +2371,7 @@ impl TranslationState {
                         ..
                     } = rhs.as_ref()
                     {
-                        if fname.to_ascii_lowercase() == "keys" {
+                        if fname.eq_ignore_ascii_case("keys") {
                             if let Some(Expression::Variable(v)) = fargs.first() {
                                 // Special case: literal_key IN keys(node) → EXISTS { ?node <base:key> ?__val }
                                 if let Expression::Literal(Literal::String(key_str)) = lhs.as_ref()
@@ -3158,10 +3160,10 @@ impl TranslationState {
                     // Handle null start/end → null result
                     let start_is_null = start
                         .as_deref()
-                        .map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
+                        .is_some_and(|e| matches!(e, Expression::Literal(Literal::Null)));
                     let end_is_null = end
                         .as_deref()
-                        .map_or(false, |e| matches!(e, Expression::Literal(Literal::Null)));
+                        .is_some_and(|e| matches!(e, Expression::Literal(Literal::Null)));
                     if start_is_null || end_is_null {
                         return Ok(SparExpr::Variable(self.fresh_var("null")));
                     }

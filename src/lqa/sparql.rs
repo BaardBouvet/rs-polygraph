@@ -78,8 +78,6 @@ const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
 #[allow(dead_code)]
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_DATE: &str = "http://www.w3.org/2001/XMLSchema#date";
-const XSD_TIME: &str = "http://www.w3.org/2001/XMLSchema#time";
-const XSD_DATETIME: &str = "http://www.w3.org/2001/XMLSchema#dateTime";
 const DEFAULT_BASE: &str = "http://polygraph.example/";
 
 // ── Public result type ────────────────────────────────────────────────────────
@@ -318,10 +316,8 @@ impl Compiler {
         };
 
         // FILTER: STRSTARTS(STR(?pred), base) && ?pred != sentinel && ?pred != rdf:type
-        let str_pred = SparExpr::FunctionCall(
-            Function::Str,
-            vec![SparExpr::Variable(pred_var.clone())],
-        );
+        let str_pred =
+            SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(pred_var.clone())]);
         let strstarts = SparExpr::FunctionCall(
             Function::StrStarts,
             vec![
@@ -335,11 +331,16 @@ impl Compiler {
         )));
         let not_rdf_type = SparExpr::Not(Box::new(SparExpr::Equal(
             Box::new(str_pred),
-            Box::new(SparExpr::Literal(SparLit::new_simple_literal(RDF_TYPE.to_string()))),
+            Box::new(SparExpr::Literal(SparLit::new_simple_literal(
+                RDF_TYPE.to_string(),
+            ))),
         )));
         let filter_expr = SparExpr::And(
             Box::new(strstarts),
-            Box::new(SparExpr::And(Box::new(not_sentinel), Box::new(not_rdf_type))),
+            Box::new(SparExpr::And(
+                Box::new(not_sentinel),
+                Box::new(not_rdf_type),
+            )),
         );
         let filtered = GraphPattern::Filter {
             expr: filter_expr,
@@ -420,9 +421,8 @@ impl Compiler {
         let raw_var = self.fresh("_ep_raw");
         let base = self.base_iri.clone();
         let base_len = base.len();
-        let rdf_reifies = NamedNode::new_unchecked(
-            "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies",
-        );
+        let rdf_reifies =
+            NamedNode::new_unchecked("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies");
 
         // Build the edge triple term: <<subj pred obj>>
         let (inner_bgp, group_by_vars) = match &edge_info.pred {
@@ -473,10 +473,8 @@ impl Compiler {
         };
 
         // FILTER: STRSTARTS(STR(?pred), base)
-        let str_pred = SparExpr::FunctionCall(
-            Function::Str,
-            vec![SparExpr::Variable(pred_var.clone())],
-        );
+        let str_pred =
+            SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(pred_var.clone())]);
         let filter_expr = SparExpr::FunctionCall(
             Function::StrStarts,
             vec![
@@ -549,7 +547,8 @@ impl Compiler {
     fn sparql_cypher_format_value(val_var: Variable) -> SparExpr {
         let val_expr = SparExpr::Variable(val_var.clone());
         let dt_expr = SparExpr::FunctionCall(Function::Datatype, vec![val_expr]);
-        let str_val = SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(val_var.clone())]);
+        let str_val =
+            SparExpr::FunctionCall(Function::Str, vec![SparExpr::Variable(val_var.clone())]);
 
         // Build: numeric_or_bool = (DATATYPE = xsd:integer || xsd:long || xsd:decimal || xsd:double || xsd:float || xsd:boolean)
         let mk_dt_eq = |iri: &str| {
@@ -1426,32 +1425,6 @@ impl Compiler {
         }
     }
 
-    /// Evaluate range() args against both structural const-eval and the Compiler's
-    /// `const_int_vars` map.  Returns `None` if any arg is non-constant.
-    fn eval_range_args(&self, args: &[crate::lqa::expr::Expr]) -> Option<Vec<i64>> {
-        let start = self.eval_const_int(args.first()?)?;
-        let end_val = self.eval_const_int(args.get(1)?)?;
-        let step: i64 = if let Some(step_arg) = args.get(2) {
-            let s = self.eval_const_int(step_arg)?;
-            if s == 0 {
-                return None; // step=0 is invalid; let legacy raise the error
-            }
-            s
-        } else {
-            1
-        };
-        let mut items = Vec::new();
-        let mut i = start;
-        while (step > 0 && i <= end_val) || (step < 0 && i >= end_val) {
-            items.push(i);
-            i += step;
-            if items.len() > 100_000 {
-                return None; // too large; let legacy handle
-            }
-        }
-        Some(items)
-    }
-
     fn lower_agg_item(
         &mut self,
         ai: &AggItem,
@@ -1830,7 +1803,6 @@ impl Compiler {
                     (inner_pat, TermPattern::Variable(Self::var(from)))
                 };
 
-                let from_tp = from_tp;
                 let to_var = Self::var(to);
                 let to_tp = TermPattern::Variable(to_var.clone());
 
@@ -2457,7 +2429,7 @@ impl Compiler {
                             .iter()
                             .find(|(_, proj_expr)| exprs_equivalent(&sk.expr, proj_expr))
                         {
-                            let sparql_expr = SparExpr::Variable(Self::var(*alias));
+                            let sparql_expr = SparExpr::Variable(Self::var(alias));
                             return Ok(match sk.dir {
                                 SortDir::Asc => OrderExpression::Asc(sparql_expr),
                                 SortDir::Desc => OrderExpression::Desc(sparql_expr),
@@ -2995,56 +2967,6 @@ impl Compiler {
                     .reduce(|acc, c| SparExpr::And(Box::new(acc), Box::new(c)))
                     .unwrap(),
             )
-        }
-    }
-
-    /// Collect all node/edge variables introduced (bound) by an Op subtree.
-    /// Used to identify which variables become nullable after an OPTIONAL MATCH.
-    fn collect_op_scan_vars(op: &Op) -> HashSet<String> {
-        let mut vars = HashSet::new();
-        Self::collect_op_scan_vars_inner(op, &mut vars);
-        vars
-    }
-
-    fn collect_op_scan_vars_inner(op: &Op, vars: &mut HashSet<String>) {
-        match op {
-            Op::Scan { variable, .. } => {
-                vars.insert(variable.clone());
-            }
-            Op::Expand {
-                from,
-                to,
-                rel_var,
-                inner,
-                ..
-            } => {
-                vars.insert(from.clone());
-                vars.insert(to.clone());
-                if let Some(rv) = rel_var {
-                    vars.insert(rv.clone());
-                }
-                Self::collect_op_scan_vars_inner(inner, vars);
-            }
-            Op::Projection { inner, .. }
-            | Op::Selection { inner, .. }
-            | Op::OrderBy { inner, .. }
-            | Op::Limit { inner, .. }
-            | Op::Skip { inner, .. }
-            | Op::Distinct { inner } => Self::collect_op_scan_vars_inner(inner, vars),
-            Op::LeftOuterJoin { left, right, .. }
-            | Op::CartesianProduct { left, right }
-            | Op::UnionAll { left, right }
-            | Op::Union { left, right }
-            | Op::Subquery {
-                outer: left,
-                inner: right,
-            } => {
-                Self::collect_op_scan_vars_inner(left, vars);
-                Self::collect_op_scan_vars_inner(right, vars);
-            }
-            Op::GroupBy { inner, .. } => Self::collect_op_scan_vars_inner(inner, vars),
-            Op::Unit | Op::Values { .. } => {}
-            _ => {}
         }
     }
 
@@ -4703,9 +4625,8 @@ impl Compiler {
                 Err(PolygraphError::Unsupported {
                     construct: "list comprehension [x IN list WHERE pred | expr] (Phase C)".into(),
                     spec_ref: "openCypher 9 §6.3.3".into(),
-                    reason:
-                        "list comprehension over runtime lists requires engine extension"
-                            .into(),
+                    reason: "list comprehension over runtime lists requires engine extension"
+                        .into(),
                 })
             }
 
@@ -5751,6 +5672,7 @@ impl Compiler {
     /// Intermediate computations are pushed to `self.pending_binds`; these are
     /// flushed as SPARQL BIND/EXTEND nodes by `flush_pending` in the enclosing
     /// `lower_op` call.  Returns a `SparExpr` for the final value.
+    #[allow(non_snake_case)]
     fn lower_temporal_jdn_property(&mut self, var_name: &str, prop: &str) -> Option<SparExpr> {
         use spargebra::algebra::Function;
         type SE = SparExpr;
@@ -6112,30 +6034,6 @@ fn expr_contains_var(expr: &Expr, var: &str) -> bool {
     matches!(expr, Expr::Variable { name, .. } if name.as_str() == var)
 }
 
-/// Convert LQA map pairs (with only literal values, at the LQA IR level) into
-/// AST `(String, Expression)` pairs so that the pub(crate) temporal helpers in
-/// `translator::cypher` can be called from the LQA path.
-///
-/// Pairs whose value is not a ground literal are omitted (the helper functions
-/// gracefully return `None` when required keys are absent).
-fn lqa_map_to_ast_pairs(pairs: &[(String, Expr)]) -> Vec<(String, crate::ast::cypher::Expression)> {
-    use crate::ast::cypher::{Expression as AE, Literal as AL};
-    pairs
-        .iter()
-        .filter_map(|(k, v)| {
-            let ae = match v {
-                Expr::Literal(Literal::Integer(n)) => AE::Literal(AL::Integer(*n)),
-                Expr::Literal(Literal::Float(f)) => AE::Literal(AL::Float(*f)),
-                Expr::Literal(Literal::String(s)) => AE::Literal(AL::String(s.clone())),
-                Expr::Literal(Literal::Boolean(b)) => AE::Literal(AL::Boolean(*b)),
-                Expr::Literal(Literal::Null) => AE::Literal(AL::Null),
-                _ => return None,
-            };
-            Some((k.clone(), ae))
-        })
-        .collect()
-}
-
 /// Recursively substitute a single variable name with a replacement expression
 /// in an LQA `Expr` tree.  Used for quantifier expansion.
 fn subst_var(expr: &Expr, var: &str, val: &Expr) -> Expr {
@@ -6390,7 +6288,7 @@ fn expr_to_usize(expr: &Expr) -> Result<usize, PolygraphError> {
 fn expr_to_f64(expr: &Expr) -> Result<f64, PolygraphError> {
     match expr {
         Expr::Literal(Literal::Integer(n)) => Ok(*n as f64),
-        Expr::Literal(Literal::Float(f)) => Ok(*f as f64),
+        Expr::Literal(Literal::Float(f)) => Ok(*f),
         Expr::Add(a, b) => Ok(expr_to_f64(a)? + expr_to_f64(b)?),
         Expr::Sub(a, b) => Ok(expr_to_f64(a)? - expr_to_f64(b)?),
         Expr::Mul(a, b) => Ok(expr_to_f64(a)? * expr_to_f64(b)?),
@@ -6421,14 +6319,6 @@ fn expr_to_f64(expr: &Expr) -> Result<f64, PolygraphError> {
         _ => Err(PolygraphError::Translation {
             message: format!("Cannot evaluate float expression at compile time: {expr:?}"),
         }),
-    }
-}
-
-fn query_slice_start(pat: &GraphPattern) -> usize {
-    if let GraphPattern::Slice { start, .. } = pat {
-        *start
-    } else {
-        0
     }
 }
 
@@ -6567,11 +6457,6 @@ fn lqa_expr_is_string(e: &Expr) -> bool {
 }
 
 /// Serialize a constant LQA literal expression to its Cypher string representation
-/// (as used inside a list or map serialization). Returns `None` for non-constants.
-/// Try to extract a Cypher temporal/duration property from a known scalar literal string.
-/// Returns the SPARQL integer literal for the component, or `None` if not recognized.
-
-/// Map a Cypher temporal component name to a SPARQL built-in function call on a
 /// Evaluate a compile-time string expression.  Handles string literals and
 /// string concatenation of literals (e.g. `'nam' + 'e'` → `"name"`).
 /// Returns `None` for any expression with a runtime component.
@@ -6699,11 +6584,11 @@ fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr>
         |s: SparExpr, sub: &str| SparExpr::FunctionCall(Function::Contains, vec![s, slit(sub)]);
     let strafter_f =
         |s: SparExpr, delim: &str| SparExpr::FunctionCall(Function::StrAfter, vec![s, slit(delim)]);
-    let floor_f = |e: SparExpr| SparExpr::FunctionCall(Function::Floor, vec![e]);
+    let _floor_f = |e: SparExpr| SparExpr::FunctionCall(Function::Floor, vec![e]);
     let ceil_f = |e: SparExpr| SparExpr::FunctionCall(Function::Ceil, vec![e]);
-    let add = |a: SparExpr, b: SparExpr| SparExpr::Add(Box::new(a), Box::new(b));
-    let sub = |a: SparExpr, b: SparExpr| SparExpr::Subtract(Box::new(a), Box::new(b));
-    let mul = |a: SparExpr, b: SparExpr| SparExpr::Multiply(Box::new(a), Box::new(b));
+    let _add = |a: SparExpr, b: SparExpr| SparExpr::Add(Box::new(a), Box::new(b));
+    let _sub = |a: SparExpr, b: SparExpr| SparExpr::Subtract(Box::new(a), Box::new(b));
+    let _mul = |a: SparExpr, b: SparExpr| SparExpr::Multiply(Box::new(a), Box::new(b));
     let div = |a: SparExpr, b: SparExpr| SparExpr::Divide(Box::new(a), Box::new(b));
 
     // Time portion helper: IF(CONTAINS(str, "T"), STRAFTER(str, "T"), str).
@@ -6981,12 +6866,10 @@ fn arg_err(name: &str) -> PolygraphError {
 fn is_null_ne_pred(pred: &Expr, variable: &str) -> bool {
     match pred {
         Expr::Comparison(CmpOp::Ne, a, b) => {
-            let var_null_pattern =
-                matches!(a.as_ref(), Expr::Variable { name: v, .. } if v == variable)
-                    && matches!(b.as_ref(), Expr::Literal(Literal::Null));
-            let null_var_pattern =
-                matches!(a.as_ref(), Expr::Literal(Literal::Null))
-                    && matches!(b.as_ref(), Expr::Variable { name: v, .. } if v == variable);
+            let var_null_pattern = matches!(a.as_ref(), Expr::Variable { name: v, .. } if v == variable)
+                && matches!(b.as_ref(), Expr::Literal(Literal::Null));
+            let null_var_pattern = matches!(a.as_ref(), Expr::Literal(Literal::Null))
+                && matches!(b.as_ref(), Expr::Variable { name: v, .. } if v == variable);
             var_null_pattern || null_var_pattern
         }
         _ => false,

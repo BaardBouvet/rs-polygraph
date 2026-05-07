@@ -70,7 +70,10 @@ fn main() -> ExitCode {
             }
             if !r.sparql.is_empty() {
                 let first_lines: Vec<&str> = r.sparql.lines().take(6).collect();
-                println!("       SPARQL:\n         {}", first_lines.join("\n         "));
+                println!(
+                    "       SPARQL:\n         {}",
+                    first_lines.join("\n         ")
+                );
             }
         }
     }

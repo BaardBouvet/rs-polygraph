@@ -933,7 +933,7 @@ impl TranslationState {
             // creates a second path.  SPARQL property paths only return distinct
             // endpoint pairs, so the extra row is emitted via a UNION that requires
             // a self-loop triple at the far endpoint.
-            let is_unbounded = rel.range.as_ref().map_or(false, |r| r.upper.is_none());
+            let is_unbounded = rel.range.as_ref().is_some_and(|r| r.upper.is_none());
             let far_end: &TermPattern = match rel.direction {
                 Direction::Left => src,
                 _ => dst,

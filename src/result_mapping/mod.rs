@@ -108,12 +108,10 @@ impl TranspileOutput {
     pub fn unwrap_complete(self) -> (String, ProjectionSchema) {
         match self {
             Self::Complete { sparql, schema } => (sparql, schema),
-            Self::Continuation { .. } => panic!(
-                "called TranspileOutput::unwrap_complete() on a Continuation"
-            ),
-            Self::Write { .. } => panic!(
-                "called TranspileOutput::unwrap_complete() on a Write"
-            ),
+            Self::Continuation { .. } => {
+                panic!("called TranspileOutput::unwrap_complete() on a Continuation")
+            }
+            Self::Write { .. } => panic!("called TranspileOutput::unwrap_complete() on a Write"),
         }
     }
 

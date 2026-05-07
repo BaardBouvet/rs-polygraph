@@ -36,8 +36,14 @@ mod tests {
 
     #[test]
     fn gql_query_with_match_clause() {
-        let m = MatchClause { optional: false, pattern: PatternList(vec![]), where_: None };
-        let q = GqlQuery { clauses: vec![Clause::Match(m)] };
+        let m = MatchClause {
+            optional: false,
+            pattern: PatternList(vec![]),
+            where_: None,
+        };
+        let q = GqlQuery {
+            clauses: vec![Clause::Match(m)],
+        };
         assert_eq!(q.clauses.len(), 1);
         assert!(matches!(q.clauses[0], Clause::Match(_)));
     }

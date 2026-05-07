@@ -75,10 +75,7 @@ impl PropertyGraph {
         }
         for e in &self.edges {
             out.push_str(",\n");
-            out.push_str(&format!(
-                "  ({})-[{}:{}",
-                e.from, e.id, e.rel_type
-            ));
+            out.push_str(&format!("  ({})-[{}:{}", e.from, e.id, e.rel_type));
             if !e.properties.is_empty() {
                 out.push_str(" {");
                 let mut pfirst = true;

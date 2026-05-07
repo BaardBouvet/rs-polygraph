@@ -185,7 +185,7 @@ fn try_lqa_path(
     // ── Write path ────────────────────────────────────────────────────────
     if lqa::write::contains_write(&op) {
         let base_iri = engine.base_iri();
-        let cw = match lqa::write::compile_write(&op, base_iri.as_deref()) {
+        let cw = match lqa::write::compile_write(&op, base_iri) {
             Ok(cw) => cw,
             Err(PolygraphError::Unsupported { ref construct, .. }) => {
                 if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
@@ -201,7 +201,7 @@ fn try_lqa_path(
         let select = if cw.has_return {
             let result = match translator::cypher::translate_skip_writes(
                 ast,
-                engine.base_iri().as_deref(),
+                engine.base_iri(),
                 engine.supports_rdf_star(),
             ) {
                 Ok(r) => r,
@@ -210,9 +210,7 @@ fn try_lqa_path(
                     feature: ref construct,
                 }) => {
                     if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
-                        eprintln!(
-                            "[LEGACY] lqa_write_select=Unsupported construct={construct}"
-                        );
+                        eprintln!("[LEGACY] lqa_write_select=Unsupported construct={construct}");
                     }
                     return Ok(None); // fall back entirely to legacy path
                 }
@@ -237,7 +235,7 @@ fn try_lqa_path(
     }
 
     // ── Read path ─────────────────────────────────────────────────────────
-    let compiled = match lqa::sparql::compile(&op, engine.base_iri().as_deref()) {
+    let compiled = match lqa::sparql::compile(&op, engine.base_iri()) {
         Ok(c) => c,
         Err(PolygraphError::Unsupported { ref construct, .. })
         | Err(PolygraphError::UnsupportedFeature {
@@ -266,53 +264,6 @@ fn try_lqa_path(
     Ok(Some(TranspileOutput::complete(sparql, compiled.schema)))
 }
 
-/// Check that every variable reference in `expr` is present in `scope`.
-/// Used to validate ORDER BY expressions in WITH clauses after scope has been
-/// restricted by a previous WITH projection.
-fn sort_expr_in_scope(
-    expr: &ast::cypher::Expression,
-    scope: &std::collections::HashSet<String>,
-) -> bool {
-    use ast::cypher::Expression;
-    match expr {
-        Expression::Variable(v) => scope.contains(v.as_str()),
-        Expression::Property(base, _) => sort_expr_in_scope(base, scope),
-        Expression::FunctionCall { args, .. } => args.iter().all(|a| sort_expr_in_scope(a, scope)),
-        Expression::Add(a, b)
-        | Expression::Subtract(a, b)
-        | Expression::Multiply(a, b)
-        | Expression::Divide(a, b)
-        | Expression::Modulo(a, b)
-        | Expression::Power(a, b)
-        | Expression::And(a, b)
-        | Expression::Or(a, b)
-        | Expression::Xor(a, b) => sort_expr_in_scope(a, scope) && sort_expr_in_scope(b, scope),
-        Expression::Not(e)
-        | Expression::Negate(e)
-        | Expression::IsNull(e)
-        | Expression::IsNotNull(e) => sort_expr_in_scope(e, scope),
-        Expression::Comparison(a, _, b) => {
-            sort_expr_in_scope(a, scope) && sort_expr_in_scope(b, scope)
-        }
-        // Literals, maps, and other non-variable expressions are always in scope.
-        _ => true,
-    }
-}
-
-/// Return `true` only if the query can be safely transpiled through the LQA
-/// path without risk of producing semantically wrong SPARQL.
-fn is_lqa_safe(ast: &ast::CypherQuery) -> bool {
-    match lqa_safe_reason(ast) {
-        None => true,
-        Some(reason) => {
-            if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
-                eprintln!("[LEGACY] is_lqa_safe=false reason={reason}");
-            }
-            false
-        }
-    }
-}
-
 /// Returns `None` if safe for LQA, or `Some(("reason", is_error))` where
 /// `is_error=true` indicates a definite semantic error that should propagate
 /// as a `PolygraphError::Translation` (not legacy fallback).
@@ -337,7 +288,7 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                 if let ReturnItems::Explicit(items) = &r.items {
                     let mut seen_aliases: HashSet<&str> = HashSet::new();
                     for item in items {
-                        let alias = item.alias.as_deref().or_else(|| {
+                        let alias = item.alias.as_deref().or({
                             if let Expression::Variable(v) = &item.expression {
                                 Some(v.as_str())
                             } else {
@@ -358,7 +309,7 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                 if let ReturnItems::Explicit(items) = &w.items {
                     let mut seen_aliases: HashSet<&str> = HashSet::new();
                     for item in items {
-                        let alias = item.alias.as_deref().or_else(|| {
+                        let alias = item.alias.as_deref().or({
                             if let Expression::Variable(v) = &item.expression {
                                 Some(v.as_str())
                             } else {
@@ -386,7 +337,7 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                     if w.order_by.is_some() {
                         if let ReturnItems::Explicit(items) = &w.items {
                             for item in items {
-                                let alias_opt = item.alias.as_deref().or_else(|| {
+                                let alias_opt = item.alias.as_deref().or({
                                     if let Expression::Variable(v) = &item.expression {
                                         Some(v.as_str())
                                     } else {
@@ -434,7 +385,7 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
     }
 
     // Determine whether this is a write query or a pure-read query.
-    let has_write = clause_kinds.iter().any(|&k| k == "write");
+    let has_write = clause_kinds.contains(&"write");
 
     // Route queries through LQA:
     // - Pure-read queries must end with "return".
@@ -473,7 +424,7 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                     // Detect variable renames (alias ≠ source var name).
                     let has_rename = items.iter().any(|item| {
                         if let ast::cypher::Expression::Variable(v) = &item.expression {
-                            item.alias.as_deref().map_or(false, |a| a != v.as_str())
+                            item.alias.as_deref().is_some_and(|a| a != v.as_str())
                         } else {
                             false
                         }
@@ -531,7 +482,7 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                                 // Exception: exact-hop bounded paths (*n..n) are
                                 // handled in LQA since the hop count is known.
                                 if pattern.variable.is_some() && r.range.is_some() {
-                                    let is_exact_hop = r.range.as_ref().map_or(false, |rq| {
+                                    let is_exact_hop = r.range.as_ref().is_some_and(|rq| {
                                         let lower_val = rq.lower.unwrap_or(1);
                                         rq.upper == Some(lower_val)
                                     });
@@ -677,11 +628,11 @@ fn expr_has_real_aggregate(expr: &ast::cypher::Expression) -> bool {
             whens,
             else_expr,
         } => {
-            operand.as_deref().map_or(false, expr_has_real_aggregate)
+            operand.as_deref().is_some_and(expr_has_real_aggregate)
                 || whens
                     .iter()
                     .any(|(w, t)| expr_has_real_aggregate(w) || expr_has_real_aggregate(t))
-                || else_expr.as_deref().map_or(false, expr_has_real_aggregate)
+                || else_expr.as_deref().is_some_and(expr_has_real_aggregate)
         }
         Expression::ListComprehension {
             list,
@@ -690,19 +641,19 @@ fn expr_has_real_aggregate(expr: &ast::cypher::Expression) -> bool {
             ..
         } => {
             expr_has_real_aggregate(list)
-                || predicate.as_deref().map_or(false, expr_has_real_aggregate)
-                || projection.as_deref().map_or(false, expr_has_real_aggregate)
+                || predicate.as_deref().is_some_and(expr_has_real_aggregate)
+                || projection.as_deref().is_some_and(expr_has_real_aggregate)
         }
         Expression::QuantifierExpr {
             list, predicate, ..
         } => {
             expr_has_real_aggregate(list)
-                || predicate.as_deref().map_or(false, expr_has_real_aggregate)
+                || predicate.as_deref().is_some_and(expr_has_real_aggregate)
         }
         Expression::ListSlice { list, start, end } => {
             expr_has_real_aggregate(list)
-                || start.as_deref().map_or(false, expr_has_real_aggregate)
-                || end.as_deref().map_or(false, expr_has_real_aggregate)
+                || start.as_deref().is_some_and(expr_has_real_aggregate)
+                || end.as_deref().is_some_and(expr_has_real_aggregate)
         }
         _ => false,
     }

@@ -13,9 +13,9 @@
 
 // ── Peephole optimizations ──────────────────────────────────────────────────
 
-/// Detect `WITH … collect(X) AS list … / UNWIND list AS item` pairs and rewrite
-/// them into simple projections (`WITH … X AS item …`).  This eliminates the
-/// need for runtime list iteration which SPARQL 1.1 cannot express.
+// Detect `WITH … collect(X) AS list … / UNWIND list AS item` pairs and rewrite
+// them into simple projections (`WITH … X AS item …`).  This eliminates the
+// need for runtime list iteration which SPARQL 1.1 cannot express.
 //
 // NORMALIZATION(openCypher 9 §collect/§UNWIND): collect-then-unwind round-trips
 // the multiset, so the pair is observably equivalent to the inner projection.
@@ -110,7 +110,7 @@ fn expr_accesses_deleted_prop(
                 | AggregateExpr::Max { expr, .. }
                 | AggregateExpr::Collect { expr, .. } => Some(expr.as_ref()),
             };
-            inner.map_or(false, |e| expr_accesses_deleted_prop(e, deleted_vars))
+            inner.is_some_and(|e| expr_accesses_deleted_prop(e, deleted_vars))
         }
         _ => false,
     }
@@ -266,9 +266,9 @@ fn expr_references_var(expr: &Expression, name: &str) -> bool {
         Expression::Map(pairs) => pairs.iter().any(|(_, v)| expr_references_var(v, name)),
         Expression::FunctionCall { args, .. } => args.iter().any(|e| expr_references_var(e, name)),
         Expression::Aggregate(agg) => match agg {
-            AggregateExpr::Count { expr, .. } => expr
-                .as_ref()
-                .map_or(false, |e| expr_references_var(e, name)),
+            AggregateExpr::Count { expr, .. } => {
+                expr.as_ref().is_some_and(|e| expr_references_var(e, name))
+            }
             AggregateExpr::Sum { expr, .. }
             | AggregateExpr::Avg { expr, .. }
             | AggregateExpr::Min { expr, .. }
@@ -503,13 +503,13 @@ fn expr_uses_nullable(expr: &Expression, nullable: &std::collections::HashSet<St
         } => {
             operand
                 .as_ref()
-                .map_or(false, |e| expr_uses_nullable(e, nullable))
+                .is_some_and(|e| expr_uses_nullable(e, nullable))
                 || whens.iter().any(|(w, t)| {
                     expr_uses_nullable(w, nullable) || expr_uses_nullable(t, nullable)
                 })
                 || else_expr
                     .as_ref()
-                    .map_or(false, |e| expr_uses_nullable(e, nullable))
+                    .is_some_and(|e| expr_uses_nullable(e, nullable))
         }
         Expression::QuantifierExpr {
             list, predicate, ..
@@ -517,7 +517,7 @@ fn expr_uses_nullable(expr: &Expression, nullable: &std::collections::HashSet<St
             expr_uses_nullable(list, nullable)
                 || predicate
                     .as_ref()
-                    .map_or(false, |e| expr_uses_nullable(e, nullable))
+                    .is_some_and(|e| expr_uses_nullable(e, nullable))
         }
         Expression::Subscript(a, b) => {
             expr_uses_nullable(a, nullable) || expr_uses_nullable(b, nullable)
@@ -526,10 +526,10 @@ fn expr_uses_nullable(expr: &Expression, nullable: &std::collections::HashSet<St
             expr_uses_nullable(list, nullable)
                 || start
                     .as_ref()
-                    .map_or(false, |e| expr_uses_nullable(e, nullable))
+                    .is_some_and(|e| expr_uses_nullable(e, nullable))
                 || end
                     .as_ref()
-                    .map_or(false, |e| expr_uses_nullable(e, nullable))
+                    .is_some_and(|e| expr_uses_nullable(e, nullable))
         }
         Expression::ListComprehension {
             list,
@@ -540,10 +540,10 @@ fn expr_uses_nullable(expr: &Expression, nullable: &std::collections::HashSet<St
             expr_uses_nullable(list, nullable)
                 || predicate
                     .as_ref()
-                    .map_or(false, |e| expr_uses_nullable(e, nullable))
+                    .is_some_and(|e| expr_uses_nullable(e, nullable))
                 || projection
                     .as_ref()
-                    .map_or(false, |e| expr_uses_nullable(e, nullable))
+                    .is_some_and(|e| expr_uses_nullable(e, nullable))
         }
         Expression::PatternComprehension {
             predicate,
@@ -552,7 +552,7 @@ fn expr_uses_nullable(expr: &Expression, nullable: &std::collections::HashSet<St
         } => {
             predicate
                 .as_ref()
-                .map_or(false, |e| expr_uses_nullable(e, nullable))
+                .is_some_and(|e| expr_uses_nullable(e, nullable))
                 || expr_uses_nullable(projection, nullable)
         }
     }
@@ -745,7 +745,7 @@ fn cypher_float_str(f: f64) -> String {
         let exp_str = &s[e_pos + 1..];
         if let Ok(exp) = exp_str.parse::<i32>() {
             // Cypher decimal range: -6 ≤ exp ≤ 9
-            if exp >= -6 && exp <= 9 {
+            if (-6..=9).contains(&exp) {
                 // Expand to decimal. Build mantissa digits.
                 let neg = mantissa.starts_with('-');
                 let mant_abs = if neg { &mantissa[1..] } else { mantissa };

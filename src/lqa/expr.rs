@@ -266,7 +266,10 @@ pub enum AggKind {
 pub enum Expr {
     // ── Terminals ────────────────────────────────────────────────────────────
     /// Reference to a query variable (column in the current scope).
-    Variable { name: std::string::String, ty: Option<Type> },
+    Variable {
+        name: std::string::String,
+        ty: Option<Type>,
+    },
     /// A ground constant value.
     Literal(Literal),
     /// A query parameter: `$name` or `$0`.
@@ -416,6 +419,7 @@ impl Expr {
     }
 
     /// Wrap this expression in a `NOT(…)`.
+    #[allow(clippy::should_implement_trait)]
     pub fn not(self) -> Expr {
         Expr::Not(Box::new(self))
     }
@@ -442,7 +446,10 @@ impl Expr {
 
     /// Convenience constructor for a variable reference with no type annotation.
     pub fn var(name: impl Into<std::string::String>) -> Expr {
-        Expr::Variable { name: name.into(), ty: None }
+        Expr::Variable {
+            name: name.into(),
+            ty: None,
+        }
     }
 
     /// Convenience constructor for an integer literal.
@@ -592,7 +599,13 @@ mod tests {
             branches: vec![(Expr::bool(true), Expr::int(1))],
             else_expr: None,
         };
-        assert!(matches!(e, Expr::CaseSearched { else_expr: None, .. }));
+        assert!(matches!(
+            e,
+            Expr::CaseSearched {
+                else_expr: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -603,7 +616,13 @@ mod tests {
             list: Box::new(Expr::var("list")),
             predicate: Box::new(Expr::bool(true)),
         };
-        assert!(matches!(e, Expr::Quantifier { kind: QuantKind::Any, .. }));
+        assert!(matches!(
+            e,
+            Expr::Quantifier {
+                kind: QuantKind::Any,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -617,7 +636,13 @@ mod tests {
                 "name".into(),
             ))),
         };
-        assert!(matches!(e, Expr::ListComprehension { projection: Some(_), .. }));
+        assert!(matches!(
+            e,
+            Expr::ListComprehension {
+                projection: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -627,7 +652,14 @@ mod tests {
             distinct: false,
             arg: None,
         };
-        assert!(matches!(e, Expr::Aggregate { kind: AggKind::CountStar, arg: None, .. }));
+        assert!(matches!(
+            e,
+            Expr::Aggregate {
+                kind: AggKind::CountStar,
+                arg: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -637,7 +669,14 @@ mod tests {
             distinct: true,
             arg: Some(Box::new(Expr::var("x"))),
         };
-        assert!(matches!(e, Expr::Aggregate { kind: AggKind::Collect, distinct: true, .. }));
+        assert!(matches!(
+            e,
+            Expr::Aggregate {
+                kind: AggKind::Collect,
+                distinct: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -648,7 +687,14 @@ mod tests {
 
     #[test]
     fn cmp_op_variants() {
-        let ops = [CmpOp::Eq, CmpOp::Ne, CmpOp::Lt, CmpOp::Le, CmpOp::Gt, CmpOp::Ge];
+        let ops = [
+            CmpOp::Eq,
+            CmpOp::Ne,
+            CmpOp::Lt,
+            CmpOp::Le,
+            CmpOp::Gt,
+            CmpOp::Ge,
+        ];
         assert_eq!(ops.len(), 6);
     }
 }

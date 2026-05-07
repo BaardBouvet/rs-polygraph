@@ -1612,7 +1612,7 @@ impl TranslationState {
                     }
                 };
                 let nanoseconds = match get_literal_int(ns_expr) {
-                    Some(v) if v >= 0 && v <= 999_999_999 => v as u32,
+                    Some(v) if (0..=999_999_999).contains(&v) => v as u32,
                     _ => {
                         return Err(PolygraphError::UnsupportedFeature {
                             feature: "datetime.fromepoch() with non-literal or out-of-range nanoseconds"
