@@ -24,3 +24,48 @@ Output classifies every per-scenario change as one of:
 
 The baseline file is committed; updating it requires `--freeze` and a deliberate
 PR.
+
+---
+
+## Fast iteration workflow
+
+### Full-suite run (parallel shards)
+
+Use `cargo nextest` instead of `cargo test`; it runs the 8 TCK shards in
+parallel and is typically 3–5× faster end-to-end:
+
+```sh
+cargo nextest run -p polygraph
+```
+
+### Target a single feature directory
+
+Set `POLYGRAPH_TCK_FEATURES_DIR` to the directory (or file) that contains the
+failing scenario so only that subset is exercised. Use an absolute path when
+overriding (`.cargo/config.toml` makes the default relative, but manual
+overrides must be absolute):
+
+```sh
+# All quantifier scenarios
+POLYGRAPH_TCK_FEATURES_DIR=/workspaces/rs-polygraph/tests/tck/features/expressions/quantifier \
+  cargo test --test tck
+
+# A single feature file
+POLYGRAPH_TCK_FEATURES_DIR=/workspaces/rs-polygraph/tests/tck/features/expressions/quantifier/Quantifier1.feature \
+  cargo test --test tck
+```
+
+### Target a single scenario by name (inner loop)
+
+Set `POLYGRAPH_TCK_FILTER` to a substring of the scenario name. Only
+scenarios whose name contains that string will run — all others are skipped
+immediately without executing any steps:
+
+```sh
+POLYGRAPH_TCK_FILTER="None quantifier on list containing nodes" \
+  POLYGRAPH_TCK_FEATURES_DIR=/workspaces/rs-polygraph/tests/tck/features/expressions/quantifier \
+  cargo test --test tck
+```
+
+Combining both env vars gives the tightest possible loop: compile + run one
+scenario in seconds.

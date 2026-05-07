@@ -2921,9 +2921,16 @@ async fn run_tests() {
     // This keeps the dev-cycle fast while still allowing periodic full compliance runs.
     let run_slow: bool = std::env::args().any(|a| a == "--run-slow");
 
+    // POLYGRAPH_TCK_FILTER — optional substring/regex filter on scenario names.
+    // Set this to run only scenarios whose name contains the given string, e.g.:
+    //   POLYGRAPH_TCK_FILTER="None quantifier" cargo test --test tck
+    // This makes inner-loop debugging of a single failing scenario very fast.
+    let scenario_filter: Option<String> = std::env::var("POLYGRAPH_TCK_FILTER").ok();
+
     // Run each shard directory (or file) sequentially within this binary.
     // Nextest parallelises across binaries; within a binary we just chain the runs.
     for dir in features_dirs {
+        let scenario_filter = scenario_filter.clone();
         TckWorld::cucumber()
             .with_default_cli() // bypass clap arg-parsing (nextest injects --exact/--nocapture)
             .max_concurrent_scenarios(None) // unlimited — each scenario is isolated
@@ -2965,6 +2972,11 @@ async fn run_tests() {
             .filter_run(&dir, move |_, _, sc| {
                 if !run_slow && sc.tags.iter().any(|t| t == "slow") {
                     return false;
+                }
+                if let Some(ref f) = scenario_filter {
+                    if !sc.name.contains(f.as_str()) {
+                        return false;
+                    }
                 }
                 true
             })

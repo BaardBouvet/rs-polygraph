@@ -197,6 +197,10 @@ struct Compiler {
     /// Stores the key-value pairs so that `m.k` can be constant-folded at
     /// compile time without emitting a runtime SPARQL lookup.
     scalar_map_exprs: HashMap<String, Vec<(String, Expr)>>,
+    /// Variables bound to literal list expressions via WITH, e.g. `WITH [1,2,3] AS list`.
+    /// Stores the element expressions so that `list[a..b]` and `list[i]` can be
+    /// constant-folded at compile time.
+    scalar_list_exprs: HashMap<String, Vec<Expr>>,
     /// For `collect()` aggregates: maps output alias → raw GROUP_CONCAT variable.
     /// After the GROUP pattern, each entry is used to emit
     /// `BIND(CONCAT("[", COALESCE(?raw, ""), "]") AS ?alias)`.
@@ -234,6 +238,7 @@ impl Compiler {
             const_int_vars: HashMap::new(),
             list_size_vars: HashMap::new(),
             scalar_map_exprs: HashMap::new(),
+            scalar_list_exprs: HashMap::new(),
             collect_post_wraps: Vec::new(),
             collect_group_binds: Vec::new(),
         }
@@ -623,6 +628,16 @@ impl Compiler {
 
     fn lit_str(s: &str) -> SparExpr {
         SparExpr::Literal(SparLit::new_simple_literal(s))
+    }
+
+    /// Convert a `TriBool` (three-valued Boolean from compile-time null folding)
+    /// to a SPARQL expression.  `Null` maps to a fresh unbound variable.
+    fn tribool_to_spar(&mut self, tb: TriBool) -> SparExpr {
+        match tb {
+            TriBool::True => Self::lit_bool(true),
+            TriBool::False => Self::lit_bool(false),
+            TriBool::Null => SparExpr::Variable(self.fresh("null")),
+        }
     }
 
     // ── Pending triple flush ──────────────────────────────────────────────────
@@ -2341,6 +2356,13 @@ impl Compiler {
                                     self.nullable.insert(pi.alias.clone());
                                 }
                                 _ => {}
+                            }
+                            // Store literal list items for compile-time slice/subscript.
+                            // e.g. `WITH [1,2,3] AS list RETURN list[1..2]`
+                            if let Expr::List(items) = &pi.expr {
+                                if items.iter().all(lqa_is_full_literal) {
+                                    self.scalar_list_exprs.insert(pi.alias.clone(), items.clone());
+                                }
                             }
                             // Track temporal-typed variables for date/time arithmetic.
                             if let Expr::Literal(Literal::TypedLiteral(_, xsd_type)) = &pi.expr {
@@ -4149,10 +4171,15 @@ impl Compiler {
                 }
                 // Guard: list/map equality/inequality when null is present differs from plain
                 // string comparison (null propagates in Cypher, but comparing the serialised
-                // strings "[null, x]" always gives a definite false/true).  Return Err.
+                // strings "[null, x]" always gives a definite false/true).
+                // Try compile-time fold first; fall back to legacy only for dynamic exprs.
                 if matches!(op, CmpOp::Eq | CmpOp::Ne)
                     && (lqa_expr_contains_null(a) || lqa_expr_contains_null(b))
                 {
+                    if let Some(result) = try_fold_list_eq_null(a, b) {
+                        let result = if *op == CmpOp::Ne { result.negate() } else { result };
+                        return Ok(self.tribool_to_spar(result));
+                    }
                     return Err(PolygraphError::Unsupported {
                         construct: "list/map equality with null elements in LQA SPARQL lowering".into(),
                         spec_ref: "openCypher 9 §7.3".into(),
@@ -4164,8 +4191,12 @@ impl Compiler {
                 // the RHS to avoid hitting the Unsupported path for Expr::List.
                 if let (CmpOp::In, Expr::List(items)) = (op, b.as_ref()) {
                     // Guard: when the needle or any RHS list element contains null, Cypher's
-                    // three-valued IN semantics differ from SPARQL string equality.  Err → legacy.
+                    // three-valued IN semantics differ from SPARQL string equality.
+                    // Try compile-time fold first; fall back to legacy only for dynamic exprs.
                     if lqa_expr_contains_null(a) || items.iter().any(lqa_expr_contains_null) {
+                        if let Some(result) = try_fold_in_null(a, items) {
+                            return Ok(self.tribool_to_spar(result));
+                        }
                         return Err(PolygraphError::Unsupported {
                             construct: "list IN with null elements in LQA SPARQL lowering".into(),
                             spec_ref: "openCypher 9 §6.3.2".into(),
@@ -4657,8 +4688,72 @@ impl Compiler {
                 Ok(SparExpr::FunctionCall(Function::Concat, parts))
             }
 
-            Expr::ListSlice { .. }
-            | Expr::PatternComprehension { .. }
+            Expr::ListSlice { list, start, end } => {
+                // Resolve the list to its element vector (literal list or variable
+                // bound to a literal list via WITH).
+                let items: Vec<Expr> = match list.as_ref() {
+                    Expr::List(items) if items.iter().all(lqa_is_full_literal) => items.clone(),
+                    Expr::Variable { name, .. } => {
+                        if let Some(items) = self.scalar_list_exprs.get(name.as_str()).cloned() {
+                            items
+                        } else {
+                            return Err(PolygraphError::Unsupported {
+                                construct: "expression type ListSlice in LQA SPARQL lowering".into(),
+                                spec_ref: "openCypher 9 §6".into(),
+                                reason: "list slice on non-literal variable requires legacy path".into(),
+                            });
+                        }
+                    }
+                    _ => return Err(PolygraphError::Unsupported {
+                        construct: "expression type ListSlice in LQA SPARQL lowering".into(),
+                        spec_ref: "openCypher 9 §6".into(),
+                        reason: "list slice on dynamic expression requires legacy path".into(),
+                    }),
+                };
+                // Resolve start and end indices (optional, may be negative).
+                // If either bound is explicitly null, Cypher propagates null → return null.
+                let is_null_expr = |opt: &Option<Box<Expr>>| -> bool {
+                    matches!(opt.as_ref().map(|e| e.as_ref()), Some(Expr::Literal(Literal::Null)))
+                };
+                if is_null_expr(start) || is_null_expr(end) {
+                    let null_var = self.fresh("null");
+                    return Ok(SparExpr::Variable(null_var));
+                }
+                let len = items.len() as i64;
+                let raw_start = start.as_ref()
+                    .and_then(|e| match e.as_ref() {
+                        Expr::Literal(Literal::Integer(n)) => Some(*n),
+                        Expr::Variable { name, .. } =>
+                            self.const_int_vars.get(name.as_str()).copied(),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                let raw_end = end.as_ref()
+                    .and_then(|e| match e.as_ref() {
+                        Expr::Literal(Literal::Integer(n)) => Some(*n),
+                        Expr::Variable { name, .. } =>
+                            self.const_int_vars.get(name.as_str()).copied(),
+                        _ => None,
+                    })
+                    .unwrap_or(len);
+                // Clamp to [0, len] and handle negatives (count from end).
+                let clamp = |n: i64| -> usize {
+                    let c = if n < 0 { len + n } else { n };
+                    c.max(0).min(len) as usize
+                };
+                let from = clamp(raw_start);
+                let to = clamp(raw_end);
+                let slice: Vec<Expr> = if from >= to {
+                    vec![]
+                } else {
+                    items[from..to].to_vec()
+                };
+                // Return the slice as a serialized string literal (same encoding as lists).
+                let s = lqa_serialize_literal(&Expr::List(slice)).unwrap_or_else(|| "[]".into());
+                Ok(Self::lit_str(&s))
+            }
+
+            Expr::PatternComprehension { .. }
             | Expr::Reduce { .. }
             | Expr::Aggregate { .. } => Err(PolygraphError::Unsupported {
                 construct: format!(
@@ -6911,6 +7006,120 @@ fn lqa_expr_contains_null(e: &Expr) -> bool {
         Expr::Map(pairs) => pairs.iter().any(|(_, v)| lqa_expr_contains_null(v)),
         _ => false,
     }
+}
+
+/// Three-valued Boolean used for compile-time Cypher null-semantics folding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TriBool {
+    True,
+    False,
+    Null,
+}
+
+impl TriBool {
+    fn negate(self) -> Self {
+        match self {
+            TriBool::True => TriBool::False,
+            TriBool::False => TriBool::True,
+            TriBool::Null => TriBool::Null,
+        }
+    }
+}
+
+/// Returns `true` when `e` is a fully-literal expression (no variables,
+/// function calls, or other dynamic nodes anywhere in its tree).
+fn lqa_is_full_literal(e: &Expr) -> bool {
+    match e {
+        Expr::Literal(_) => true,
+        Expr::List(items) => items.iter().all(lqa_is_full_literal),
+        Expr::Map(pairs) => pairs.iter().all(|(_, v)| lqa_is_full_literal(v)),
+        _ => false,
+    }
+}
+
+/// Compare two fully-literal expressions with Cypher three-valued null
+/// semantics.  Callers must ensure both sides are fully literal (i.e.
+/// `lqa_is_full_literal` returns `true` for each).
+fn lit_cmp_tri(a: &Expr, b: &Expr) -> TriBool {
+    match (a, b) {
+        // Any comparison involving null yields null.
+        (Expr::Literal(Literal::Null), _) | (_, Expr::Literal(Literal::Null)) => TriBool::Null,
+        // List equality: different lengths → always false.
+        (Expr::List(ai), Expr::List(bi)) => {
+            if ai.len() != bi.len() {
+                return TriBool::False;
+            }
+            let mut has_null = false;
+            for (x, y) in ai.iter().zip(bi.iter()) {
+                match lit_cmp_tri(x, y) {
+                    TriBool::False => return TriBool::False,
+                    TriBool::Null => has_null = true,
+                    TriBool::True => {}
+                }
+            }
+            if has_null { TriBool::Null } else { TriBool::True }
+        }
+        // List vs. non-list or vice-versa → false.
+        (Expr::List(_), _) | (_, Expr::List(_)) => TriBool::False,
+        // Map equality.
+        (Expr::Map(ap), Expr::Map(bp)) => {
+            if ap.len() != bp.len() {
+                return TriBool::False;
+            }
+            let ak: Vec<&str> = ap.iter().map(|(k, _)| k.as_str()).collect();
+            let bk: Vec<&str> = bp.iter().map(|(k, _)| k.as_str()).collect();
+            if ak != bk {
+                return TriBool::False;
+            }
+            let mut has_null = false;
+            for ((_, av), (_, bv)) in ap.iter().zip(bp.iter()) {
+                match lit_cmp_tri(av, bv) {
+                    TriBool::False => return TriBool::False,
+                    TriBool::Null => has_null = true,
+                    TriBool::True => {}
+                }
+            }
+            if has_null { TriBool::Null } else { TriBool::True }
+        }
+        // Map vs. non-map → false.
+        (Expr::Map(_), _) | (_, Expr::Map(_)) => TriBool::False,
+        // Scalar: compare serialized representations (null handled above).
+        _ => {
+            if lqa_serialize_literal(a) == lqa_serialize_literal(b) {
+                TriBool::True
+            } else {
+                TriBool::False
+            }
+        }
+    }
+}
+
+/// Attempt to fold a list/map equality (or inequality) where at least one side
+/// contains a null literal, at compile time.  Returns `Some(result)` when both
+/// sides are fully-literal; `None` when any side is dynamic.
+fn try_fold_list_eq_null(a: &Expr, b: &Expr) -> Option<TriBool> {
+    if lqa_is_full_literal(a) && lqa_is_full_literal(b) {
+        Some(lit_cmp_tri(a, b))
+    } else {
+        None
+    }
+}
+
+/// Attempt to fold `needle IN haystack` where null elements are present.
+/// Returns `Some(result)` when all expressions are fully-literal; `None` otherwise.
+fn try_fold_in_null(needle: &Expr, haystack: &[Expr]) -> Option<TriBool> {
+    if !lqa_is_full_literal(needle) || !haystack.iter().all(lqa_is_full_literal) {
+        return None;
+    }
+    let mut potential_null = false;
+    for item in haystack {
+        match lit_cmp_tri(needle, item) {
+            TriBool::True => return Some(TriBool::True),
+            TriBool::Null => potential_null = true,
+            TriBool::False => {}
+        }
+    }
+    Some(if potential_null { TriBool::Null } else { TriBool::False })
 }
 
 fn lqa_serialize_literal(e: &Expr) -> Option<String> {

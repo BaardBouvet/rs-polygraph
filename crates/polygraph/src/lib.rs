@@ -574,6 +574,13 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                                 // active in LQA's flat WHERE.
                                 if let Some(rv) = r.variable.as_deref() {
                                     if seen_with && !live_rel_vars.contains(rv) {
+                                        // Any rel-var that appears after a WITH but wasn't
+                                        // forwarded through it — whether previously-seen or
+                                        // truly fresh — requires the WITH to act as a scope
+                                        // boundary.  LQA's flat WHERE model does not implement
+                                        // that boundary (it merges pre- and post-WITH triple
+                                        // patterns into one clause), producing cross-products.
+                                        // Route to legacy until LQA grows subquery support.
                                         return Some("relvar_after_with");
                                     }
                                     // Register this rel-var as live.
