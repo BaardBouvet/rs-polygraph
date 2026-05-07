@@ -1,0 +1,105 @@
+[package]
+name = "polygraph"
+version = "0.9.0"
+edition = "2021"
+authors = ["rs-polygraph contributors"]
+license = "Apache-2.0"
+description = "A Rust library that transpiles openCypher and ISO GQL queries into SPARQL 1.1 algebra"
+repository = "https://github.com/trickle-labs/rs-polygraph"
+readme = "README.md"
+keywords = ["cypher", "sparql", "gql", "transpiler", "graph"]
+categories = ["parser-implementations", "database-interfaces"]
+rust-version = "1.80"
+exclude = ["tests/tck/features/**", "plans/**"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lib]
+name = "polygraph"
+path = "src/lib.rs"
+
+[[test]]
+name = "tck"
+path = "../../tests/tck/main.rs"
+harness = false
+
+[[test]]
+name = "tck_clauses"
+path = "../../tests/tck/main.rs"
+harness = false
+
+[[test]]
+name = "tck_write_clauses"
+path = "../../tests/tck/main.rs"
+harness = false
+
+[[test]]
+name = "tck_expressions_agg"
+path = "../../tests/tck/main.rs"
+harness = false
+
+[[test]]
+name = "tck_expressions_heavy"
+path = "../../tests/tck/main.rs"
+harness = false
+
+[[test]]
+name = "tck_expressions_misc"
+path = "../../tests/tck/main.rs"
+harness = false
+
+[[test]]
+name = "tck_expressions_temporal"
+path = "../../tests/tck/main.rs"
+harness = false
+
+[[test]]
+name = "tck_usecases"
+path = "../../tests/tck/main.rs"
+harness = false
+
+[[test]]
+name = "tck_slow"
+path = "../../tests/tck/main.rs"
+harness = false
+
+[[test]]
+name = "integration"
+path = "../../tests/integration/cypher_to_sparql.rs"
+
+[[test]]
+name = "gql_integration"
+path = "../../tests/integration/gql_to_sparql.rs"
+
+[[test]]
+name = "result_mapping"
+path = "../../tests/integration/result_mapping.rs"
+
+[[test]]
+name = "movie_graph"
+path = "../../tests/integration/movie_graph.rs"
+
+[dependencies]
+opencypher-parser = { path = "../opencypher-parser" }
+pest = "2.7"
+pest_derive = "2.7"
+spargebra = { version = "0.4", features = ["sparql-12"] }
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
+
+[dev-dependencies]
+oxigraph = { version = "0.5", default-features = false, features = ["rdf-12"] }
+cucumber = "0.22"
+criterion = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[features]
+default = ["serde"]
+serde = ["dep:serde", "dep:serde_json"]
+
+[[bench]]
+name = "transpilation"
+harness = false
+path = "../../benches/transpilation.rs"
