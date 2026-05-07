@@ -5925,6 +5925,17 @@ impl Compiler {
                     {
                         Ok(self.build_node_properties_expr(vname))
                     }
+                    // Literal non-map values (integer, float, boolean, string, list) →
+                    // properties() on these is always a TypeError in Cypher.
+                    // Return Translation so it surfaces as a compile-time error.
+                    Expr::Literal(crate::lqa::expr::Literal::Integer(_))
+                    | Expr::Literal(crate::lqa::expr::Literal::Float(_))
+                    | Expr::Literal(crate::lqa::expr::Literal::Boolean(_))
+                    | Expr::Literal(crate::lqa::expr::Literal::String(_))
+                    | Expr::List(_) => Err(PolygraphError::Translation {
+                        message: "properties() on non-node/non-relationship literal: TypeError"
+                            .into(),
+                    }),
                     _ => Err(PolygraphError::Unsupported {
                         construct: "properties()".into(),
                         spec_ref: "openCypher 9 §6.3.5".into(),
