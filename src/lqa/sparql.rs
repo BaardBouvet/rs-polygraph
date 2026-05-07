@@ -2510,6 +2510,44 @@ impl Compiler {
                 list,
                 variable,
             } => {
+                // UNWIND const_list[idx_var] AS var — expand by cross-joining with
+                // a combined VALUES table. This supports patterns like:
+                //   WITH [[2], [3, 4]] AS qrows  UNWIND prows AS p  UNWIND qrows[p] AS q
+                // where the outer list (qrows) has been inlined by the lowerer.
+                if let Expr::Subscript(box_list, box_idx) = &list {
+                    if let (Expr::List(outer_items), Expr::Variable { name: idx_var, .. }) =
+                        (box_list.as_ref(), box_idx.as_ref())
+                    {
+                        let inner_pat = self.lower_op(inner)?;
+                        let output_var = Self::var(variable);
+                        let idx_v = Self::var(idx_var);
+                        let mut bindings: Vec<Vec<Option<spargebra::term::GroundTerm>>> =
+                            Vec::new();
+                        for (i, sub_item) in outer_items.iter().enumerate() {
+                            if let Expr::List(sub_items) = sub_item {
+                                for elem in sub_items {
+                                    let idx_gt = spargebra::term::GroundTerm::Literal(
+                                        SparLit::new_typed_literal(
+                                            i.to_string(),
+                                            NamedNode::new_unchecked(XSD_INTEGER),
+                                        ),
+                                    );
+                                    let elem_gt = literal_to_ground(elem)?;
+                                    bindings.push(vec![Some(idx_gt), elem_gt]);
+                                }
+                            }
+                        }
+                        if bindings.is_empty() {
+                            return Ok(inner_pat);
+                        }
+                        let combined = GraphPattern::Values {
+                            variables: vec![idx_v, output_var],
+                            bindings,
+                        };
+                        self.scan_vars.insert(variable.clone());
+                        return Ok(join(inner_pat, combined));
+                    }
+                }
                 if let Expr::List(items) = list {
                     let inner_pat = self.lower_op(inner)?;
                     let var = Self::var(variable);

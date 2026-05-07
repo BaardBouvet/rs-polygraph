@@ -154,6 +154,21 @@ impl AstLowerer {
                     Expr::Variable { name: vname, .. } => {
                         self.list_const_map.get(vname.as_str()).cloned().unwrap_or(list)
                     }
+                    // Also substitute for UNWIND list[idx] where `list` is a known
+                    // constant list variable: UNWIND qrows[p] AS q
+                    Expr::Subscript(box_list, box_idx) => {
+                        if let Expr::Variable { name: list_var, .. } = box_list.as_ref() {
+                            if let Some(const_list) =
+                                self.list_const_map.get(list_var.as_str()).cloned()
+                            {
+                                Expr::Subscript(Box::new(const_list), box_idx.clone())
+                            } else {
+                                list
+                            }
+                        } else {
+                            list
+                        }
+                    }
                     _ => list,
                 };
                 Ok(Op::Unwind {
