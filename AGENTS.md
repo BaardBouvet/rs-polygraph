@@ -22,6 +22,7 @@ See [ROADMAP.md](ROADMAP.md) for phased delivery. Design documents live in `plan
 | [l2-runtime-support.md](plans/l2-runtime-support.md) | in progress | Multi-phase (L2) runtime API; `TranspileOutput::Continuation` + `runtime::drive()` (v0.8.1 baseline, ongoing) |
 | [parser-extraction.md](plans/parser-extraction.md) | planned | Extract parser/AST into standalone `opencypher-parser` crate (v0.9.0) |
 | [pg-extension-protocol.md](plans/pg-extension-protocol.md) | planned | Postgres triplestore custom SPARQL functions for path decomposition (v0.9.1) |
+| [test-harness-consolidation.md](plans/test-harness-consolidation.md) | planned | Extract shared Oxigraph execution code from TCK + difftest runners (low priority) |
 
 ## Architecture
 

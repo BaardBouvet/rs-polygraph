@@ -271,13 +271,27 @@ fn try_lqa_path(
         // For the SELECT part (RETURN clause), use translate_skip_writes so that
         // SET-rewritten WHERE conditions are handled correctly.  The LQA write
         // compiler deliberately does NOT generate the SELECT (see CompiledWrite::has_return).
+        // When translate_skip_writes returns Unsupported, try the LQA compile_output
+        // path which supports L2 Continuation (e.g. list comprehensions in RETURN).
         let select = if cw.has_return {
-            let result = match translator::cypher::translate_skip_writes(
+            let legacy_result = translator::cypher::translate_skip_writes(
                 ast,
                 engine.base_iri(),
                 engine.supports_rdf_star(),
-            ) {
-                Ok(r) => r,
+            );
+            match legacy_result {
+                Ok(r) => {
+                    // Legacy succeeded: finalize and use it.
+                    let sparql = match engine.finalize(r.sparql) {
+                        Ok(s) => s,
+                        Err(PolygraphError::Unsupported { .. })
+                        | Err(PolygraphError::UnsupportedFeature { .. }) => {
+                            return Ok(None);
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    Some(Box::new(TranspileOutput::complete(sparql, r.schema)))
+                }
                 Err(PolygraphError::Unsupported { ref construct, .. })
                 | Err(PolygraphError::UnsupportedFeature {
                     feature: ref construct,
@@ -285,19 +299,20 @@ fn try_lqa_path(
                     if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
                         eprintln!("[LEGACY] lqa_write_select=Unsupported construct={construct}");
                     }
-                    return Ok(None); // fall back entirely to legacy path
+                    // Legacy translate_skip_writes failed.  Try the LQA path which
+                    // can emit a Continuation for list comprehensions and similar L2 patterns.
+                    let stripped = lqa::write::strip_writes(&op);
+                    match lqa::sparql::compile_output(&stripped, base_iri) {
+                        Ok(output) => Some(Box::new(output)),
+                        Err(PolygraphError::Unsupported { .. })
+                        | Err(PolygraphError::UnsupportedFeature { .. }) => {
+                            return Ok(None); // Both paths failed; fall back to full legacy.
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
                 Err(e) => return Err(e),
-            };
-            let sparql = match engine.finalize(result.sparql) {
-                Ok(s) => s,
-                Err(PolygraphError::Unsupported { .. })
-                | Err(PolygraphError::UnsupportedFeature { .. }) => {
-                    return Ok(None);
-                }
-                Err(e) => return Err(e),
-            };
-            Some(Box::new(TranspileOutput::complete(sparql, result.schema)))
+            }
         } else {
             None
         };

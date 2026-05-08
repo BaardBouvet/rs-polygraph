@@ -1,7 +1,7 @@
 # Spec-First Pivot — From TCK-Driven Patches to Semantics-Driven Translation
 
 **Status**: in progress
-**Updated**: 2026-05-06 (Phase 7 in progress + Phase 8 initial delivery: Bucket 4 temporal done, Bucket 7 range() done, keys() done, Buckets 1+2 Expr::List/Map done, Bucket 5 named-path done, Bucket 8 relvar_after_with partially done — 10 of 21 fallbacks eliminated; Bucket 11 keys/labels/properties done — 13 of 23 fallbacks eliminated; Phase 8 write-clause LQA landed (src/lqa/write.rs, TranspileOutput::Write, TCK maintained); TCK 3757/3828; difftest 232/232)
+**Updated**: 2026-06-09 (Phase L2 active: infrastructure complete, first Continuation emitter landed (Set1[5] fixed). TCK 3788/3828; difftest 232/232)
 
 This plan replaces the project's *de facto* methodology — "find the next failing
 TCK scenario, patch the translator until it passes" — with a spec-anchored,
@@ -781,6 +781,66 @@ If it's in a *passing* scenario, it's portable.
 **Exit:** permanent-construct fallbacks ≤ 30 (bucket 10 Quantifier + L2-deferred buckets 3/6/9 remain
 as legacy fallbacks until Phase L2); TCK ≥ 3757; difftest ≥ 213; Phase L2
 work started in parallel (see [l2-runtime-support.md](l2-runtime-support.md)).
+
+**Current state (2026-05-08):** The Phase 7 mechanical porting of permanent constructs
+is substantially complete (0 unexpected failures per the Phase 8.7 revised pre-conditions).
+Remaining Phase 7 queue items (Buckets 3/6/9/10) are all L2-deferred — they are superseded
+by Phase L2 work. **Phase L2 is now the primary active track** and should be prioritised
+over further Phase 7 work. See Phase L2 section below.
+
+### Phase L2 — Continuation Runtime  (🚧 in progress, **primary active track**)
+
+**Goal:** close the remaining 41 TCK failures that require multi-phase execution
+(quantifiers over runtime lists, list comprehensions, collect() + UNWIND,
+heterogeneous ordering, MERGE read-after-write).
+
+**Why before Phase 7 tail / Phase 8.7:** the Phase 7 deferred buckets (3/6/9)
+are the *same* constructs that Phase L2 targets — porting their lossy
+GROUP_CONCAT/correlated-SELECT forms would produce code that L2 immediately
+overwrites. Building L2 first eliminates ~244 legacy fallbacks AND unblocks
+41 TCK failures in a single architectural step.
+
+**Infrastructure status (already implemented):**
+
+| Component | Location | Status |
+|---|---|---|
+| `TranspileOutput::Continuation` enum variant | `src/result_mapping/mod.rs` | ✅ done |
+| `runtime::SparqlExecutor` trait | `src/runtime.rs` | ✅ done |
+| `runtime::drive()` function | `src/runtime.rs` | ✅ done |
+| `drive()` unit tests | `src/runtime.rs` | ✅ done |
+
+**Remaining work:**
+
+1. ~~**TCK runner wiring**~~ ✅ Done — `OxigraphExecutor` + `runtime::drive()` wired in `tests/tck/main.rs`.
+
+2. ~~**Difftest runner wiring**~~ ✅ Done — `DifftestOxExecutor` + `runtime::drive()` wired in `polygraph-difftest/src/runner.rs`.
+
+3. ~~**First Continuation emitter: `[x IN n.prop | arithmetic]` (Set1 bucket)**~~ ✅ Done  
+   `compile_output` + `try_list_comp_projection_continuation` in `lqa/sparql.rs`.
+   `lib.rs` write path uses LQA SELECT when legacy `translate_skip_writes` fails.
+   TCK runner handles Write + Continuation select. **Set1[5] now passing** (+1 TCK pass).
+
+4. **Next emitter: `[x IN collect(n) | x.prop]` (List12 bucket)**  
+   Phase 1: `SELECT ?join_key ?prop_val WHERE { pattern }` (individual rows, not collected).  
+   Continuation: group in Rust, build `["val1", "val2"]` string, emit `VALUES (?alias) { ... }`.
+
+5. **Q-b emitter: quantifier over scalar collect()**  
+   `none/single/any/all(x IN collect(expr) WHERE pred)` — Phase 1 collects scalar values;
+   continuation evaluates the boolean predicate in Rust over parsed list items.
+
+6. **Q-a emitter: quantifier over `nodes(p)` / `relationships(p)`**  
+   Path decomposition via varlen-path SPARQL, then continuation evaluates per-node predicates.
+
+7. **Heterogeneous ORDER BY (Bucket O, L1-adjacent)**  
+   For `UNWIND [n, r, p, 1.5, ...] AS types RETURN types ORDER BY types`:
+   Phase 1 materializes rows without ORDER BY; continuation sorts by Cypher type-rank in Rust;
+   Phase 2 returns ordered VALUES with a synthetic `__sort_idx` column.
+
+**Ordering rationale:** items 1+2+3 (wiring + first emitter) are complete. Items
+4+5 are the next highest-value emitters (6 + ~6 TCK passes). Items 6+7 are harder
+and can follow once the emitter pattern is established.
+
+---
 
 ### Phase 8 — Write-Clause LQA + Legacy Translator Deletion  (🚧 in progress)
 

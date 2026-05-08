@@ -45,6 +45,205 @@ impl TargetEngine for DifftestEngine {
     }
 }
 
+// ── L2 Continuation runtime wiring ───────────────────────────────────────────
+
+/// Wraps an Oxigraph `Store` as a `polygraph::runtime::SparqlExecutor` for the
+/// difftest harness.  Binding row values are serialised as JSON so that type
+/// information survives the round-trip through `BindingRow = Vec<(String, Option<String>)>`.
+struct DifftestOxExecutor<'a>(&'a Store);
+
+/// Serialise an `OxTerm` to a JSON-encoded `Value` string for `BindingRow` transport.
+fn term_to_binding_str(t: &OxTerm) -> String {
+    let v = term_to_value(t);
+    serde_json::to_string(&v).unwrap_or_else(|_| "null".to_owned())
+}
+
+/// Deserialise a `BindingRow` value string back to a `Value`.
+fn binding_str_to_value(s: &str) -> Value {
+    serde_json::from_str::<Value>(s).unwrap_or(Value::Null)
+}
+
+impl polygraph::runtime::SparqlExecutor for DifftestOxExecutor<'_> {
+    fn execute(
+        &self,
+        sparql: &str,
+    ) -> Result<Vec<polygraph::BindingRow>, polygraph::PolygraphError> {
+        #[expect(deprecated)]
+        let result = self.0.query_opt(sparql, make_evaluator()).map_err(|e| {
+            polygraph::PolygraphError::Translation {
+                message: e.to_string(),
+            }
+        })?;
+        match result {
+            QueryResults::Solutions(mut solutions) => {
+                let vars: Vec<String> = solutions
+                    .variables()
+                    .iter()
+                    .map(|v| v.as_str().to_owned())
+                    .collect();
+                let mut rows = Vec::new();
+                for sol_result in solutions.by_ref() {
+                    let sol = sol_result.map_err(|e| polygraph::PolygraphError::Translation {
+                        message: e.to_string(),
+                    })?;
+                    let row: polygraph::BindingRow = vars
+                        .iter()
+                        .map(|v| (v.clone(), sol.get(v.as_str()).map(term_to_binding_str)))
+                        .collect();
+                    rows.push(row);
+                }
+                Ok(rows)
+            }
+            QueryResults::Boolean(b) => {
+                Ok(vec![vec![("__bool__".to_owned(), Some(b.to_string()))]])
+            }
+            QueryResults::Graph(_) => Ok(vec![]),
+        }
+    }
+}
+
+/// Build a `SparqlEvaluator` with all custom SPARQL functions registered.
+fn make_evaluator() -> SparqlEvaluator {
+    SparqlEvaluator::new()
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:unsupported-pow"),
+            |args| {
+                let a = match args.first()? {
+                    OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                    _ => return None,
+                };
+                let b = match args.get(1)? {
+                    OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                    _ => return None,
+                };
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_typed_literal(
+                        a.powf(b).to_string(),
+                        oxigraph::model::NamedNode::new_unchecked(
+                            "http://www.w3.org/2001/XMLSchema#double",
+                        ),
+                    ),
+                ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-add"),
+            |args| {
+                let a = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let b = match args.get(1)? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let r = polygraph::translator::cypher::duration_add_str(&a, &b)?;
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_simple_literal(r),
+                ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-sub"),
+            |args| {
+                let a = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let b = match args.get(1)? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let r = polygraph::translator::cypher::duration_sub_str(&a, &b)?;
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_simple_literal(r),
+                ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-mul-num"),
+            |args| {
+                let dur = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let num = match args.get(1)? {
+                    OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                    _ => return None,
+                };
+                let r = polygraph::translator::cypher::duration_mul_num_str(&dur, num)?;
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_simple_literal(r),
+                ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-div-num"),
+            |args| {
+                let dur = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let num = match args.get(1)? {
+                    OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                    _ => return None,
+                };
+                let r = polygraph::translator::cypher::duration_div_num_str(&dur, num)?;
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_simple_literal(r),
+                ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-contains"),
+            |args| {
+                let list = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let value_str = match args.get(1)? {
+                    OxTerm::Literal(l) => {
+                        let dt = l.datatype().as_str();
+                        if dt.ends_with("#boolean")
+                            || dt.ends_with("#integer")
+                            || dt.ends_with("#long")
+                            || dt.ends_with("#double")
+                            || dt.ends_with("#float")
+                            || dt.ends_with("#decimal")
+                        {
+                            l.value().to_owned()
+                        } else {
+                            format!("'{}'", l.value().replace('\\', "\\\\").replace('\'', "\\'"))
+                        }
+                    }
+                    _ => return None,
+                };
+                let result = polygraph::translator::cypher::list_contains_str(&list, &value_str);
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_typed_literal(
+                        result.to_string(),
+                        oxigraph::model::NamedNode::new_unchecked(
+                            "http://www.w3.org/2001/XMLSchema#boolean",
+                        ),
+                    ),
+                ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-map-lower"),
+            |args| {
+                let list = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let result = polygraph::translator::cypher::list_map_lower_str(&list);
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_simple_literal(result),
+                ))
+            },
+        )
+}
+
 /// Run a single curated [`QuerySpec`].
 pub fn run_one(spec: &QuerySpec) -> RunReport {
     let engine = DifftestEngine;
@@ -82,15 +281,62 @@ pub fn run_one(spec: &QuerySpec) -> RunReport {
     // Transpile.
     let sparql = match Transpiler::cypher_to_sparql(&spec.cypher, &engine) {
         Ok(TranspileOutput::Complete { sparql, .. }) => sparql,
-        Ok(TranspileOutput::Continuation { .. }) => {
-            return RunReport {
-                name: spec.name.clone(),
-                spec_ref: spec.spec_ref.clone(),
-                outcome: ComparisonOutcome::Match,
-                sparql: String::new(),
-                actual_columns: vec![],
-                actual_rows: vec![],
-                error: Some("L2 continuation: out of scope for curated suite".into()),
+        Ok(TranspileOutput::Continuation {
+            phase1,
+            continue_fn,
+        }) => {
+            let output_cont = TranspileOutput::Continuation {
+                phase1,
+                continue_fn,
+            };
+            let executor = DifftestOxExecutor(&store);
+            match polygraph::runtime::drive(output_cont, &executor) {
+                Err(e) => {
+                    return RunReport {
+                        name: spec.name.clone(),
+                        spec_ref: spec.spec_ref.clone(),
+                        outcome: ComparisonOutcome::Match,
+                        sparql: String::new(),
+                        actual_columns: vec![],
+                        actual_rows: vec![],
+                        error: Some(format!("continuation drive: {e}")),
+                    }
+                }
+                Ok(rows) => {
+                    let (actual_columns, actual_rows) = if rows.is_empty() {
+                        (vec![], vec![])
+                    } else {
+                        let cols: Vec<String> = rows[0].iter().map(|(k, _)| k.clone()).collect();
+                        let data: Vec<Vec<Value>> = rows
+                            .into_iter()
+                            .map(|row| {
+                                row.into_iter()
+                                    .map(|(_, v)| match v {
+                                        None => Value::Null,
+                                        Some(s) => binding_str_to_value(&s),
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        (cols, data)
+                    };
+                    let outcome = Comparison::compare(
+                        &spec.expected.columns,
+                        &spec.expected.rows,
+                        &actual_columns,
+                        &actual_rows,
+                        spec.expected.order.into(),
+                    );
+                    return RunReport {
+                        name: spec.name.clone(),
+                        spec_ref: spec.spec_ref.clone(),
+                        outcome,
+                        sparql: String::new(),
+                        actual_columns,
+                        actual_rows,
+                        error: None,
+                    };
+                }
             }
         }
         Ok(TranspileOutput::Write { updates, select }) => {
@@ -150,154 +396,9 @@ pub fn run_one(spec: &QuerySpec) -> RunReport {
         }
     };
 
-    // Execute.
+    // Execute with all custom functions via make_evaluator().
     #[expect(deprecated)]
-    let res = store.query_opt(
-        sparql.as_str(),
-        SparqlEvaluator::new()
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:unsupported-pow"),
-                |args| {
-                    let a = match args.first()? {
-                        OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
-                        _ => return None,
-                    };
-                    let b = match args.get(1)? {
-                        OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
-                        _ => return None,
-                    };
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_typed_literal(
-                            a.powf(b).to_string(),
-                            oxigraph::model::NamedNode::new_unchecked(
-                                "http://www.w3.org/2001/XMLSchema#double",
-                            ),
-                        ),
-                    ))
-                },
-            )
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-add"),
-                |args| {
-                    let a = match args.first()? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let b = match args.get(1)? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let r = polygraph::translator::cypher::duration_add_str(&a, &b)?;
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_simple_literal(r),
-                    ))
-                },
-            )
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-sub"),
-                |args| {
-                    let a = match args.first()? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let b = match args.get(1)? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let r = polygraph::translator::cypher::duration_sub_str(&a, &b)?;
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_simple_literal(r),
-                    ))
-                },
-            )
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-mul-num"),
-                |args| {
-                    let dur = match args.first()? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let num = match args.get(1)? {
-                        OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
-                        _ => return None,
-                    };
-                    let r = polygraph::translator::cypher::duration_mul_num_str(&dur, num)?;
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_simple_literal(r),
-                    ))
-                },
-            )
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-div-num"),
-                |args| {
-                    let dur = match args.first()? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let num = match args.get(1)? {
-                        OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
-                        _ => return None,
-                    };
-                    let r = polygraph::translator::cypher::duration_div_num_str(&dur, num)?;
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_simple_literal(r),
-                    ))
-                },
-            )
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-contains"),
-                |args| {
-                    let list = match args.first()? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let value_str = match args.get(1)? {
-                        OxTerm::Literal(l) => {
-                            let dt = l.datatype().as_str();
-                            if dt.ends_with("#boolean")
-                                || dt.ends_with("#integer")
-                                || dt.ends_with("#long")
-                                || dt.ends_with("#double")
-                                || dt.ends_with("#float")
-                                || dt.ends_with("#decimal")
-                            {
-                                l.value().to_owned()
-                            } else {
-                                format!(
-                                    "'{}'",
-                                    l.value().replace('\\', "\\\\").replace('\'', "\\'")
-                                )
-                            }
-                        }
-                        _ => return None,
-                    };
-                    let result =
-                        polygraph::translator::cypher::list_contains_str(&list, &value_str);
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_typed_literal(
-                            result.to_string(),
-                            oxigraph::model::NamedNode::new_unchecked(
-                                "http://www.w3.org/2001/XMLSchema#boolean",
-                            ),
-                        ),
-                    ))
-                },
-            )
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-map-lower"),
-                |args| {
-                    use oxigraph::model::Term as OxTerm;
-                    let list = match args.first()? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let result = polygraph::translator::cypher::list_map_lower_str(&list);
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_simple_literal(result),
-                    ))
-                },
-            ),
-    );
+    let res = store.query_opt(sparql.as_str(), make_evaluator());
     let (actual_columns, actual_rows) = match res {
         Err(e) => {
             return RunReport {

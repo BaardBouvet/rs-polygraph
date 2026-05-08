@@ -8304,6 +8304,529 @@ fn fold_numeric_binop(op: char, la: &SparExpr, rb: &SparExpr) -> Option<SparExpr
     }
 }
 
+// ── L2 Continuation: list comprehension over stored properties ────────────────
+
+/// A Cypher runtime value used during L2 Continuation evaluation.
+/// Only the scalar subset is needed; graph entities are not evaluated in Rust.
+#[derive(Debug, Clone)]
+enum CypherRtVal {
+    Null,
+    Integer(i64),
+    Float(f64),
+    String(std::string::String),
+    Bool(bool),
+    List(Vec<CypherRtVal>),
+}
+
+/// Parse a Cypher list string (as stored in the RDF triplestore) into a vector
+/// of runtime values.  The input is the raw lexical value of the RDF literal,
+/// e.g. `"[1, 2, 3]"` or `"['hello', 'world']"`.
+///
+/// Returns `Err(Unsupported)` for constructs outside the current scope (maps,
+/// graph entities).
+fn parse_cypher_list(s: &str) -> Result<Vec<CypherRtVal>, PolygraphError> {
+    let s = s.trim();
+    if !s.starts_with('[') || !s.ends_with(']') {
+        return Err(PolygraphError::Unsupported {
+            construct: format!("expected list, got: {s}"),
+            spec_ref: "openCypher 9 §2.1.12".into(),
+            reason: "L2 list evaluation requires a Cypher list literal".into(),
+        });
+    }
+    let inner = s[1..s.len() - 1].trim();
+    if inner.is_empty() {
+        return Ok(vec![]);
+    }
+    parse_list_elements(inner)
+}
+
+/// Parse a comma-separated list of Cypher values (the inner content of `[...]`).
+fn parse_list_elements(s: &str) -> Result<Vec<CypherRtVal>, PolygraphError> {
+    let mut result = Vec::new();
+    let mut pos = 0usize;
+    while pos < s.len() {
+        // Skip leading whitespace.
+        while pos < s.len() && s.as_bytes()[pos] == b' ' {
+            pos += 1;
+        }
+        if pos >= s.len() {
+            break;
+        }
+        let (val, consumed) = parse_one_cypher_value(&s[pos..])?;
+        result.push(val);
+        pos += consumed;
+        // Skip optional ", " separator.
+        while pos < s.len() && s.as_bytes()[pos] == b' ' {
+            pos += 1;
+        }
+        if pos < s.len() && s.as_bytes()[pos] == b',' {
+            pos += 1; // skip comma
+        }
+    }
+    Ok(result)
+}
+
+/// Parse one Cypher value from the beginning of `s`, returning the value and the
+/// number of bytes consumed.
+fn parse_one_cypher_value(s: &str) -> Result<(CypherRtVal, usize), PolygraphError> {
+    let s = s.trim_start();
+    let trimmed = s.len();
+    let _ = trimmed;
+
+    if s.is_empty() {
+        return Err(PolygraphError::Unsupported {
+            construct: "empty element in Cypher list".into(),
+            spec_ref: "openCypher 9 §2.1.12".into(),
+            reason: "L2 list parse: unexpected empty element".into(),
+        });
+    }
+
+    // Quoted string: 'hello'
+    if s.starts_with('\'') {
+        // Find the closing unescaped single quote.
+        let end = s[1..]
+            .find('\'')
+            .ok_or_else(|| PolygraphError::Unsupported {
+                construct: "unterminated string in list".into(),
+                spec_ref: "openCypher 9 §2.1.12".into(),
+                reason: "L2 list parse: missing closing quote".into(),
+            })?;
+        let val = s[1..end + 1].to_owned();
+        return Ok((CypherRtVal::String(val), end + 2)); // +2 for both quotes
+    }
+
+    // Nested list: [...]
+    if s.starts_with('[') {
+        let (nested, consumed) = read_balanced_list(s)?;
+        let inner_vals = parse_cypher_list(&s[..consumed])?;
+        let _ = nested;
+        return Ok((CypherRtVal::List(inner_vals), consumed));
+    }
+
+    // Boolean: true
+    if s.starts_with("true") {
+        let end = 4;
+        if s.len() == end || !s.as_bytes()[end].is_ascii_alphanumeric() {
+            return Ok((CypherRtVal::Bool(true), end));
+        }
+    }
+    // Boolean: false
+    if s.starts_with("false") {
+        let end = 5;
+        if s.len() == end || !s.as_bytes()[end].is_ascii_alphanumeric() {
+            return Ok((CypherRtVal::Bool(false), end));
+        }
+    }
+    // Null
+    if s.starts_with("null") {
+        let end = 4;
+        if s.len() == end || !s.as_bytes()[end].is_ascii_alphanumeric() {
+            return Ok((CypherRtVal::Null, end));
+        }
+    }
+
+    // Number: read until ',', ']', or end of string.
+    let end = s
+        .find([',', ']'])
+        .unwrap_or(s.len());
+    let num_str = s[..end].trim();
+
+    if let Ok(n) = num_str.parse::<i64>() {
+        return Ok((CypherRtVal::Integer(n), end));
+    }
+    if let Ok(f) = num_str.parse::<f64>() {
+        return Ok((CypherRtVal::Float(f), end));
+    }
+
+    Err(PolygraphError::Unsupported {
+        construct: format!("unknown list element: {num_str}"),
+        spec_ref: "openCypher 9 §2.1.12".into(),
+        reason: "L2 list parse: unrecognised scalar".into(),
+    })
+}
+
+/// Return the byte span of a balanced `[...]` token at the start of `s`.
+fn read_balanced_list(s: &str) -> Result<((), usize), PolygraphError> {
+    let mut depth = 0usize;
+    let mut in_str = false;
+    for (i, b) in s.bytes().enumerate() {
+        match b {
+            b'\'' if !in_str => in_str = true,
+            b'\'' if in_str => in_str = false,
+            b'[' if !in_str => depth += 1,
+            b']' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(((), i + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(PolygraphError::Unsupported {
+        construct: "unterminated nested list".into(),
+        spec_ref: "openCypher 9 §2.1.12".into(),
+        reason: "L2 list parse: missing closing bracket".into(),
+    })
+}
+
+/// Evaluate a simple Cypher map expression over a single variable binding.
+/// `var_name` is the list iteration variable (e.g. `"i"`);
+/// `var_val` is the current element value.
+/// Returns `Err(Unsupported)` for constructs beyond scalar arithmetic.
+fn eval_lc_map_expr(
+    expr: &crate::lqa::expr::Expr,
+    var_name: &str,
+    var_val: &CypherRtVal,
+) -> Result<CypherRtVal, PolygraphError> {
+    use crate::lqa::expr::{Expr, Literal, UnaryOp};
+    match expr {
+        Expr::Variable { name, .. } if name == var_name => Ok(var_val.clone()),
+        Expr::Variable { name, .. } => Err(PolygraphError::Unsupported {
+            construct: format!("unbound variable {name} in L2 list map"),
+            spec_ref: "openCypher 9 §6.3.3".into(),
+            reason: "only the iteration variable is in scope".into(),
+        }),
+        Expr::Literal(Literal::Integer(n)) => Ok(CypherRtVal::Integer(*n)),
+        Expr::Literal(Literal::Float(f)) => Ok(CypherRtVal::Float(*f)),
+        Expr::Literal(Literal::String(s)) => Ok(CypherRtVal::String(s.clone())),
+        Expr::Literal(Literal::Boolean(b)) => Ok(CypherRtVal::Bool(*b)),
+        Expr::Literal(Literal::Null) => Ok(CypherRtVal::Null),
+        Expr::Unary(UnaryOp::Neg, inner) => {
+            let v = eval_lc_map_expr(inner, var_name, var_val)?;
+            match v {
+                CypherRtVal::Integer(n) => Ok(CypherRtVal::Integer(-n)),
+                CypherRtVal::Float(f) => Ok(CypherRtVal::Float(-f)),
+                CypherRtVal::Null => Ok(CypherRtVal::Null),
+                _ => Err(PolygraphError::Unsupported {
+                    construct: "negation of non-numeric in list map".into(),
+                    spec_ref: "openCypher 9 §6.3.3".into(),
+                    reason: "L2 eval: negation requires a number".into(),
+                }),
+            }
+        }
+        Expr::Add(a, b) => {
+            let av = eval_lc_map_expr(a, var_name, var_val)?;
+            let bv = eval_lc_map_expr(b, var_name, var_val)?;
+            rt_arith(av, bv, '+')
+        }
+        Expr::Sub(a, b) => {
+            let av = eval_lc_map_expr(a, var_name, var_val)?;
+            let bv = eval_lc_map_expr(b, var_name, var_val)?;
+            rt_arith(av, bv, '-')
+        }
+        Expr::Mul(a, b) => {
+            let av = eval_lc_map_expr(a, var_name, var_val)?;
+            let bv = eval_lc_map_expr(b, var_name, var_val)?;
+            rt_arith(av, bv, '*')
+        }
+        Expr::Div(a, b) => {
+            let av = eval_lc_map_expr(a, var_name, var_val)?;
+            let bv = eval_lc_map_expr(b, var_name, var_val)?;
+            rt_arith(av, bv, '/')
+        }
+        other => Err(PolygraphError::Unsupported {
+            construct: format!("expression {other:?} in list comprehension map"),
+            spec_ref: "openCypher 9 §6.3.3".into(),
+            reason: "L2 eval: only arithmetic on scalars supported".into(),
+        }),
+    }
+}
+
+/// Apply a binary arithmetic operation following Cypher semantics:
+/// int op int = int; int op float (or float op int) = float.
+fn rt_arith(a: CypherRtVal, b: CypherRtVal, op: char) -> Result<CypherRtVal, PolygraphError> {
+    match (a, b) {
+        (CypherRtVal::Null, _) | (_, CypherRtVal::Null) => Ok(CypherRtVal::Null),
+        (CypherRtVal::Integer(x), CypherRtVal::Integer(y)) => match op {
+            '+' => Ok(CypherRtVal::Integer(x.wrapping_add(y))),
+            '-' => Ok(CypherRtVal::Integer(x.wrapping_sub(y))),
+            '*' => Ok(CypherRtVal::Integer(x.wrapping_mul(y))),
+            '/' => {
+                if y == 0 {
+                    Ok(CypherRtVal::Null) // Cypher: division by zero → null
+                } else {
+                    Ok(CypherRtVal::Integer(x / y))
+                }
+            }
+            _ => unreachable!(),
+        },
+        (CypherRtVal::Float(x), CypherRtVal::Float(y)) => match op {
+            '+' => Ok(CypherRtVal::Float(x + y)),
+            '-' => Ok(CypherRtVal::Float(x - y)),
+            '*' => Ok(CypherRtVal::Float(x * y)),
+            '/' => Ok(CypherRtVal::Float(x / y)),
+            _ => unreachable!(),
+        },
+        (CypherRtVal::Integer(x), CypherRtVal::Float(y)) => {
+            let xf = x as f64;
+            match op {
+                '+' => Ok(CypherRtVal::Float(xf + y)),
+                '-' => Ok(CypherRtVal::Float(xf - y)),
+                '*' => Ok(CypherRtVal::Float(xf * y)),
+                '/' => Ok(CypherRtVal::Float(xf / y)),
+                _ => unreachable!(),
+            }
+        }
+        (CypherRtVal::Float(x), CypherRtVal::Integer(y)) => {
+            let yf = y as f64;
+            match op {
+                '+' => Ok(CypherRtVal::Float(x + yf)),
+                '-' => Ok(CypherRtVal::Float(x - yf)),
+                '*' => Ok(CypherRtVal::Float(x * yf)),
+                '/' => Ok(CypherRtVal::Float(x / yf)),
+                _ => unreachable!(),
+            }
+        }
+        _ => Err(PolygraphError::Unsupported {
+            construct: "arithmetic on non-numeric types in list map".into(),
+            spec_ref: "openCypher 9 §6.3.3".into(),
+            reason: "L2 eval: arithmetic requires numbers".into(),
+        }),
+    }
+}
+
+/// Serialise a runtime value as a Cypher list element string.
+/// Uses Rust's `{:?}` for floats to ensure a decimal point is always present.
+fn cypher_rt_val_to_elem_str(v: &CypherRtVal) -> String {
+    match v {
+        CypherRtVal::Null => "null".to_owned(),
+        CypherRtVal::Integer(n) => n.to_string(),
+        CypherRtVal::Float(f) => {
+            if f.is_nan() {
+                return "NaN".to_owned();
+            }
+            if f.is_infinite() {
+                return if f.is_sign_positive() {
+                    "Infinity".to_owned()
+                } else {
+                    "-Infinity".to_owned()
+                };
+            }
+            // Use Debug format which preserves the decimal point: 1.0 → "1.0".
+            format!("{f:?}")
+        }
+        CypherRtVal::Bool(b) => if *b { "true" } else { "false" }.to_owned(),
+        CypherRtVal::String(s) => format!("'{s}'"),
+        CypherRtVal::List(items) => {
+            let elems: Vec<String> = items.iter().map(cypher_rt_val_to_elem_str).collect();
+            format!("[{}]", elems.join(", "))
+        }
+    }
+}
+
+/// Escape a list string for embedding as a SPARQL string literal (double-quoted).
+/// Only `"` and `\` need escaping within a SPARQL double-quoted literal.
+fn sparql_escape_list_str(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// If `op` is a non-DISTINCT `Projection` where **every** return item is a
+/// `ListComprehension { list: Property(Variable, key), predicate: None, projection: Some(map_expr) }`,
+/// emit a two-phase `TranspileOutput::Continuation`:
+///
+/// * Phase 1 SELECTs the source property values for each row.
+/// * The continuation closure evaluates the map expression in Rust and returns
+///   the result list(s) via a SPARQL `VALUES` block.
+///
+/// Returns `None` if the pattern doesn't match.
+fn try_list_comp_projection_continuation(
+    op: &Op,
+    base_iri: &str,
+) -> Option<Result<crate::result_mapping::TranspileOutput, PolygraphError>> {
+    use crate::lqa::expr::Expr;
+    use crate::lqa::op::ProjItem;
+    use crate::result_mapping::{BindingRow, TranspileOutput};
+
+    let (inner, items) = match op {
+        Op::Projection {
+            inner,
+            items,
+            distinct: false,
+        } => (inner.as_ref(), items.as_slice()),
+        _ => return None,
+    };
+
+    // Collect LC specs; abort if any item is NOT a qualifying ListComprehension.
+    struct LcSpec {
+        /// SPARQL alias for the final output column (Cypher RETURN alias).
+        out_alias: std::string::String,
+        /// Alias for the Phase 1 column that holds the source property value.
+        src_alias: std::string::String,
+        /// The iteration variable name (e.g. `"i"`).
+        var_name: std::string::String,
+        /// The map expression (e.g. `Div(Var("i"), Float(2.0))`).
+        map_expr: Expr,
+    }
+
+    let mut specs: Vec<LcSpec> = Vec::new();
+    for item in items {
+        match &item.expr {
+            Expr::ListComprehension {
+                variable,
+                list,
+                predicate: None,
+                projection: Some(map_expr),
+            } => {
+                // Only handle list source = Property(Variable, key).
+                match list.as_ref() {
+                    Expr::Property(inner_expr, _key)
+                        if matches!(
+                            inner_expr.as_ref(),
+                            Expr::Variable { .. }
+                        ) =>
+                    {
+                        let src_alias = format!("__lc_src_{}", item.alias);
+                        specs.push(LcSpec {
+                            out_alias: item.alias.clone(),
+                            src_alias,
+                            var_name: variable.clone(),
+                            map_expr: map_expr.as_ref().clone(),
+                        });
+                    }
+                    _ => return None, // non-property list source
+                }
+            }
+            _ => return None, // non-ListComprehension item
+        }
+    }
+
+    if specs.is_empty() {
+        return None;
+    }
+
+    // Build Phase 1 Op: replace each LC with its property-access source.
+    let phase1_items: Vec<ProjItem> = specs
+        .iter()
+        .zip(items.iter())
+        .map(|(spec, orig)| ProjItem {
+            alias: spec.src_alias.clone(),
+            expr: match &orig.expr {
+                Expr::ListComprehension { list, .. } => list.as_ref().clone(),
+                _ => unreachable!(),
+            },
+            display_name: None,
+        })
+        .collect();
+
+    let phase1_op = Op::Projection {
+        inner: Box::new(inner.clone()),
+        items: phase1_items,
+        distinct: false,
+    };
+
+    let phase1_compiled = match compile(&phase1_op, Some(base_iri)) {
+        Ok(c) => c,
+        Err(e) => return Some(Err(e)),
+    };
+    let phase1_output = TranspileOutput::complete(phase1_compiled.sparql, phase1_compiled.schema);
+
+    // Clone what the closure needs.
+    let base_owned = base_iri.to_owned();
+    let out_aliases: Vec<String> = specs.iter().map(|s| s.out_alias.clone()).collect();
+    let src_aliases: Vec<String> = specs.iter().map(|s| s.src_alias.clone()).collect();
+    let var_names: Vec<String> = specs.iter().map(|s| s.var_name.clone()).collect();
+    let map_exprs: Vec<Expr> = specs.iter().map(|s| s.map_expr.clone()).collect();
+
+    let continuation = TranspileOutput::Continuation {
+        phase1: Box::new(phase1_output),
+        continue_fn: Box::new(move |phase1_rows: Vec<BindingRow>| {
+            // For each Phase 1 result row, evaluate the list comprehension
+            // and build one VALUES tuple.
+            let mut value_tuples: Vec<String> = Vec::new();
+
+            for row in &phase1_rows {
+                let mut tuple_vals: Vec<String> = Vec::new();
+                for ((src_alias, var_name), map_expr) in
+                    src_aliases.iter().zip(var_names.iter()).zip(map_exprs.iter())
+                {
+                    // Look up the source property value in this row.
+                    let list_str_opt = row
+                        .iter()
+                        .find(|(k, _)| k == src_alias)
+                        .and_then(|(_, v)| v.as_deref());
+
+                    let result_list_str = match list_str_opt {
+                        None => "null".to_owned(), // property absent → null
+                        Some(list_str) => {
+                            // Parse the list and evaluate the map expression.
+                            let elems = parse_cypher_list(list_str)?;
+                            let mut result_elems: Vec<String> = Vec::new();
+                            for elem in &elems {
+                                let out = eval_lc_map_expr(map_expr, var_name, elem)?;
+                                result_elems.push(cypher_rt_val_to_elem_str(&out));
+                            }
+                            format!("[{}]", result_elems.join(", "))
+                        }
+                    };
+
+                    // Escape and wrap as SPARQL string literal.
+                    let escaped = sparql_escape_list_str(&result_list_str);
+                    tuple_vals.push(format!("\"{escaped}\""));
+                }
+                value_tuples.push(format!("({})", tuple_vals.join(" ")));
+            }
+
+            // Build Phase 2 SELECT … WHERE { VALUES (…) { … } }
+            let vars_clause: String = out_aliases
+                .iter()
+                .map(|a| format!("?{a}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let phase2_sparql = if value_tuples.is_empty() {
+                // No rows → return empty result.
+                format!("SELECT {vars_clause} WHERE {{ FILTER(false) }}")
+            } else {
+                let values_body = value_tuples.join("\n    ");
+                format!(
+                    "SELECT {vars_clause} WHERE {{ VALUES ({vars_clause}) {{ {values_body} }} }}"
+                )
+            };
+
+            let schema = crate::result_mapping::schema::ProjectionSchema {
+                columns: out_aliases
+                    .iter()
+                    .map(|a| crate::result_mapping::schema::ProjectedColumn {
+                        name: a.clone(),
+                        kind: crate::result_mapping::schema::ColumnKind::Scalar { var: a.clone() },
+                    })
+                    .collect(),
+                distinct: false,
+                base_iri: base_owned.clone(),
+                rdf_star: false,
+            };
+            Ok(TranspileOutput::complete(phase2_sparql, schema))
+        }),
+    };
+
+    Some(Ok(continuation))
+}
+
+/// Compile an [`Op`] tree to a [`TranspileOutput`] that may be either
+/// [`TranspileOutput::Complete`] (single-phase SPARQL) or
+/// [`TranspileOutput::Continuation`] (multi-phase with Rust-side evaluation).
+///
+/// This is the L2-capable entry point.  Callers that only need single-phase
+/// SPARQL should use [`compile`] instead.
+pub fn compile_output(
+    op: &Op,
+    base_iri: Option<&str>,
+) -> Result<crate::result_mapping::TranspileOutput, PolygraphError> {
+    let base = base_iri.unwrap_or(DEFAULT_BASE);
+
+    // Try L2 Continuation patterns first.
+    if let Some(result) = try_list_comp_projection_continuation(op, base) {
+        return result;
+    }
+
+    // Fall back to single-phase compilation.
+    let compiled = compile(op, base_iri)?;
+    Ok(crate::result_mapping::TranspileOutput::complete(
+        compiled.sparql,
+        compiled.schema,
+    ))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

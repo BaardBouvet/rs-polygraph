@@ -70,6 +70,228 @@ impl std::fmt::Debug for OxStore {
     }
 }
 
+// ── L2 Continuation runtime wiring ───────────────────────────────────────────
+
+/// Wraps an Oxigraph `Store` as a `polygraph::runtime::SparqlExecutor`.
+///
+/// Registers all custom SPARQL functions (duration arithmetic, list operations)
+/// so that Continuation phases can use the same execution environment as the
+/// primary SPARQL query path.
+struct OxigraphExecutor<'a>(&'a Store);
+
+impl polygraph::runtime::SparqlExecutor for OxigraphExecutor<'_> {
+    fn execute(
+        &self,
+        sparql: &str,
+    ) -> Result<Vec<polygraph::BindingRow>, polygraph::PolygraphError> {
+        use oxigraph::sparql::QueryResults;
+        #[expect(deprecated)]
+        let result = self.0.query_opt(sparql, make_evaluator()).map_err(|e| {
+            polygraph::PolygraphError::Translation {
+                message: e.to_string(),
+            }
+        })?;
+        match result {
+            QueryResults::Solutions(mut solutions) => {
+                let vars: Vec<String> = solutions
+                    .variables()
+                    .iter()
+                    .map(|v| v.as_str().to_owned())
+                    .collect();
+                let mut rows = Vec::new();
+                for sol_result in solutions.by_ref() {
+                    let sol = sol_result.map_err(|e| polygraph::PolygraphError::Translation {
+                        message: e.to_string(),
+                    })?;
+                    let row: polygraph::BindingRow = vars
+                        .iter()
+                        .map(|v| (v.clone(), sol.get(v.as_str()).map(term_to_string)))
+                        .collect();
+                    rows.push(row);
+                }
+                Ok(rows)
+            }
+            QueryResults::Boolean(b) => {
+                Ok(vec![vec![("__bool__".to_owned(), Some(b.to_string()))]])
+            }
+            QueryResults::Graph(_) => Ok(vec![]),
+        }
+    }
+}
+
+/// Populate `world.result_vars` and `world.result_rows` from `drive()` output rows.
+fn bind_rows_to_world(rows: Vec<polygraph::BindingRow>, world: &mut TckWorld) {
+    if rows.is_empty() {
+        world.result_vars = vec![];
+        world.result_rows = vec![];
+        return;
+    }
+    world.result_vars = rows[0].iter().map(|(k, _)| k.clone()).collect();
+    let vars = world.result_vars.clone();
+    world.result_rows = rows
+        .into_iter()
+        .map(|row| {
+            let row_map: std::collections::HashMap<String, Option<String>> =
+                row.into_iter().collect();
+            vars.iter()
+                .map(|v| row_map.get(v).cloned().flatten())
+                .collect()
+        })
+        .collect();
+}
+
+/// Build a `SparqlEvaluator` with all custom SPARQL functions registered.
+///
+/// Used by both the primary query path and the `OxigraphExecutor` for
+/// `runtime::drive()` continuation phases.
+fn make_evaluator() -> SparqlEvaluator {
+    SparqlEvaluator::new()
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:unsupported-pow"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let a = match args.first()? {
+                    OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                    _ => return None,
+                };
+                let b = match args.get(1)? {
+                    OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                    _ => return None,
+                };
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_typed_literal(
+                        a.powf(b).to_string(),
+                        oxigraph::model::NamedNode::new_unchecked(
+                            "http://www.w3.org/2001/XMLSchema#double",
+                        ),
+                    ),
+                ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-add"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let a = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let b = match args.get(1)? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let result = polygraph::translator::cypher::duration_add_str(&a, &b)?;
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_simple_literal(result),
+                ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-sub"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let a = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let b = match args.get(1)? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let result = polygraph::translator::cypher::duration_sub_str(&a, &b)?;
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_simple_literal(result),
+                ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-mul-num"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let dur = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let num = match args.get(1)? {
+                    OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                    _ => return None,
+                };
+                let result = polygraph::translator::cypher::duration_mul_num_str(&dur, num)?;
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_simple_literal(result),
+                ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-div-num"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let dur = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let num = match args.get(1)? {
+                    OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
+                    _ => return None,
+                };
+                let result = polygraph::translator::cypher::duration_div_num_str(&dur, num)?;
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_simple_literal(result),
+                ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-contains"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let list = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let value_str = match args.get(1)? {
+                    OxTerm::Literal(l) => {
+                        let dt = l.datatype().as_str();
+                        if dt.ends_with("#boolean")
+                            || dt.ends_with("#integer")
+                            || dt.ends_with("#long")
+                            || dt.ends_with("#double")
+                            || dt.ends_with("#float")
+                            || dt.ends_with("#decimal")
+                        {
+                            l.value().to_owned()
+                        } else {
+                            format!("'{}'", l.value().replace('\\', "\\\\").replace('\'', "\\'"))
+                        }
+                    }
+                    _ => return None,
+                };
+                let result = polygraph::translator::cypher::list_contains_str(&list, &value_str);
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_typed_literal(
+                        result.to_string(),
+                        oxigraph::model::NamedNode::new_unchecked(
+                            "http://www.w3.org/2001/XMLSchema#boolean",
+                        ),
+                    ),
+                ))
+            },
+        )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-map-lower"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let list = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let result = polygraph::translator::cypher::list_map_lower_str(&list);
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_simple_literal(result),
+                ))
+            },
+        )
+}
+
 /// Per-scenario shared state.
 #[derive(Debug, World)]
 pub struct TckWorld {
@@ -2307,9 +2529,22 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
                         return;
                     }
                     polygraph::TranspileOutput::Complete { sparql, .. } => sparql,
-                    polygraph::TranspileOutput::Continuation { .. } => {
-                        world.query_error =
-                            Some("L2 continuation not yet supported in TCK runner".into());
+                    polygraph::TranspileOutput::Continuation {
+                        phase1,
+                        continue_fn,
+                    } => {
+                        let output_cont = polygraph::TranspileOutput::Continuation {
+                            phase1,
+                            continue_fn,
+                        };
+                        let store = world
+                            .store
+                            .get_or_insert_with(|| OxStore(Store::new().unwrap()));
+                        let executor = OxigraphExecutor(&store.0);
+                        match polygraph::runtime::drive(output_cont, &executor) {
+                            Err(e) => world.query_error = Some(e.to_string()),
+                            Ok(rows) => bind_rows_to_world(rows, world),
+                        }
                         return;
                     }
                     // cypher_to_sparql_skip_writes uses the legacy path and
@@ -2332,9 +2567,28 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
         }
         Ok(output) => match output {
             polygraph::TranspileOutput::Complete { sparql, .. } => sparql,
-            polygraph::TranspileOutput::Continuation { .. } => {
-                world.query_error = Some("L2 continuation not yet supported in TCK runner".into());
-                return;
+            polygraph::TranspileOutput::Continuation {
+                phase1,
+                continue_fn,
+            } => {
+                let output_cont = polygraph::TranspileOutput::Continuation {
+                    phase1,
+                    continue_fn,
+                };
+                let store = world
+                    .store
+                    .get_or_insert_with(|| OxStore(Store::new().unwrap()));
+                let executor = OxigraphExecutor(&store.0);
+                match polygraph::runtime::drive(output_cont, &executor) {
+                    Err(e) => {
+                        world.query_error = Some(e.to_string());
+                        return;
+                    }
+                    Ok(rows) => {
+                        bind_rows_to_world(rows, world);
+                        return;
+                    }
+                }
             }
             polygraph::TranspileOutput::Write { updates, select } => {
                 // Phase 8: write query compiled by LQA write path.
@@ -2365,6 +2619,26 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
                     }
                     Some(sel) => match *sel {
                         polygraph::TranspileOutput::Complete { sparql, .. } => sparql,
+                        polygraph::TranspileOutput::Continuation { phase1, continue_fn } => {
+                            // The SELECT phase is itself a Continuation (e.g. list
+                            // comprehension over a SET-assigned property).  Drive it
+                            // using the same executor that handles read-only queries.
+                            let output_cont = polygraph::TranspileOutput::Continuation {
+                                phase1,
+                                continue_fn,
+                            };
+                            let executor = OxigraphExecutor(&store.0);
+                            match polygraph::runtime::drive(output_cont, &executor) {
+                                Err(e) => {
+                                    world.query_error = Some(e.to_string());
+                                    return;
+                                }
+                                Ok(rows) => {
+                                    bind_rows_to_world(rows, world);
+                                    return;
+                                }
+                            }
+                        }
                         _ => {
                             world.query_error =
                                 Some("unexpected non-Complete select in Write output".into());
@@ -2382,165 +2656,9 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
         .store
         .get_or_insert_with(|| OxStore(Store::new().unwrap()));
 
-    // Register urn:polygraph:unsupported-pow as a real custom function so that
-    // unknown-custom-function errors don't break the pow null-propagation tests.
-    // When either operand is unbound (Cypher null), spareval returns None before
-    // calling the function, so null propagation still works correctly.
-    // Also register duration arithmetic custom functions for L2 runtime evaluation.
+    // Execute the SPARQL query with all custom functions registered via make_evaluator().
     #[expect(deprecated)]
-    match store.0.query_opt(
-        sparql.as_str(),
-        SparqlEvaluator::new()
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:unsupported-pow"),
-                |args| {
-                    use oxigraph::model::Term as OxTerm;
-                    let a = match args.first()? {
-                        OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
-                        _ => return None,
-                    };
-                    let b = match args.get(1)? {
-                        OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
-                        _ => return None,
-                    };
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_typed_literal(
-                            a.powf(b).to_string(),
-                            oxigraph::model::NamedNode::new_unchecked(
-                                "http://www.w3.org/2001/XMLSchema#double",
-                            ),
-                        ),
-                    ))
-                },
-            )
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-add"),
-                |args| {
-                    use oxigraph::model::Term as OxTerm;
-                    let a = match args.first()? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let b = match args.get(1)? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let result = polygraph::translator::cypher::duration_add_str(&a, &b)?;
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_simple_literal(result),
-                    ))
-                },
-            )
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-sub"),
-                |args| {
-                    use oxigraph::model::Term as OxTerm;
-                    let a = match args.first()? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let b = match args.get(1)? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let result = polygraph::translator::cypher::duration_sub_str(&a, &b)?;
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_simple_literal(result),
-                    ))
-                },
-            )
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-mul-num"),
-                |args| {
-                    use oxigraph::model::Term as OxTerm;
-                    let dur = match args.first()? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let num = match args.get(1)? {
-                        OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
-                        _ => return None,
-                    };
-                    let result = polygraph::translator::cypher::duration_mul_num_str(&dur, num)?;
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_simple_literal(result),
-                    ))
-                },
-            )
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:duration-div-num"),
-                |args| {
-                    use oxigraph::model::Term as OxTerm;
-                    let dur = match args.first()? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let num = match args.get(1)? {
-                        OxTerm::Literal(l) => l.value().parse::<f64>().ok()?,
-                        _ => return None,
-                    };
-                    let result = polygraph::translator::cypher::duration_div_num_str(&dur, num)?;
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_simple_literal(result),
-                    ))
-                },
-            )
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-contains"),
-                |args| {
-                    use oxigraph::model::Term as OxTerm;
-                    let list = match args.first()? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let value_str = match args.get(1)? {
-                        OxTerm::Literal(l) => {
-                            let dt = l.datatype().as_str();
-                            if dt.ends_with("#boolean")
-                                || dt.ends_with("#integer")
-                                || dt.ends_with("#long")
-                                || dt.ends_with("#double")
-                                || dt.ends_with("#float")
-                                || dt.ends_with("#decimal")
-                            {
-                                l.value().to_owned()
-                            } else {
-                                // Plain / xsd:string — wrap in single quotes (Cypher list format)
-                                format!(
-                                    "'{}'",
-                                    l.value().replace('\\', "\\\\").replace('\'', "\\'")
-                                )
-                            }
-                        }
-                        _ => return None,
-                    };
-                    let result =
-                        polygraph::translator::cypher::list_contains_str(&list, &value_str);
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_typed_literal(
-                            result.to_string(),
-                            oxigraph::model::NamedNode::new_unchecked(
-                                "http://www.w3.org/2001/XMLSchema#boolean",
-                            ),
-                        ),
-                    ))
-                },
-            )
-            .with_custom_function(
-                oxigraph::model::NamedNode::new_unchecked("urn:polygraph:list-map-lower"),
-                |args| {
-                    use oxigraph::model::Term as OxTerm;
-                    let list = match args.first()? {
-                        OxTerm::Literal(l) => l.value().to_owned(),
-                        _ => return None,
-                    };
-                    let result = polygraph::translator::cypher::list_map_lower_str(&list);
-                    Some(OxTerm::Literal(
-                        oxigraph::model::Literal::new_simple_literal(result),
-                    ))
-                },
-            ),
-    ) {
+    match store.0.query_opt(sparql.as_str(), make_evaluator()) {
         Err(e) => {
             world.query_error = Some(e.to_string());
         }

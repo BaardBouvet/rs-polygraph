@@ -1,9 +1,9 @@
 # L2 Runtime Support — Roadmap to Full TCK Compliance
 
 **Status**: in progress
-**Updated**: 2026-05-14
+**Updated**: 2026-06-09
 **Baseline**: 3757 / 3828 scenarios pass (98.1 %), 71 failed.
-**Current**: 3765 / 3828 scenarios pass (98.3 %), 63 failed — 8 Temporal8 closes.
+**Current**: 3788 / 3828 scenarios pass (98.9 %), 40 failing — first Continuation emitter landed (Set1[5] fixed).
 **Target**: ≥ 99 % pass + skipped categories collapsed.
 
 This plan describes how to close the remaining gap between the static
@@ -51,8 +51,12 @@ ceiling.
 
 ## 2. Architecture: `TranspileOutput::Continuation`
 
-The transpiler's public API today returns a single SPARQL string. To support
-L2, change the return type to a sum:
+**Status: ✅ Infrastructure implemented.** The enum variants and runtime driver described
+below are already in the codebase. The remaining work is (a) wiring the TCK and
+difftest test runners to call `drive()`, and (b) implementing the first Continuation
+emitters in `lqa/sparql.rs`.
+
+Original design (for reference):
 
 ```rust
 pub enum TranspileOutput {
@@ -130,6 +134,41 @@ with those bindings inlined as `VALUES`.
 
 ## 4. Implementation Progress
 
+### Phase L2-α: Infrastructure  ✅ DONE (2026-05-07)
+
+`TranspileOutput::Continuation`, `runtime::SparqlExecutor`, and `runtime::drive()`
+are all implemented and unit-tested. Nothing emits `Continuation` yet; both
+test runners return an error when they encounter one. The next step is:
+
+1. **TCK runner wiring** (`tests/tck/main.rs`): create an `OxigraphExecutor`
+   implementing `SparqlExecutor` via the existing `OxStore` (with all custom
+   functions registered). Replace the `"L2 continuation not yet supported"`
+   error arm with a call to `runtime::drive(&output, &executor)` for the result rows.
+
+2. **Difftest runner wiring** (`polygraph-difftest/src/runner.rs`): same pattern —
+   wrap the Oxigraph query executor in `SparqlExecutor` and call `drive()`.
+
+Both runners are now wired. Any Continuation emitted by the transpiler is automatically
+exercised by both the TCK and difftest suites without further runner changes.
+
+### Phase L2-γ: First Continuation emitter — list comprehension arithmetic  ✅ DONE (2026-06-09)
+
+Pattern: `SET n.prop = [literal_list] RETURN [i IN n.prop | arithmetic_expr] AS alias`
+
+**LQA change** (`src/lqa/sparql.rs`):
+- Added `compile_output(op, base_iri) -> Result<TranspileOutput, PolygraphError>` — new L2-capable entry point.
+- Added `try_list_comp_projection_continuation(op, base_iri)` — detects `Projection` where all items are `ListComprehension { list: Property(Var, key), predicate: None, projection: Some(arithmetic) }`.
+- Phase 1: compiles a `SELECT ?__lc_src_{alias}` that fetches the source property values.
+- Continuation closure: parses the stored list string, evaluates the arithmetic map expression in Rust (`eval_lc_map_expr`), serializes result list, emits a `VALUES` block.
+- Added `parse_cypher_list` — parses `"[1, 2, 3]"` format into `CypherRtVal` list.
+- Added `eval_lc_map_expr` — evaluates Cypher arithmetic on scalar values.
+
+**`lib.rs` write path change**: When `translate_skip_writes` returns `Unsupported`, now tries `compile_output(strip_writes(&op), base_iri)` as a fallback. If that also fails, falls back to full legacy.
+
+**TCK runner change** (`tests/tck/main.rs`): `Write + Continuation select` arm added — calls `runtime::drive()` on the Continuation and binds the result rows.
+
+**Result**: Set1[5] (Adding a list property) now passes. 3787→3788 TCK. No regressions. Difftest 232/232.
+
 ### Phase L2-β: Duration arithmetic via custom SPARQL functions  ✅ DONE (2026-05-14)
 
 Instead of using `TranspileOutput::Continuation` (which would require a 2-phase
@@ -160,16 +199,16 @@ Key rules:
 
 ---
 
-### Remaining 63 failures (post Phase L2-β)
+### Remaining 40 failures (post Phase L2-γ)
 
 | Bucket | Count | Mitigation |
 |--------|------:|-----------|
-| L2-deferred (quantifiers, collect, list comprehension) | ~30 | L2-Q1/LC1 |
-| L1-temporal (Temporal10 DST, Temporal2/3 constructors) | 10 | chrono-tz + parser |
-| L1-varlen (variable-length path, named paths) | ~6 | structural |
-| L1-write (Merge5) | 4 | write clause work |
-| L1-structural (properties(), UNWIND variable) | ~7 | structural |
-| L1-other (Match4/5 cardinality, Precedence1) | ~6 | structural |
+| L2-deferred (quantifiers, collect, list comprehension) | ~29 | L2-Q1/LC1 |
+| L1-temporal (Temporal10 DST, Temporal2/3 constructors) | ~9 | chrono-tz + parser |
+| L1-varlen (variable-length path, named paths) | ~5 | structural |
+| L1-write (Merge5, Merge1) | ~4 | write clause work |
+| L1-structural (properties(), UNWIND variable) | ~6 | structural |
+| L1-other (Match4/5 cardinality, Comparison1, With6) | ~3 | structural |
 
 ---
 

@@ -82,6 +82,14 @@ This must be resolved before v0.9.0.
 
 ---
 
+## Backlog — Test harness consolidation
+
+**Plan**: [test-harness-consolidation.md](plans/test-harness-consolidation.md) | **Status**: 🔜 planned | **Priority**: low
+
+`make_evaluator()`, `TargetEngine` impls, and Oxigraph executor wrappers are duplicated between `tests/tck/main.rs` and `polygraph-difftest/src/runner.rs`. Extract into a shared location so new custom SPARQL functions only need to be registered once. No API or TCK impact.
+
+---
+
 ## v0.11.0 — Postgres path decomposition extensions
 
 **Plan**: [pg-extension-protocol.md](plans/pg-extension-protocol.md) | **Status**: 🔜 planned | **Release**: TBD

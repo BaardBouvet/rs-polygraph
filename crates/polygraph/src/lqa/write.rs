@@ -215,8 +215,7 @@ fn compile_write_recursive(
 /// Projection and the innermost read-only subtree.
 ///
 /// Used to extract the SELECT op for RETURN-clause queries (Phase 8.7).
-#[allow(dead_code)]
-fn strip_writes(op: &Op) -> Op {
+pub(crate) fn strip_writes(op: &Op) -> Op {
     match op {
         Op::Projection {
             inner,

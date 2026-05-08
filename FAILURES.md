@@ -1,7 +1,7 @@
 # TCK Failure Reference
 
-**Updated**: 2026-06-08  
-**Baseline**: 3787 / 3828 passing (98.9 %), **41 failing**.  
+**Updated**: 2026-06-09  
+**Baseline**: 3788 / 3828 passing (98.9 %), **40 failing**.  
 **Legacy fallbacks**: ~494 scenario executions still route through the legacy translator — goal is zero (see Phase 8.7).  
 **Target**: ≥ 3790 (≥ 99 %) — see [plans/l2-runtime-support.md](plans/l2-runtime-support.md).
 
@@ -219,13 +219,14 @@ Mixed L1/L2 cases, each requiring individual work.
 **Root cause**: `count(p)` on a named path variable counts serialised strings
 not distinct paths; interaction with GROUP BY produces incorrect grouping.
 
-### Set1[5] — Adding a list property
+### ~~Set1[5] — Adding a list property~~  **FIXED**
 
 **L-level**: L1/L2  
 **Feature**: [Set1.feature](tests/tck/features/clauses/set/Set1.feature#L109)  
-**Error**: `"complex return expression"` — `SET n.roles = split(str, ',')` assigns
-a runtime list to a property; the RETURN expression that follows cannot be
-lowered because `split()` returns a non-literal list.
+**Fix**: L2 Continuation emitter in `lqa/sparql.rs` (`compile_output` / `try_list_comp_projection_continuation`).
+`SET n.numbers = [1, 2, 3] RETURN [i IN n.numbers | i / 2.0]` — Phase 1 SELECTs the stored
+property, Continuation evaluates the arithmetic map expression in Rust, Phase 2 returns
+result via VALUES block.
 
 ### With6[4] — Implicit grouping with single path variable
 
