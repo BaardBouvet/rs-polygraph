@@ -2197,11 +2197,15 @@ impl Compiler {
                 // old `?n` from the outer scope so that the rename BIND is valid.
                 let mut gp = self.lower_op(inner)?;
 
-                // Detect whether any non-passthrough alias collides with a scan variable.
+                // Detect whether any non-passthrough alias collides with an already-bound
+                // variable in the SPARQL scope — either a scan variable (from MATCH) or a
+                // scalar variable (from a previous WITH BIND).  Without this check the BIND
+                // would try to re-bind an already-bound SPARQL variable, which is invalid.
                 let has_collision = items.iter().any(|pi| {
                     pi.alias != "*"
                         && !matches!(&pi.expr, Expr::Variable { name, .. } if *name == pi.alias)
-                        && self.scan_vars.contains(pi.alias.as_str())
+                        && (self.scan_vars.contains(pi.alias.as_str())
+                            || self.scalar_vars.contains(pi.alias.as_str()))
                 });
 
                 if has_collision {
@@ -2850,7 +2854,14 @@ impl Compiler {
             }
 
             Op::UnionAll { left, right } => {
+                // Save scalar state so the right branch starts from the same
+                // pre-Union scope as the left branch (prevents left branch's
+                // scalar bindings from polluting the right branch's collision check).
+                let saved_scalar_vars = self.scalar_vars.clone();
+                let saved_scan_vars = self.scan_vars.clone();
                 let lp = self.lower_op(left)?;
+                self.scalar_vars = saved_scalar_vars;
+                self.scan_vars = saved_scan_vars;
                 let rp = self.lower_op(right)?;
                 Ok(GraphPattern::Union {
                     left: Box::new(lp),
@@ -2859,7 +2870,13 @@ impl Compiler {
             }
 
             Op::Union { left, right } => {
+                // Save scalar state so the right branch starts from the same
+                // pre-Union scope as the left branch.
+                let saved_scalar_vars = self.scalar_vars.clone();
+                let saved_scan_vars = self.scan_vars.clone();
                 let lp = self.lower_op(left)?;
+                self.scalar_vars = saved_scalar_vars;
+                self.scan_vars = saved_scan_vars;
                 let rp = self.lower_op(right)?;
                 Ok(GraphPattern::Distinct {
                     inner: Box::new(GraphPattern::Union {

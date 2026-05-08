@@ -402,33 +402,10 @@ fn lqa_safe_reason(ast: &ast::CypherQuery) -> Option<&'static str> {
                     // expressions that reference them still work correctly even if they
                     // wouldn't be in scope in legacy's sub-SELECT model.
                     //
-                    // Block LQA when ORDER BY is present AND a non-passthrough alias
-                    // shadows a variable from the previous scope.  LQA flattens WITH
-                    // clauses into a single SPARQL WHERE block, so re-binding an
-                    // already-bound variable (e.g. `WITH x % 3 AS x ORDER BY x`)
-                    // produces an invalid SPARQL "SELECT overrides existing variable".
-                    if w.order_by.is_some() {
-                        if let ReturnItems::Explicit(items) = &w.items {
-                            for item in items {
-                                let alias_opt = item.alias.as_deref().or({
-                                    if let Expression::Variable(v) = &item.expression {
-                                        Some(v.as_str())
-                                    } else {
-                                        None
-                                    }
-                                });
-                                if let Some(alias) = alias_opt {
-                                    let is_passthrough = matches!(
-                                        &item.expression,
-                                        Expression::Variable(v) if v.as_str() == alias
-                                    );
-                                    if !is_passthrough && scope.contains(alias) {
-                                        return Some("with_orderby_shadow_alias");
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // Note: The former with_orderby_shadow_alias guard has been removed.
+                    // LQA's subquery-isolation path (in sparql.rs Op::Projection handler)
+                    // now handles the case where a WITH alias shadows an existing scalar
+                    // variable from a previous WITH clause, including when ORDER BY is present.
                 }
                 if let ReturnItems::Explicit(items) = &w.items {
                     let new_scope: HashSet<String> = items
