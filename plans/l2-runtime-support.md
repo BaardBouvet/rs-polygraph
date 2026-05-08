@@ -3,7 +3,7 @@
 **Status**: in progress
 **Updated**: 2026-06-10
 **Baseline**: 3757 / 3828 scenarios pass (98.1 %), 71 failed.
-**Current**: 3790 / 3828 scenarios pass (99.0 %), 38 failing — Comparison1[14] path equality + WithOrderBy1[45] list comparison sort key fixed.
+**Current**: 3793 / 3828 scenarios pass (99.1 %), 35 failing — Temporal2[6] chrono-tz historical timezone + Match5[26,27] DELETE pipeline + having_executed routing fixed.
 **Target**: ≥ 99.3 % pass + skipped categories collapsed.
 
 This plan describes how to close the remaining gap between the static

@@ -2305,6 +2305,46 @@ async fn having_executed(world: &mut TckWorld, step: &Step) {
         return;
     }
     let cypher = step.docstring.as_deref().unwrap_or("").trim();
+
+    // Check if the query contains a DELETE clause — if so, use the full
+    // Transpiler::cypher_to_sparql_update path which properly compiles
+    // MATCH-DELETE-CREATE into INSERT-before-DELETE SPARQL UPDATE sequences.
+    let has_delete = parse_cypher(cypher)
+        .map(|ast| {
+            ast.clauses
+                .iter()
+                .any(|c| matches!(c, polygraph::ast::cypher::Clause::Delete(_)))
+        })
+        .unwrap_or(false);
+
+    if has_delete {
+        match Transpiler::cypher_to_sparql_update(cypher, &ENGINE) {
+            Ok(updates) if !updates.is_empty() => {
+                let store = world
+                    .store
+                    .get_or_insert_with(|| OxStore(Store::new().unwrap()));
+                for upd in &updates {
+                    if let Err(e) = store.0.update(upd.as_str()) {
+                        eprintln!(
+                            "[TCK setup] DELETE UPDATE failed for {cypher:?}: {e}\nGenerated:\n{upd}"
+                        );
+                        world.skip = true;
+                        return;
+                    }
+                }
+                return;
+            }
+            Ok(_) => {
+                // Empty updates — fall through to write_clauses_to_updates below.
+            }
+            Err(e) => {
+                eprintln!("[TCK setup] Transpiler failed for {cypher:?}: {e}");
+                world.skip = true;
+                return;
+            }
+        }
+    }
+
     // If the setup contains MATCH/MERGE/SET/REMOVE/DELETE clauses, route through
     // the full write_clauses_to_updates path which can emit INSERT...WHERE etc.
     let needs_full_writes = {

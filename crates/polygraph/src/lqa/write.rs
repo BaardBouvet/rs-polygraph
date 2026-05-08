@@ -24,6 +24,84 @@ use crate::error::PolygraphError;
 use crate::lqa::expr::{CmpOp, Expr, Literal, UnaryOp};
 use crate::lqa::op::{CreateEdge, CreateNode, Direction, MergeClause, Op, RemoveItem, SetItem};
 
+// ── Relationship variable metadata ───────────────────────────────────────────
+
+/// Metadata about a relationship variable bound in an `Op::Expand` pattern.
+/// Used by `compile_delete` to generate correct edge-deletion SPARQL.
+struct RelVarBind {
+    from: String,
+    to: String,
+    rel_types: Vec<String>,
+    direction: Direction,
+}
+
+/// Traverse a read-only Op subtree collecting `rel_var → RelVarBind` mappings
+/// for every `Op::Expand` that carries a named relationship variable.
+fn collect_rel_vars(op: &Op) -> HashMap<String, RelVarBind> {
+    let mut map = HashMap::new();
+    collect_rel_vars_rec(op, &mut map);
+    map
+}
+
+fn collect_rel_vars_rec(op: &Op, map: &mut HashMap<String, RelVarBind>) {
+    match op {
+        Op::Expand {
+            inner,
+            from,
+            rel_var: Some(rv),
+            to,
+            rel_types,
+            direction,
+            ..
+        } => {
+            map.insert(
+                rv.clone(),
+                RelVarBind {
+                    from: from.clone(),
+                    to: to.clone(),
+                    rel_types: rel_types.clone(),
+                    direction: direction.clone(),
+                },
+            );
+            collect_rel_vars_rec(inner, map);
+        }
+        Op::Expand { inner, .. } => {
+            collect_rel_vars_rec(inner, map);
+        }
+        Op::Selection { inner, .. }
+        | Op::OrderBy { inner, .. }
+        | Op::Distinct { inner }
+        | Op::GroupBy { inner, .. }
+        | Op::Projection { inner, .. }
+        | Op::Limit { inner, .. }
+        | Op::Skip { inner, .. }
+        | Op::Unwind { inner, .. } => collect_rel_vars_rec(inner, map),
+        Op::CartesianProduct { left, right }
+        | Op::Union { left, right }
+        | Op::UnionAll { left, right } => {
+            collect_rel_vars_rec(left, map);
+            collect_rel_vars_rec(right, map);
+        }
+        Op::LeftOuterJoin { left, right, .. } => {
+            collect_rel_vars_rec(left, map);
+            collect_rel_vars_rec(right, map);
+        }
+        Op::Subquery { outer, inner } => {
+            collect_rel_vars_rec(outer, map);
+            collect_rel_vars_rec(inner, map);
+        }
+        // Write ops can appear nested; recurse through them safely.
+        Op::Create { inner, .. }
+        | Op::Set { inner, .. }
+        | Op::Delete { inner, .. }
+        | Op::Remove { inner, .. }
+        | Op::Merge { inner, .. }
+        | Op::Call { inner, .. }
+        | Op::Foreach { inner, .. } => collect_rel_vars_rec(inner, map),
+        Op::Scan { .. } | Op::Unit | Op::Values { .. } => {}
+    }
+}
+
 /// Convenience macro to construct an `Unsupported` error for write-clause
 /// constructs.  All write fallbacks use the same spec reference.
 macro_rules! write_unsupported {
@@ -132,12 +210,21 @@ fn compile_write_recursive(
             let match_ctx = read_context(inner);
             let where_parts = op_to_where_parts(match_ctx, base)?;
 
-            // If inner also contains writes, compile those first.
+            // Emit CREATE inserts BEFORE any nested write operations.
+            //
+            // In Cypher semantics, MATCH-DELETE-CREATE (or MATCH-SET-CREATE) reads
+            // the match context once, then applies all changes.  In SPARQL Update,
+            // separate statements execute sequentially: if we emitted DELETE first,
+            // the INSERT's WHERE clause would find zero rows because the matched
+            // edges no longer exist.  By emitting INSERT first (while the original
+            // data is still intact), the INSERT's WHERE correctly matches, and the
+            // subsequent DELETE removes the old edges — producing the right final state.
+            compile_create(nodes, edges, &where_parts, base, counter, bnode_map, out)?;
+
+            // Then compile any nested write operations (DELETE, SET, …) inside inner.
             if contains_write(inner) {
                 compile_write_recursive(inner, base, counter, bnode_map, out)?;
             }
-
-            compile_create(nodes, edges, &where_parts, base, counter, bnode_map, out)?;
         }
         Op::Set { inner, items } => {
             let match_ctx = read_context(inner);
@@ -156,12 +243,13 @@ fn compile_write_recursive(
         } => {
             let match_ctx = read_context(inner);
             let where_parts = op_to_where_parts(match_ctx, base)?;
+            let rel_vars = collect_rel_vars(match_ctx);
 
             if contains_write(inner) {
                 compile_write_recursive(inner, base, counter, bnode_map, out)?;
             }
 
-            compile_delete(exprs, *detach, &where_parts, base, out)?;
+            compile_delete(exprs, *detach, &where_parts, &rel_vars, base, out)?;
         }
         Op::Remove { inner, items } => {
             let match_ctx = read_context(inner);
@@ -387,12 +475,18 @@ fn op_to_where_parts(op: &Op, base: &str) -> Result<Vec<String>, PolygraphError>
             let mut parts = op_to_where_parts(inner, base)?;
             if rel_types.is_empty() {
                 // Untyped relationship: use a variable predicate.
+                // Also constrain the `to` endpoint to be a graph node (sentinel triple).
+                // Without this, ?pred_var would also match property triples (where the
+                // object is a literal or a type IRI like rdf:type), incorrectly deleting
+                // or updating non-edge triples in write-path queries.
                 let pred_var = format!("?__pred_{}_{}", from, to);
                 match direction {
                     Direction::Outgoing => {
+                        parts.push(format!("?{to} <{base}__node> <{base}__node>"));
                         parts.push(format!("?{from} {pred_var} ?{to}"));
                     }
                     Direction::Incoming => {
+                        parts.push(format!("?{from} <{base}__node> <{base}__node>"));
                         parts.push(format!("?{to} {pred_var} ?{from}"));
                     }
                     Direction::Undirected => {
@@ -523,6 +617,27 @@ fn push_predicate_parts(expr: &Expr, base: &str, parts: &mut Vec<String>) {
         Expr::And(a, b) => {
             push_predicate_parts(a, base, parts);
             push_predicate_parts(b, base, parts);
+        }
+        // `a:LabelA` → `?a <rdf:type> <base:LabelA>` triple pattern
+        Expr::LabelCheck { expr, labels } => {
+            if let Expr::Variable { name: var, .. } = expr.as_ref() {
+                for label in labels {
+                    parts.push(format!("?{var} <{RDF_TYPE}> <{base}{label}>"));
+                }
+            }
+        }
+        // `NOT a:LabelA` → FILTER NOT EXISTS { ?a <rdf:type> <base:LabelA> }
+        Expr::Not(inner) => {
+            if let Expr::LabelCheck { expr, labels } = inner.as_ref() {
+                if let Expr::Variable { name: var, .. } = expr.as_ref() {
+                    for label in labels {
+                        parts.push(format!(
+                            "FILTER NOT EXISTS {{ ?{var} <{RDF_TYPE}> <{base}{label}> }}"
+                        ));
+                    }
+                }
+            }
+            // Other NOT forms: skip conservatively.
         }
         // Other predicates: skip conservatively (the LQA SELECT path handles them).
         _ => {}
@@ -1108,6 +1223,7 @@ fn compile_delete(
     exprs: &[Expr],
     detach: bool,
     where_parts: &[String],
+    rel_vars: &HashMap<String, RelVarBind>,
     base: &str,
     out: &mut Vec<String>,
 ) -> Result<(), PolygraphError> {
@@ -1116,44 +1232,51 @@ fn compile_delete(
     for expr in exprs {
         match expr {
             Expr::Variable { name: var, .. } => {
-                let n_var = format!("?{var}");
-                let base_where_cond = if base_where.is_empty() {
-                    format!("{n_var} <{base}__node> <{base}__node>")
+                // Check whether this variable is a relationship var (bound by an Expand).
+                if let Some(bind) = rel_vars.get(var.as_str()) {
+                    // Relationship DELETE: remove the specific edge triple (and any
+                    // RDF-star property triples) from the store.
+                    compile_delete_rel(var, bind, &base_where, base, out)?;
                 } else {
-                    base_where.clone()
-                };
+                    // Node variable DELETE.
+                    let n_var = format!("?{var}");
+                    let base_where_cond = if base_where.is_empty() {
+                        format!("{n_var} <{base}__node> <{base}__node>")
+                    } else {
+                        base_where.clone()
+                    };
 
-                if detach {
-                    // DETACH DELETE: remove all triples where the node is subject or object.
-                    // Also remove the node itself (sentinel triple).
-                    let p_var = format!("?__del_{var}_p");
-                    let o_var = format!("?__del_{var}_o");
-                    let s_var = format!("?__del_{var}_s");
+                    if detach {
+                        // DETACH DELETE: remove all triples where the node is subject or object.
+                        // Also remove the node itself (sentinel triple).
+                        let p_var = format!("?__del_{var}_p");
+                        let o_var = format!("?__del_{var}_o");
+                        let s_var = format!("?__del_{var}_s");
 
-                    // Delete outgoing triples (node as subject).
-                    out.push(format!(
-                        "DELETE {{ {n_var} {p_var} {o_var} }} \
-                         WHERE {{ {base_where_cond} . {n_var} {p_var} {o_var} }}"
-                    ));
-                    // Delete incoming triples (node as object).
-                    out.push(format!(
-                        "DELETE {{ {s_var} {p_var} {n_var} }} \
-                         WHERE {{ {base_where_cond} . {s_var} {p_var} {n_var} . \
-                                  FILTER({s_var} != {n_var}) }}"
-                    ));
-                } else {
-                    // Non-DETACH DELETE: only delete the node triples (subject side).
-                    let p_var = format!("?__del_{var}_p");
-                    let o_var = format!("?__del_{var}_o");
-                    out.push(format!(
-                        "DELETE {{ {n_var} {p_var} {o_var} }} \
-                         WHERE {{ {base_where_cond} . {n_var} {p_var} {o_var} }}"
-                    ));
+                        // Delete outgoing triples (node as subject).
+                        out.push(format!(
+                            "DELETE {{ {n_var} {p_var} {o_var} }} \
+                             WHERE {{ {base_where_cond} . {n_var} {p_var} {o_var} }}"
+                        ));
+                        // Delete incoming triples (node as object).
+                        out.push(format!(
+                            "DELETE {{ {s_var} {p_var} {n_var} }} \
+                             WHERE {{ {base_where_cond} . {s_var} {p_var} {n_var} . \
+                                      FILTER({s_var} != {n_var}) }}"
+                        ));
+                    } else {
+                        // Non-DETACH DELETE: only delete the node triples (subject side).
+                        let p_var = format!("?__del_{var}_p");
+                        let o_var = format!("?__del_{var}_o");
+                        out.push(format!(
+                            "DELETE {{ {n_var} {p_var} {o_var} }} \
+                             WHERE {{ {base_where_cond} . {n_var} {p_var} {o_var} }}"
+                        ));
+                    }
                 }
             }
-            // DELETE of a relationship variable — remove the edge triple.
+            // Complex DELETE expressions (non-variable): fall back.
             _ => {
-                // Complex DELETE expressions: fall back.
                 return Err(write_unsupported!("write_delete_complex_expr"));
             }
         }
@@ -1161,7 +1284,72 @@ fn compile_delete(
     Ok(())
 }
 
-// ── MERGE compiler ────────────────────────────────────────────────────────────
+/// Generate SPARQL UPDATE statements to delete an edge triple (and its
+/// associated RDF-star property triples) for a named relationship variable.
+fn compile_delete_rel(
+    rel_var: &str,
+    bind: &RelVarBind,
+    base_where: &str,
+    base: &str,
+    out: &mut Vec<String>,
+) -> Result<(), PolygraphError> {
+    let RelVarBind { from, to, rel_types, direction } = bind;
+
+    if rel_types.is_empty() {
+        // Untyped relationship: the predicate is captured in the anonymous
+        // variable ?__pred_{from}_{to} that op_to_where_parts already emits.
+        let pred_var = format!("?__pred_{}_{}", from, to);
+
+        let (subj, obj) = match direction {
+            Direction::Outgoing => (format!("?{from}"), format!("?{to}")),
+            Direction::Incoming => (format!("?{to}"), format!("?{from}")),
+            Direction::Undirected => {
+                // For undirected patterns op_to_where_parts emits a UNION which
+                // makes it hard to target the right direction.  Fall back.
+                return Err(write_unsupported!("write_delete_rel_undirected_untyped"));
+            }
+        };
+
+        // Delete the edge triple itself.
+        out.push(format!(
+            "DELETE {{ {subj} {pred_var} {obj} }} \
+             WHERE {{ {base_where} }}"
+        ));
+        // Delete any RDF-star property triples attached to this edge.
+        let pp = format!("?__del_{rel_var}_prop_p");
+        let po = format!("?__del_{rel_var}_prop_o");
+        out.push(format!(
+            "DELETE {{ << {subj} {pred_var} {obj} >> {pp} {po} }} \
+             WHERE {{ {base_where} . << {subj} {pred_var} {obj} >> {pp} {po} }}"
+        ));
+    } else {
+        for rt in rel_types {
+            let type_iri = format!("{base}{rt}");
+
+            let (subj, obj) = match direction {
+                Direction::Outgoing => (format!("?{from}"), format!("?{to}")),
+                Direction::Incoming => (format!("?{to}"), format!("?{from}")),
+                Direction::Undirected => {
+                    return Err(write_unsupported!("write_delete_rel_undirected_typed"));
+                }
+            };
+
+            // Delete the typed edge triple.
+            out.push(format!(
+                "DELETE {{ {subj} <{type_iri}> {obj} }} \
+                 WHERE {{ {base_where} }}"
+            ));
+            // Delete any RDF-star property triples on this edge.
+            let pp = format!("?__del_{rel_var}_prop_p");
+            let po = format!("?__del_{rel_var}_prop_o");
+            out.push(format!(
+                "DELETE {{ << {subj} <{type_iri}> {obj} >> {pp} {po} }} \
+                 WHERE {{ {base_where} . << {subj} <{type_iri}> {obj} >> {pp} {po} }}"
+            ));
+        }
+    }
+    Ok(())
+}
 
 fn compile_merge(
     clause: &MergeClause,

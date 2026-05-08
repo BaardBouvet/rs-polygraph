@@ -74,10 +74,12 @@ This must be resolved before v0.9.0.
 
 **IANA timezone support**: Add `chrono` + `chrono-tz` as production dependencies to handle historical LMT transitions and sub-day DST fold precision. Fixes Temporal2, Temporal3, Temporal10 failures.
 
+**Temporal code cleanup**: Now that `chrono` is a production dependency, delete the hand-written static DST table (`tc_tz_winter_summer`, `tc_is_eu_dst_h`, `tc_last_sunday_of_month`) and replace the hand-rolled proleptic Gregorian calendar arithmetic (`temporal_epoch`, `temporal_from_epoch`, `temporal_is_leap`, etc.) with `chrono::NaiveDate` equivalents. See [temporal-cleanup.md](plans/temporal-cleanup.md) for the phased plan.
+
 ### Exit criterion
 
 - TCK ≥ 3800 / 3828 (≥ 99 % pass rate target)
-- `chrono-tz` dependency added; `temporal.rs` DST table deleted
+- `chrono-tz` dependency added; `temporal.rs` static DST table and approximate DST rules deleted
 - All L2-addressable buckets fully wired
 
 ---

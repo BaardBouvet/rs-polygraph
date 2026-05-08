@@ -1,7 +1,7 @@
 # TCK Failure Reference
 
-**Updated**: 2026-06-10  
-**Baseline**: 3790 / 3828 passing (99.0 %), **38 failing**.  
+**Updated**: 2026-06-11  
+**Baseline**: 3756 / 3828 (frozen), **current**: 3793 / 3828 passing (99.1 %), **35 failing**.  
 **Legacy fallbacks**: ~494 scenario executions still route through the legacy translator — goal is zero (see Phase 8.7).  
 **Target**: ≥ 3800 (≥ 99.3 %) — see [plans/l2-runtime-support.md](plans/l2-runtime-support.md).
 
@@ -187,8 +187,8 @@ for the literal comparison operand.~~
 |---------|------------------|-------|------|--------|
 | [Match4.feature](tests/tck/features/clauses/match/Match4.feature) | [4] Matching longer variable length paths | Actual rows: empty | Legacy only | Failing in legacy; LQA not reached |
 | [Match4.feature](tests/tck/features/clauses/match/Match4.feature) | [8] Matching relationships into a list using VL | Row count mismatch | Legacy only | Failing in legacy; LQA not reached |
-| [Match5.feature](tests/tck/features/clauses/match/Match5.feature) | [26] Handling mixed relationship patterns and directions 1 | Row count mismatch | Legacy only | Failing in legacy; LQA not reached |
-| [Match5.feature](tests/tck/features/clauses/match/Match5.feature) | [27] Handling mixed relationship patterns and directions 2 | Row count mismatch | Legacy only | Failing in legacy; LQA not reached |
+| ~~[Match5.feature](tests/tck/features/clauses/match/Match5.feature)~~ | ~~[26] Handling mixed relationship patterns and directions 1~~ | — | — | **FIXED** (2026-06-11): LQA write path now handles `MATCH-DELETE-CREATE` with rel-var deletion; `having_executed` uses `cypher_to_sparql_update` for DELETE queries |
+| ~~[Match5.feature](tests/tck/features/clauses/match/Match5.feature)~~ | ~~[27] Handling mixed relationship patterns and directions 2~~ | — | — | **FIXED** (2026-06-11): same fix as [26]; `NOT a:A` WHERE clause supported via `push_predicate_parts` |
 | [Match6.feature](tests/tck/features/clauses/match/Match6.feature) | [14] Named path with undirected fixed variable length pattern | Actual rows: empty | Irreducible | Permanent |
 
 **Root causes**:
@@ -198,9 +198,8 @@ for the literal comparison operand.~~
 - **Match4[8]**: `MATCH (a)-[rs*]->(b)` with `rs` used as a list in WHERE —
   collecting the relationship variables along a varlen path requires L2
   path decomposition.
-- **Match5[26,27]**: Mixed directed/undirected patterns in the same chain —
-  UNION of forward+backward branches combined with a fixed-direction hop
-  produces incorrect cardinality.
+- **~~Match5[26,27]~~**: Fixed (2026-06-11) — `MATCH-DELETE-CREATE` now correctly
+  emits INSERT-before-DELETE SPARQL UPDATE, removing old edges before graph traversal.
 - **Match6[14]**: Undirected fixed-length VL path with multigraph edges —
   RDF cannot represent parallel edges between the same two nodes with the
   same predicate (L3 permanent limit).
@@ -255,15 +254,14 @@ and `stop`/`step` come from a `WITH … AS step` with a non-constant expression
 literal integers. The remaining case requires `step` from `UNWIND stepList AS step`
 which is a runtime binding.
 
-### Temporal2[6] — Named timezone parsing
+### ~~Temporal2[6] — Named timezone parsing~~  **FIXED**
 
-**L-level**: L1 (DST-unaware) / L2 (full DST correctness)  
+**L-level**: L1 ✓  
 **Feature**: [Temporal2.feature](tests/tck/features/expressions/temporal/Temporal2.feature#L144)  
-**Error**: result set mismatch — `datetime('2015-06-24T12:50:35.556+0100[Europe/London]')`
-should round-trip with the named timezone preserved in the output string.  
-**Design doc**: [plans/iana-timezone.md](plans/iana-timezone.md)  
-**Status**: The `chrono-tz` integration plan is written; blocked on dependency
-approval. See `iana-timezone.md` for the full fix.
+**Status**: **FIXED** (2026-06-11) — `chrono-tz` IANA database integration for historical
+timezone offsets. `tc_tz_suffix_ymdh()` now tries `iana_offset_secs()` first (full IANA
+database via `chrono-tz` crate), falling back to the hand-written DST table. Fixes the
+1818-07-21 Stockholm case (`+00:53:28` LMT offset).
 
 ---
 
@@ -293,11 +291,13 @@ Ordered by (passes unlocked) / (effort days):
 | — | **O: WithOrderBy1[45]** — list comparison sort key | ~~+1~~ Done | — | Closed |
 | 1 | **Q-b** — tautology fold (non-empty guard) | +3 done; Quantifier10[2]+Quantifier11[3]×5 remain | ½ day | None |
 | 2 | **O** — heterogeneous sort key (entity mixing) | +4 remain (ReturnOrderBy1[11,12], WithOrderBy1[21,22]) | 2 days | None |
-| 3 | **Misc: Temporal2[6]** — chrono-tz integration | +1 | 1 day | Dependency approval |
-| 4 | **Q-a** — quantifier on `nodes(p)` / `relationships(p)` | +8 | 1–2 weeks | L2 path decomposition |
-| 5 | **LC** — list comprehension on `collect()` result | +6 | 1–2 weeks | L2 Continuation API |
-| 6 | **Mrg** — MERGE after DELETE; multi-MERGE cardinality | +3 to +5 | 3–5 days | L2 two-phase write |
-| 7 | **VL** — Match4[4]/[8], Match5[26,27] cardinality | +4 | 3–5 days | Path algebra audit |
+| — | **Misc: Temporal2[6]** — chrono-tz integration | ~~+1~~ Done | — | Closed |
+| — | **VL: Match5[26,27]** — DELETE pipeline + having_executed fix | ~~+2~~ Done | — | Closed |
+| 1 | **Q-a** — quantifier on `nodes(p)` / `relationships(p)` | +8 | 1–2 weeks | L2 path decomposition |
+| 2 | **O** — heterogeneous sort key (entity mixing) | +4 remain (ReturnOrderBy1[11,12], WithOrderBy1[21,22]) | 2 days | None |
+| 3 | **LC** — list comprehension on `collect()` result | +6 | 1–2 weeks | L2 Continuation API |
+| 4 | **Mrg** — MERGE after DELETE; multi-MERGE cardinality | +3 to +5 | 3–5 days | L2 two-phase write |
+| 5 | **VL** — Match4[4]/[8], Match6[14] | +2 | 3–5 days | Path algebra / Oxigraph limit |
 | 8 | **SKIP: parameters** | +60 to +80 | 1–2 weeks | Public API change |
 | 9 | **SKIP: procedure stubs** | +30 to +40 | 1–2 weeks | `ProcedureRegistry` trait |
 

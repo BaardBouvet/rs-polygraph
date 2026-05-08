@@ -277,6 +277,56 @@ fn tc_tz_suffix(tz: &str) -> String {
     tc_tz_suffix_month(tz, 1) // default to January (winter)
 }
 
+// ── IANA timezone database (chrono-tz) ────────────────────────────────────────
+
+/// Look up the UTC offset (in whole seconds) for a named IANA timezone at the
+/// given wall-clock instant.  Returns `None` for unknown zone names.
+///
+/// When the wall-clock falls in a DST gap (spring-forward) the post-gap offset
+/// is returned.  When it falls in a fold (fall-back) the pre-fold offset is
+/// returned — matching Neo4j's `earliest()` interpretation.
+pub(crate) fn iana_offset_secs(
+    tz_name: &str,
+    y: i32,
+    mo: u32,
+    d: u32,
+    h: u32,
+    min: u32,
+    s: u32,
+) -> Option<i32> {
+    use chrono::Offset;
+    use chrono::TimeZone;
+    let tz: chrono_tz::Tz = tz_name.parse().ok()?;
+    let ndt = chrono::NaiveDateTime::new(
+        chrono::NaiveDate::from_ymd_opt(y, mo, d)?,
+        chrono::NaiveTime::from_hms_opt(h, min, s)?,
+    );
+    let mapped = tz.from_local_datetime(&ndt);
+    // For ambiguous (fold), pick earliest (pre-fold = summer offset).
+    // For nonexistent (gap), pick latest (post-gap = summer offset).
+    let fixed = mapped.earliest().or_else(|| mapped.latest())?;
+    Some(fixed.offset().fix().local_minus_utc())
+}
+
+/// Format a UTC offset in seconds as `+HH:MM`, `-HH:MM`, or `Z`.
+/// Seconds component is included only when non-zero (handles LMT offsets like
+/// `+00:53:28`).
+pub(crate) fn fmt_offset_secs(offset_secs: i32) -> String {
+    if offset_secs == 0 {
+        return "Z".to_string();
+    }
+    let sign = if offset_secs >= 0 { '+' } else { '-' };
+    let abs = offset_secs.unsigned_abs();
+    let h = abs / 3600;
+    let m = (abs % 3600) / 60;
+    let s = abs % 60;
+    if s == 0 {
+        format!("{}{:02}:{:02}", sign, h, m)
+    } else {
+        format!("{}{:02}:{:02}:{:02}", sign, h, m, s)
+    }
+}
+
 /// DST-aware timezone suffix: `month` (1-12) used to determine winter/summer offset.
 fn tc_tz_suffix_month(tz: &str, month: i64) -> String {
     if tz == "Z" || tz.starts_with('+') || tz.starts_with('-') {
@@ -307,9 +357,9 @@ pub(crate) fn tc_tz_suffix_ymd(tz: &str, y: i64, m: i64, d: i64) -> String {
 }
 
 /// Precise DST-aware timezone suffix using year/month/day/hour to determine the exact DST
-/// boundary.  On the DST transition day, uses the hour to resolve the ambiguity:
-/// - Spring (last Sunday of March): clocks advance at 2 AM local → before 2 = winter, ≥2 = summer
-/// - Fall  (last Sunday of Oct/Sep): clocks fall back at 3 AM summer → before 3 = summer, ≥3 = winter
+/// boundary.  Uses the IANA timezone database (chrono-tz) for named zones, which gives
+/// correct results for historical timezones (LMT, pre-standardisation offsets, etc.).
+/// Falls back to the hand-written table for zones not in the IANA db (none expected).
 pub(crate) fn tc_tz_suffix_ymdh(tz: &str, y: i64, m: i64, d: i64, h: i64) -> String {
     if tz == "Z" || tz.starts_with('+') || tz.starts_with('-') {
         if tz != "Z" && tz.len() == 9 && tz.as_bytes().get(6) == Some(&b':') && tz.ends_with(":00")
@@ -318,6 +368,16 @@ pub(crate) fn tc_tz_suffix_ymdh(tz: &str, y: i64, m: i64, d: i64, h: i64) -> Str
         }
         return tz.to_string();
     }
+    // Try IANA database first (handles historical LMT offsets).
+    if let Some(offset_secs) = iana_offset_secs(tz, y as i32, m as u32, d as u32, h as u32, 0, 0) {
+        let offset = fmt_offset_secs(offset_secs);
+        return if offset == "Z" {
+            format!("Z[{}]", tz)
+        } else {
+            format!("{}[{}]", offset, tz)
+        };
+    }
+    // Fallback: hand-written DST table (should not normally be reached).
     let (winter, summer) = tc_tz_winter_summer(tz);
     let is_summer = tc_is_eu_dst_h(tz, y, m, d, h);
     let offset = if is_summer { summer } else { winter };

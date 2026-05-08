@@ -16,6 +16,7 @@ See [ROADMAP.md](ROADMAP.md) for phased delivery. Design documents live in `plan
 | [spec-first-pivot.md](plans/spec-first-pivot.md) | in progress | Active: LQA bucket-drain + legacy translator deletion; Phases 6–8 in progress (v0.8.1 baseline) |
 | [scenario-debt.md](plans/scenario-debt.md) | complete | Inventory of ad-hoc probe files in `examples/`; all deleted (Phase 0 deliverable) |
 | [iana-timezone.md](plans/iana-timezone.md) | planned | Replace static DST table with `chrono-tz`; fix 10 timezone TCK failures |
+| [temporal-cleanup.md](plans/temporal-cleanup.md) | planned | Delete redundant static DST table + hand-rolled calendar arithmetic now that `chrono` is a dep |
 | [release.md](plans/release.md) | complete | CI workflows, crates.io publishing, docs.rs, GitHub Pages (v0.7.0) |
 | [write-clause-api.md](plans/write-clause-api.md) | complete | Write-clause public API (`cypher_to_sparql_update` / `gql_to_sparql_update`); movie-graph integration test (v0.7.1) |
 | [result-mapping.md](plans/result-mapping.md) | complete | SPARQL results → openCypher values hydration API (`map_results`, v0.8.0) |
