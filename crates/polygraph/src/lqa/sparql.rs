@@ -6437,6 +6437,167 @@ impl Compiler {
             return Some(int_cast!(add!(v_dqs, ddm!("1"))));
         }
 
+        // ── epochSeconds / epochMillis ────────────────────────────────────────
+        // epochSeconds = (JDN - JDN_UNIX_EPOCH) * 86400 + H*3600 + Mi*60 + S - tz_offset_secs
+        // epochMillis  = epochSeconds * 1000 + ns / 1_000_000
+        // JDN(1970-01-01) = 2440588
+        if prop == "epochSeconds" || prop == "epochMillis" {
+            // Helper closures for SPARQL string functions.
+            let slit = |s: &str| SE::Literal(SparLit::new_simple_literal(s.to_owned()));
+            let contains_s = |s: SE, sub: &str| {
+                SE::FunctionCall(Function::Contains, vec![s, slit(sub)])
+            };
+            let strafter_s = |s: SE, delim: &str| {
+                SE::FunctionCall(Function::StrAfter, vec![s, slit(delim)])
+            };
+            let strbefore_s = |s: SE, delim: &str| {
+                SE::FunctionCall(Function::StrBefore, vec![s, slit(delim)])
+            };
+            let strends_s = |s: SE, end: &str| {
+                SE::FunctionCall(Function::StrEnds, vec![s, slit(end)])
+            };
+            let substr3 = |s: SE, start: i64, len: i64| {
+                SE::FunctionCall(Function::SubStr, vec![s, dim!(start), dim!(len)])
+            };
+
+            // epoch_days = v_JDN - 2440588
+            let v_epoch_d = bind!("epd", sub!(v_JDN, ddm!("2440588")));
+
+            // ── Time part from the datetime string ──────────────────────────
+            // t_str = IF(CONTAINS(str_e, "T"), STRAFTER(str_e, "T"), str_e)
+            let v_t_str = bind!(
+                "tstr",
+                SE::If(
+                    Box::new(contains_s(str_e.clone(), "T")),
+                    Box::new(strafter_s(str_e.clone(), "T")),
+                    Box::new(str_e.clone()),
+                )
+            );
+            // H = INT(SUBSTR(t_str, 1, 2))
+            let v_H = bind!("epH", int_cast!(substr3(v_t_str.clone(), 1, 2)));
+            // Mi = INT(SUBSTR(t_str, 4, 2))
+            let v_Mi = bind!("epMi", int_cast!(substr3(v_t_str.clone(), 4, 2)));
+            // S = INT(SUBSTR(t_str, 7, 2))
+            let v_S = bind!("epS", int_cast!(substr3(v_t_str.clone(), 7, 2)));
+
+            // ── Timezone offset ─────────────────────────────────────────────
+            // Strip named timezone: base_t = IF(CONTAINS(t, "["), STRBEFORE(t, "["), t)
+            let v_base_t = bind!(
+                "bast",
+                SE::If(
+                    Box::new(contains_s(v_t_str.clone(), "[")),
+                    Box::new(strbefore_s(v_t_str.clone(), "[")),
+                    Box::new(v_t_str.clone()),
+                )
+            );
+            let v_ends_z = bind!(
+                "endz",
+                strends_s(v_base_t.clone(), "Z")
+            );
+            let v_has_plus = bind!(
+                "hpls",
+                contains_s(v_base_t.clone(), "+")
+            );
+            let v_has_minus = bind!(
+                "hmin",
+                contains_s(v_base_t.clone(), "-")
+            );
+            // offset_abs: the "HH:MM" part after +/-
+            let v_offset_abs = bind!(
+                "ofabs",
+                SE::If(
+                    Box::new(v_has_plus.clone()),
+                    Box::new(strafter_s(v_base_t.clone(), "+")),
+                    Box::new(SE::If(
+                        Box::new(v_has_minus.clone()),
+                        Box::new(strafter_s(v_base_t.clone(), "-")),
+                        Box::new(slit("00:00")),
+                    )),
+                )
+            );
+            // tz_h = INT(SUBSTR(offset_abs, 1, 2))
+            let v_tz_h = bind!("tzh", int_cast!(substr3(v_offset_abs.clone(), 1, 2)));
+            // tz_m = INT(SUBSTR(offset_abs, 4, 2))
+            let v_tz_m = bind!("tzm", int_cast!(substr3(v_offset_abs.clone(), 4, 2)));
+            // tz_abs_secs = tz_h * 3600 + tz_m * 60
+            let v_tz_abs = bind!(
+                "tzabs",
+                add!(mul!(v_tz_h, ddm!("3600")), mul!(v_tz_m, ddm!("60")))
+            );
+            // tz_secs = IF(ends_z, 0, IF(has_plus, +abs, IF(has_minus, -abs, 0)))
+            let v_tz_secs = bind!(
+                "tzsec",
+                SE::If(
+                    Box::new(v_ends_z),
+                    Box::new(ddm!("0")),
+                    Box::new(SE::If(
+                        Box::new(v_has_plus),
+                        Box::new(v_tz_abs.clone()),
+                        Box::new(SE::If(
+                            Box::new(v_has_minus),
+                            Box::new(SE::UnaryMinus(Box::new(v_tz_abs.clone()))),
+                            Box::new(ddm!("0")),
+                        )),
+                    )),
+                )
+            );
+
+            // epochSeconds = epoch_days * 86400 + H*3600 + Mi*60 + S - tz_secs
+            let v_epoch_s = bind!(
+                "eps",
+                sub!(
+                    add!(
+                        add!(
+                            add!(
+                                mul!(v_epoch_d, ddm!("86400")),
+                                mul!(v_H, ddm!("3600"))
+                            ),
+                            mul!(v_Mi, ddm!("60"))
+                        ),
+                        v_S
+                    ),
+                    v_tz_secs
+                )
+            );
+
+            if prop == "epochSeconds" {
+                return Some(int_cast!(v_epoch_s));
+            }
+
+            // epochMillis: need nanoseconds from fractional seconds
+            // frac_raw = STRAFTER(t_str, ".") or "" if no "."
+            let v_frac_raw = bind!(
+                "fraw",
+                SE::If(
+                    Box::new(contains_s(v_t_str.clone(), ".")),
+                    Box::new(strafter_s(v_t_str.clone(), ".")),
+                    Box::new(slit("")),
+                )
+            );
+            // frac9 = SUBSTR(CONCAT(frac_raw, "000000000"), 1, 9)
+            let v_frac9 = bind!(
+                "fr9",
+                substr3(
+                    SE::FunctionCall(
+                        Function::Concat,
+                        vec![v_frac_raw, slit("000000000")],
+                    ),
+                    1,
+                    9,
+                )
+            );
+            // ns = INT(frac9) / 1_000_000  (milliseconds from nanoseconds)
+            let v_ns_ms = bind!(
+                "nsms",
+                int_cast!(floor_f!(div!(
+                    dec_cast!(int_cast!(v_frac9)),
+                    ddm!("1000000")
+                )))
+            );
+            // epochMillis = epochSeconds * 1000 + ns_ms
+            return Some(int_cast!(add!(mul!(v_epoch_s, ddm!("1000")), v_ns_ms)));
+        }
+
         None
     }
 
@@ -7323,6 +7484,252 @@ fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr>
                 )),
                 Box::new(dim(60)),
             ))
+        }
+        // ── Duration components ──────────────────────────────────────────────────────
+        // Duration format: P{Y}Y{Mo}M{D}DT{H}H{Mi}M{S.ns}S (ISO 8601 duration)
+        // e.g., "P1Y4M10DT1H1M1.111111111S"
+        // Each component parses the duration string from str_e independently.
+        // Note: "millisecondsOfSecond", "microsecondsOfSecond", "nanosecondsOfSecond" are
+        // intentionally omitted from this arm — they are already handled correctly by the
+        // datetime substring-based arms above, which happen to produce the right result for
+        // duration values too (since duration time parts use the same fractional format).
+        "years" | "months" | "quarters" | "weeks" | "days"
+        | "hours" | "minutes" | "seconds" | "milliseconds" | "microseconds" | "nanoseconds"
+        | "quartersOfYear" | "monthsOfQuarter" | "monthsOfYear" | "daysOfWeek"
+        | "minutesOfHour" | "secondsOfMinute" => {
+            // Helper closures that build fresh sub-expressions from str_e.
+            // Called lazily so only the components needed for a given arm are built.
+            let dur_add =
+                |a: SparExpr, b: SparExpr| SparExpr::Add(Box::new(a), Box::new(b));
+            let dur_mul =
+                |a: SparExpr, b: SparExpr| SparExpr::Multiply(Box::new(a), Box::new(b));
+            let dur_dec = |e: SparExpr| {
+                SparExpr::FunctionCall(Function::Custom(xsd_dec.clone()), vec![e])
+            };
+            let dur_floor = |e: SparExpr| SparExpr::FunctionCall(Function::Floor, vec![e]);
+            // integer division: INT(FLOOR(DEC(a) / DEC_LIT(b)))
+            let dur_idiv = |a: SparExpr, b: i64| {
+                let b_dec = SparExpr::Literal(SparLit::new_typed_literal(
+                    b.to_string(),
+                    xsd_dec.clone(),
+                ));
+                int_cast(dur_floor(SparExpr::Divide(
+                    Box::new(dur_dec(a)),
+                    Box::new(b_dec),
+                )))
+            };
+            // integer modulo: a % b = a - (a / b) * b  (non-negative integers)
+            let dur_imod = |a: SparExpr, b: i64| {
+                let b_int = dim(b);
+                SparExpr::Subtract(
+                    Box::new(a.clone()),
+                    Box::new(SparExpr::Multiply(
+                        Box::new(dur_idiv(a, b)),
+                        Box::new(b_int),
+                    )),
+                )
+            };
+
+            // ── Parse date part ──────────────────────────────────────────────
+            // date_part = STRAFTER(str_e, "P")  →  "1Y4M10DT1H1M1.111111111S"
+            let mk_date_part = || strafter_f(str_e.clone(), "P");
+            // date_no_t = IF(CONTAINS(date_part, "T"), STRBEFORE(date_part, "T"), date_part)
+            let mk_date_no_t = || {
+                let dp = mk_date_part();
+                SparExpr::If(
+                    Box::new(contains_f(dp.clone(), "T")),
+                    Box::new(strbefore_f(dp.clone(), "T")),
+                    Box::new(dp),
+                )
+            };
+            // y_f = IF(CONTAINS(date_no_t, "Y"), INT(STRBEFORE(date_no_t, "Y")), 0)
+            let mk_y_f = || {
+                let dnt = mk_date_no_t();
+                SparExpr::If(
+                    Box::new(contains_f(dnt.clone(), "Y")),
+                    Box::new(int_cast(strbefore_f(dnt.clone(), "Y"))),
+                    Box::new(dim(0)),
+                )
+            };
+            // rest_y = IF(CONTAINS(date_no_t, "Y"), STRAFTER(date_no_t, "Y"), date_no_t)
+            let mk_rest_y = || {
+                let dnt = mk_date_no_t();
+                SparExpr::If(
+                    Box::new(contains_f(dnt.clone(), "Y")),
+                    Box::new(strafter_f(dnt.clone(), "Y")),
+                    Box::new(dnt),
+                )
+            };
+            // mo_f = IF(CONTAINS(rest_y, "M"), INT(STRBEFORE(rest_y, "M")), 0)
+            let mk_mo_f = || {
+                let ry = mk_rest_y();
+                SparExpr::If(
+                    Box::new(contains_f(ry.clone(), "M")),
+                    Box::new(int_cast(strbefore_f(ry.clone(), "M"))),
+                    Box::new(dim(0)),
+                )
+            };
+            // rest_mo = IF(CONTAINS(rest_y, "M"), STRAFTER(rest_y, "M"), rest_y)
+            let mk_rest_mo = || {
+                let ry = mk_rest_y();
+                SparExpr::If(
+                    Box::new(contains_f(ry.clone(), "M")),
+                    Box::new(strafter_f(ry.clone(), "M")),
+                    Box::new(ry),
+                )
+            };
+            // d_f = IF(CONTAINS(rest_mo, "D"), INT(STRBEFORE(rest_mo, "D")), 0)
+            let mk_d_f = || {
+                let rm = mk_rest_mo();
+                SparExpr::If(
+                    Box::new(contains_f(rm.clone(), "D")),
+                    Box::new(int_cast(strbefore_f(rm.clone(), "D"))),
+                    Box::new(dim(0)),
+                )
+            };
+            // ── Parse time part ─────────────────────────────────────────────
+            // time_part = IF(CONTAINS(str_e, "T"), STRAFTER(str_e, "T"), "")
+            let mk_time_part = || {
+                SparExpr::If(
+                    Box::new(contains_f(str_e.clone(), "T")),
+                    Box::new(strafter_f(str_e.clone(), "T")),
+                    Box::new(slit("")),
+                )
+            };
+            // h_f = IF(CONTAINS(time_part, "H"), INT(STRBEFORE(time_part, "H")), 0)
+            let mk_h_f = || {
+                let tp = mk_time_part();
+                SparExpr::If(
+                    Box::new(contains_f(tp.clone(), "H")),
+                    Box::new(int_cast(strbefore_f(tp.clone(), "H"))),
+                    Box::new(dim(0)),
+                )
+            };
+            // rest_h = IF(CONTAINS(time_part, "H"), STRAFTER(time_part, "H"), time_part)
+            let mk_rest_h = || {
+                let tp = mk_time_part();
+                SparExpr::If(
+                    Box::new(contains_f(tp.clone(), "H")),
+                    Box::new(strafter_f(tp.clone(), "H")),
+                    Box::new(tp),
+                )
+            };
+            // mi_f = IF(CONTAINS(rest_h, "M"), INT(STRBEFORE(rest_h, "M")), 0)
+            let mk_mi_f = || {
+                let rh = mk_rest_h();
+                SparExpr::If(
+                    Box::new(contains_f(rh.clone(), "M")),
+                    Box::new(int_cast(strbefore_f(rh.clone(), "M"))),
+                    Box::new(dim(0)),
+                )
+            };
+            // rest_mi = IF(CONTAINS(rest_h, "M"), STRAFTER(rest_h, "M"), rest_h)
+            let mk_rest_mi = || {
+                let rh = mk_rest_h();
+                SparExpr::If(
+                    Box::new(contains_f(rh.clone(), "M")),
+                    Box::new(strafter_f(rh.clone(), "M")),
+                    Box::new(rh),
+                )
+            };
+            // s_str = IF(CONTAINS(rest_mi, "S"), STRBEFORE(rest_mi, "S"), "0")
+            let mk_s_str = || {
+                let rm = mk_rest_mi();
+                SparExpr::If(
+                    Box::new(contains_f(rm.clone(), "S")),
+                    Box::new(strbefore_f(rm.clone(), "S")),
+                    Box::new(slit("0")),
+                )
+            };
+            // s_int_f = IF(CONTAINS(s_str, "."), INT(STRBEFORE(s_str, ".")), INT(s_str))
+            let mk_s_int_f = || {
+                let ss = mk_s_str();
+                SparExpr::If(
+                    Box::new(contains_f(ss.clone(), ".")),
+                    Box::new(int_cast(strbefore_f(ss.clone(), "."))),
+                    Box::new(int_cast(ss)),
+                )
+            };
+            // ns_f = INT(SUBSTR(CONCAT(STRAFTER(s_str, ".") | "", "000000000"), 1, 9))
+            let mk_ns_f = || {
+                let ss = mk_s_str();
+                let frac_raw = SparExpr::If(
+                    Box::new(contains_f(ss.clone(), ".")),
+                    Box::new(strafter_f(ss.clone(), ".")),
+                    Box::new(slit("")),
+                );
+                int_cast(substr2(
+                    SparExpr::FunctionCall(
+                        Function::Concat,
+                        vec![frac_raw, slit("000000000")],
+                    ),
+                    1,
+                    9,
+                ))
+            };
+
+            // total_months = y_f * 12 + mo_f
+            let mk_total_months =
+                || dur_add(dur_mul(mk_y_f(), dim(12)), mk_mo_f());
+            // total_seconds = h_f * 3600 + mi_f * 60 + s_int_f
+            // NOTE: We deliberately avoid (h_f*60 + mi_f) * 60 + s_int_f because
+            // spargebra's Display for Multiply does NOT add parentheses, so
+            // Mul(Add(h*60, mi), 60) would serialize as "h*60 + mi * 60" (wrong).
+            // Distributing eliminates all Mul-over-Add at the top level.
+            let mk_total_s = || {
+                dur_add(
+                    dur_add(dur_mul(mk_h_f(), dim(3600)), dur_mul(mk_mi_f(), dim(60))),
+                    mk_s_int_f(),
+                )
+            };
+
+            match component {
+                "years" => Some(mk_y_f()),
+                "months" => Some(mk_total_months()),
+                "quarters" => Some(dur_idiv(mk_total_months(), 3)),
+                "weeks" => Some(dur_idiv(mk_d_f(), 7)),
+                "days" => Some(mk_d_f()),
+                "hours" => Some(mk_h_f()),
+                "minutes" => Some(dur_add(dur_mul(mk_h_f(), dim(60)), mk_mi_f())),
+                "seconds" => Some(mk_total_s()),
+                "milliseconds" => Some(dur_add(
+                    dur_add(
+                        dur_add(
+                            dur_mul(mk_h_f(), dim(3_600_000)),
+                            dur_mul(mk_mi_f(), dim(60_000)),
+                        ),
+                        dur_mul(mk_s_int_f(), dim(1_000)),
+                    ),
+                    dur_idiv(mk_ns_f(), 1_000_000),
+                )),
+                "microseconds" => Some(dur_add(
+                    dur_add(
+                        dur_add(
+                            dur_mul(mk_h_f(), dim(3_600_000_000)),
+                            dur_mul(mk_mi_f(), dim(60_000_000)),
+                        ),
+                        dur_mul(mk_s_int_f(), dim(1_000_000)),
+                    ),
+                    dur_idiv(mk_ns_f(), 1_000),
+                )),
+                "nanoseconds" => Some(dur_add(
+                    dur_add(
+                        dur_add(
+                            dur_mul(mk_h_f(), dim(3_600_000_000_000)),
+                            dur_mul(mk_mi_f(), dim(60_000_000_000)),
+                        ),
+                        dur_mul(mk_s_int_f(), dim(1_000_000_000)),
+                    ),
+                    mk_ns_f(),
+                )),
+                "quartersOfYear" => Some(dur_idiv(mk_mo_f(), 3)),
+                "monthsOfQuarter" => Some(dur_imod(mk_mo_f(), 3)),
+                "monthsOfYear" => Some(mk_mo_f()),
+                "daysOfWeek" => Some(dur_imod(mk_d_f(), 7)),
+                "minutesOfHour" => Some(mk_mi_f()),
+                "secondsOfMinute" => Some(mk_s_int_f()),
+                _ => unreachable!(),
+            }
         }
         // ── Arithmetic-based exotic components ──────────────────────────────
         other => lqa_temporal_component_expr(other, arg),
