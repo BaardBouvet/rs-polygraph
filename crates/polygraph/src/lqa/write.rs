@@ -177,11 +177,16 @@ pub fn compile_write(op: &Op, base_iri: Option<&str>) -> Result<CompiledWrite, P
     let has_return = is_top_level_return(op);
 
     // DELETE+RETURN queries: the RETURN should reflect pre-deletion row counts.
-    // The legacy translate_skip_writes path handles this correctly by skipping
-    // the DELETE execution and counting matched rows before deletion.
-    // Fall back so the legacy path can produce the correct result.
+    // Emit no UPDATE statements (the store is not modified), then let the
+    // SELECT compilation path (lib.rs) count matched rows on the unchanged
+    // store — exactly matching what the legacy translate_skip_writes path does.
     if has_return && contains_delete(op) {
-        return Err(write_unsupported!("write_delete_with_return"));
+        return Ok(CompiledWrite {
+            update_strings: vec![],
+            has_return: true,
+            use_lqa_select: false,
+            bnode_map: HashMap::new(),
+        });
     }
 
     // Make sure this is actually a write-containing tree.
