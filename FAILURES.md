@@ -1,399 +1,271 @@
 # TCK Failure Reference
 
-**Updated**: 2026-06-11  
-**Baseline**: 3756 / 3828 (frozen), **current**: 3793 / 3828 passing (99.1 %), **35 failing**.  
-**Legacy fallbacks**: ~494 scenario executions still route through the legacy translator — goal is zero (see Phase 8.7).  
-**Target**: ≥ 3800 (≥ 99.3 %) — see [plans/l2-runtime-support.md](plans/l2-runtime-support.md).
+**Updated**: 2026-05-09  
+**Baseline**: 3756 / 3828 (frozen, committed in `tests/tck/baseline/scenarios.jsonl`)  
+**Current**: **3820 / 3828 passing** (99.8 %)  
+**Remaining failures**: **8** — all are permanent or require multi-phase runtime execution  
+**Legacy fallback events**: **432** — see [plans/legacy-removal.md](plans/legacy-removal.md) for elimination roadmap
 
-This file is the authoritative, searchable reference for every currently-failing
-TCK scenario. Organised by failure bucket; each entry records the feature file
-link, failing scenario numbers, root cause, mitigation level, effort estimate,
-and cross-references to the design documents.
-
-L-levels are defined in [plans/fundamental-limitations.md](plans/fundamental-limitations.md):
+L-levels from [plans/fundamental-limitations.md](plans/fundamental-limitations.md):
 
 | Level | Meaning |
 |-------|---------|
 | **L1** | Fixable within the static, single-round-trip transpiler model |
 | **L2** | Requires multi-phase (Continuation) runtime execution |
-| **L3** | Permanently infeasible with a static SPARQL transpiler |
+| **L3** | Permanently infeasible — structural RDF/SPARQL limitation |
 
 ---
 
-## Bucket Q — Quantifiers on runtime lists  *(10 failures)*
+## The 8 remaining failures
 
-**L-level**: L2  
-**Design doc**: [plans/l2-runtime-support.md §3.1](plans/l2-runtime-support.md)  
-**Effort**: medium (1–2 weeks)
+### 1. Match4[8] — Pre-bound relationship list in varlen  `L3`
 
-The `none`/`single`/`any`/`all` quantifiers are applied to a list whose
-contents are not known at transpile time — it comes from a graph node/relationship
-property, a `collect()`, or a randomly-shuffled `rand()`/`reverse()` chain.
-The LQA path correctly returns `Err(Unsupported)` for these; legacy also fails
-because these scenarios exercise runtime list iteration.
+**Feature**: [Match4.feature](tests/tck/features/clauses/match/Match4.feature) (`@skipGrammarCheck`)
 
-**Sub-bucket Q-a: quantifier on node/rel list (8 failures)**
+```cypher
+MATCH ()-[r1]->()-[r2]->()
+WITH [r1, r2] AS rs
+  LIMIT 1
+MATCH (first)-[rs*]->(second)
+RETURN first, second
+```
 
-Scenario pattern: `MATCH p = (:S)-[*]->(e) RETURN none(x IN nodes(p) WHERE ...)`.
-The list `nodes(p)` / `relationships(p)` is not materialised at translate time.
-
-| Feature | Failing scenarios | Path | Status |
-|---------|------------------|------|--------|
-| [Quantifier1.feature](tests/tck/features/expressions/quantifier/Quantifier1.feature) | [8] None quantifier on list containing nodes | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Quantifier1.feature](tests/tck/features/expressions/quantifier/Quantifier1.feature) | [9] None quantifier on list containing relationships | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Quantifier2.feature](tests/tck/features/expressions/quantifier/Quantifier2.feature) | [8] Single quantifier on list containing nodes | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Quantifier2.feature](tests/tck/features/expressions/quantifier/Quantifier2.feature) | [9] Single quantifier on list containing relationships | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Quantifier3.feature](tests/tck/features/expressions/quantifier/Quantifier3.feature) | [8] Any quantifier on list containing nodes | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Quantifier3.feature](tests/tck/features/expressions/quantifier/Quantifier3.feature) | [9] Any quantifier on list containing relationships | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Quantifier4.feature](tests/tck/features/expressions/quantifier/Quantifier4.feature) | [8] All quantifier on list containing nodes | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Quantifier4.feature](tests/tck/features/expressions/quantifier/Quantifier4.feature) | [9] All quantifier on list containing relationships | LQA+L2 | Failing in legacy; LQA Unsupported |
-
-**Root cause**: The quantifier list is `relationships(p)` or `nodes(p)` on a
-varlen path — these return a runtime sequence of graph entities, not scalar
-values that can be embedded in `VALUES`. Fixing these requires L2 (path
-decomposition) or a property-path SPARQL rewrite.
-
-**Sub-bucket Q-b: statically-folded quantifier not folded (2 failures)**
-
-The predicate is a compile-time constant (`true` or `false`) but the list is
-runtime. The tautology fold in LQA handles literal-list cases but misses cases
-where the list comes from a chain of `rand()` / `reverse()` / list comprehension.
-
-| Feature | Failing scenarios | Path | Status |
-|---------|------------------|------|--------|
-| [Quantifier9.feature](tests/tck/features/expressions/quantifier/Quantifier9.feature) | [2] None quantifier is always false if predicate is statically true | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Quantifier10.feature](tests/tck/features/expressions/quantifier/Quantifier10.feature) | [2] Single quantifier is always false if predicate is statically true | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Quantifier12.feature](tests/tck/features/expressions/quantifier/Quantifier12.feature) | [1] All quantifier is always false if predicate is statically false | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Quantifier11.feature](tests/tck/features/expressions/quantifier/Quantifier11.feature) | [2] Any quantifier is always true if predicate is statically true | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Quantifier11.feature](tests/tck/features/expressions/quantifier/Quantifier11.feature) | [3] Any quantifier is always true if single or all is true (×5 examples) | LQA+L2 | Failing in legacy; LQA Unsupported |
-
-**Note**: Quantifier9[2], 12[1], 11[2] now fold via the non-empty-list tautology
-shortcut in `try_fold_quantifier_invariants` (added 2026-05-07). Quantifier10[2]
-requires `single(true, L) = false-if-size-≠-1` which depends on runtime size;
-Quantifier11[3] requires evaluating whether `single(x) OR all(x)` implies
-`any(x)` — a semantic entailment the static transpiler cannot evaluate over a
-runtime list.
+**Why it cannot be fixed**: The pattern `[rs*]` with `rs` being a pre-bound list of
+relationship objects is absent from the openCypher grammar (hence `@skipGrammarCheck`).
+It asks the engine to traverse *exactly* those specific edges, in sequence, as a path.
+SPARQL property paths have no concept of "use this set of named edges"; the only
+representation would be an explicit triple chain bound by specific IRI values, which
+requires knowing the edge IDs at query-compile time. Static transpilation has no means
+to reify or enumerate the contents of a runtime list into a path pattern.
 
 ---
 
-## Bucket T1 — Duration arithmetic  *(7 scenarios — Done)*
+### 2. Match5[27] — Multigraph traversal after DELETE+CREATE reshaping  `L3`
 
-**L-level**: L1  
-**Feature**: [Temporal8.feature](tests/tck/features/expressions/temporal/Temporal8.feature)  
-**Design doc**: [plans/l2-runtime-support.md §1.1](plans/l2-runtime-support.md)
+**Feature**: [Match5.feature](tests/tck/features/clauses/match/Match5.feature)  
+*(The TCK scenario comment reads: "This gets hard to follow for a human mind. The answer is named graphs, but it's not crucial to fix.")*
 
-All seven scenarios compute arithmetic on `duration`, `date`, `time`,
-`localtime`, `localdatetime`, and `datetime` values.
-They route through the LQA path which handles duration arithmetic natively.
+**Setup** (two `having_executed` steps): Reverses all non-A edges with `DELETE r CREATE (b)-[:LIKES]->(a)`, then fans out every D node to two E children.
 
-| Feature | Failing scenarios | Path | Status |
-|---------|------------------|------|--------|
-| [Temporal8.feature](tests/tck/features/expressions/temporal/Temporal8.feature) | [1]–[7] All arithmetic-on-temporal scenarios (×7 outlines) | LQA+L1 | Done in LQA |
+**Query**: `MATCH (a:A) MATCH (a)-[:LIKES]->()<-[:LIKES*3]->(c) RETURN c.name` — expects 16 rows.
 
----
-
-## Bucket LC — List comprehension / Pattern comprehension  *(6 failures)*
-
-**L-level**: L2  
-**Design doc**: [plans/l2-runtime-support.md §3.3](plans/l2-runtime-support.md)  
-**Effort**: medium
-
-List comprehensions `[x IN list | expr]` where `list` is a runtime variable
-(a `collect()` result or graph-traversal output), and pattern comprehensions
-inside larger expressions.
-
-| Feature | Failing scenarios | Path | Status |
-|---------|------------------|------|--------|
-| [List12.feature](tests/tck/features/expressions/list/List12.feature) | [1] Collect and extract using a list comprehension | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [List12.feature](tests/tck/features/expressions/list/List12.feature) | [2] Collect and filter using a list comprehension | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [List12.feature](tests/tck/features/expressions/list/List12.feature) | [4] Returning a list comprehension | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [List12.feature](tests/tck/features/expressions/list/List12.feature) | [5] Using a list comprehension in a WITH | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Pattern2.feature](tests/tck/features/expressions/pattern/Pattern2.feature) | [7] Use a pattern comprehension inside a list comprehension | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Pattern2.feature](tests/tck/features/expressions/pattern/Pattern2.feature) | [8] Use a pattern comprehension in WITH | LQA+L2 | Failing in legacy; LQA Unsupported |
-
-**Root cause**: `[x IN collect(n) | x.name]` collects graph nodes into a
-runtime list, then maps a property projection over them. The legacy translator
-emits `"complex return expression"` because `collect()` serialises to a
-`GROUP_CONCAT` string and element access on that string is unsupported.
-List12[4,5] use `MATCH p = (n)-->()` with `nodes(p)` / `relationships(p)` in
-the comprehension list — path decomposition is required (L2 §3.3).
+**Why it cannot be fixed**: The setup creates multiple `:LIKES` edges between the same
+pair of nodes (e.g., `(d)-[:LIKES]->(e1)` and `(d)-[:LIKES]->(e2)` are fine, but
+intermediate reversal steps produce two parallel `:LIKES` edges between the same pair
+when a node has two outgoing edges that both get reversed onto the same target).  In RDF
+a predicate triple `<s> <p> <o>` is a set — duplicate edges between the same pair under
+the same predicate are silently deduplicated. The 16-result query relies on counting
+distinct paths through these parallel edges. Named graphs (each edge in a separate graph)
+are the only RDF mechanism that preserves edge multiplicity; they require engine-level
+support not present in any standard SPARQL 1.1 engine.
 
 ---
 
-## Bucket O — Heterogeneous ordering  *(4 failures)*
+### 3. Match6[14] — Undirected fixed-length varlen over parallel edges  `L3`
 
-**L-level**: L1  
-**Design doc**: [plans/l2-runtime-support.md §3.4](plans/l2-runtime-support.md)  
-**Effort**: small
+**Feature**: [Match6.feature](tests/tck/features/clauses/match/Match6.feature)
 
-SPARQL `ORDER BY` over our `"[…]"` list-encoding strings is lexicographic;
-Cypher sorts by type-rank then element-wise. A sort-key column trick
-(computed at translate time for literal-list UNWIND targets) would fix these.
+**Setup**:
+```cypher
+CREATE (db1:Start), (db2:End), (mid), (other)
+CREATE (mid)-[:CONNECTED_TO]->(db1),
+       (mid)-[:CONNECTED_TO]->(db2),
+       (mid)-[:CONNECTED_TO]->(db2),   -- parallel edge
+       (mid)-[:CONNECTED_TO]->(other),
+       (mid)-[:CONNECTED_TO]->(other)  -- parallel edge
+```
 
-| Feature | Failing scenarios | Path | Status |
-|---------|------------------|------|--------|
-| [ReturnOrderBy1.feature](tests/tck/features/clauses/return-orderby/ReturnOrderBy1.feature) | [11] ORDER BY should order distinct types in expected order | Legacy only | Failing in legacy; LQA not reached |
-| [ReturnOrderBy1.feature](tests/tck/features/clauses/return-orderby/ReturnOrderBy1.feature) | [12] ORDER BY DESC should order distinct types in expected order | Legacy only | Failing in legacy; LQA not reached |
-| [WithOrderBy1.feature](tests/tck/features/clauses/with-orderBy/WithOrderBy1.feature) | [21] Sort distinct types in ascending order | Legacy only | Failing in legacy; LQA not reached |
-| [WithOrderBy1.feature](tests/tck/features/clauses/with-orderBy/WithOrderBy1.feature) | [22] Sort distinct types in descending order | Legacy only | Failing in legacy; LQA not reached |
-| ~~[WithOrderBy1.feature](tests/tck/features/clauses/with-orderBy/WithOrderBy1.feature)~~ | ~~[45] Sort order consistent with comparisons — lists example~~ | ~~Legacy only~~ | **FIXED** (2026-06-10): sort-key substitution in list literal comparisons (`translate_expr` in `mod.rs`) |
+**Query**: `MATCH topRoute = (:Start)<-[:CONNECTED_TO]-()-[:CONNECTED_TO*3..3]-(:End) RETURN topRoute` — expects 4 rows.
 
-**Note**: [21]/[22] `UNWIND [n, r, p, 1.5, …]` mix graph entities with scalars;
-ordering graph entities requires stable IRI-based comparison, not available
-statically. ~~[45] uses `[x IN values WHERE x < value]` where `values` is a
-WITH-bound literal list — fixed by substituting the UNWIND sort-key column
-for the literal comparison operand.~~
-
----
-
-## Bucket Mrg — MERGE structural failures  *(4 failures)*
-
-**L-level**: L2 (Merge1[14], Merge5[3,4,21]) / L1 (Merge5[14])  
-**Design doc**: [plans/l2-runtime-support.md §3.6](plans/l2-runtime-support.md)  
-**Effort**: medium
-
-| Feature | Failing scenarios | Error | Path | Status |
-|---------|------------------|-------|------|--------|
-| [Merge1.feature](tests/tck/features/clauses/merge/Merge1.feature) | [14] Merges should not match on deleted nodes | Row count mismatch | Legacy only | Failing in legacy; LQA not reached |
-| [Merge5.feature](tests/tck/features/clauses/merge/Merge5.feature) | [3] Matching two relationships | Result set mismatch | Legacy only | Failing in legacy; LQA not reached |
-| [Merge5.feature](tests/tck/features/clauses/merge/Merge5.feature) | [4] Using bound variables from other updating clause | Result set mismatch | Legacy only | Failing in legacy; LQA not reached |
-| [Merge5.feature](tests/tck/features/clauses/merge/Merge5.feature) | [14] Using list properties via variable | Unsupported: complex return expression | LQA+L2 | Failing in legacy; LQA Unsupported |
-| [Merge5.feature](tests/tck/features/clauses/merge/Merge5.feature) | [21] Do not match on deleted relationships | Row count mismatch | Legacy only | Failing in legacy; LQA not reached |
-
-**Root causes**:
-- **Merge1[14]** / **Merge5[21]**: `MATCH … DELETE … MERGE` — the MERGE must
-  not match the just-deleted entity. Our INSERT-WHERE-NOT-EXISTS pattern sees
-  the entity as deleted within the same SPARQL update, but read-after-write
-  visibility depends on engine transaction semantics. Requires two-phase
-  execution (L2).
-- **Merge5[3,4]**: Multi-MERGE with shared node variables — `MERGE (a)-[r1:T]->(b)
-  MERGE (a)-[r2:T]->(b)` creates duplicate edges. The LQA write path emits
-  two independent INSERT-WHERE-NOT-EXISTS updates without tracking inter-MERGE
-  state.
-- **Merge5[14]**: `UNWIND ['a,b'] AS str WITH split(str, ',') AS roles MERGE
-  (a)-[r:FB {foobar: roles}]->(b)` — `roles` is a runtime list; the
-  `"complex return expression"` error comes from the legacy translator's
-  return projection failing on a collected list value.
+**Why it cannot be fixed**: The setup deliberately creates two parallel `:CONNECTED_TO`
+edges between `mid→db2` and two between `mid→other`. The four expected result paths are
+formed by independently traversing these parallel edges during the fixed-length varlen
+hop. In RDF, `<mid> <CONNECTED_TO> <db2>` is a single triple regardless of how many
+times it was asserted. The four parallel edges collapse to two distinct triples, and the
+varlen path enumerator sees only those two triples, producing fewer paths than expected.
+This is the canonical multigraph limitation (L3).
 
 ---
 
-## Bucket VL — Variable-length path edge cases  *(5 failures)*
+### 4. Merge5[3] — MERGE match count on multigraph setup  `L3`
 
-**L-level**: L1 (cardinality bug) / L3 (Match6[14] multigraph)  
-**Design doc**: [plans/fundamental-limitations.md](plans/fundamental-limitations.md)  
-**Effort**: small to medium per sub-case
+**Feature**: [Merge5.feature](tests/tck/features/clauses/merge/Merge5.feature)
 
-| Feature | Failing scenarios | Error | Path | Status |
-|---------|------------------|-------|------|--------|
-| [Match4.feature](tests/tck/features/clauses/match/Match4.feature) | [4] Matching longer variable length paths | Actual rows: empty | Legacy only | Failing in legacy; LQA not reached |
-| [Match4.feature](tests/tck/features/clauses/match/Match4.feature) | [8] Matching relationships into a list using VL | Row count mismatch | Legacy only | Failing in legacy; LQA not reached |
-| ~~[Match5.feature](tests/tck/features/clauses/match/Match5.feature)~~ | ~~[26] Handling mixed relationship patterns and directions 1~~ | — | — | **FIXED** (2026-06-11): LQA write path now handles `MATCH-DELETE-CREATE` with rel-var deletion; `having_executed` uses `cypher_to_sparql_update` for DELETE queries |
-| ~~[Match5.feature](tests/tck/features/clauses/match/Match5.feature)~~ | ~~[27] Handling mixed relationship patterns and directions 2~~ | — | — | **FIXED** (2026-06-11): same fix as [26]; `NOT a:A` WHERE clause supported via `push_predicate_parts` |
-| [Match6.feature](tests/tck/features/clauses/match/Match6.feature) | [14] Named path with undirected fixed variable length pattern | Actual rows: empty | Irreducible | Permanent |
+**Setup**:
+```cypher
+CREATE (a:A), (b:B)
+CREATE (a)-[:TYPE]->(b)
+CREATE (a)-[:TYPE]->(b)   -- deliberately creates a second parallel edge
+```
 
-**Root causes**:
-- **Match4[4]**: `MATCH (a)-[*2..3]->(b)` on a larger graph — cardinality
-  mismatch suggests the SPARQL property path `/:REL{2,3}` doesn't enumerate
-  all intermediate paths that the TCK expects.
-- **Match4[8]**: `MATCH (a)-[rs*]->(b)` with `rs` used as a list in WHERE —
-  collecting the relationship variables along a varlen path requires L2
-  path decomposition.
-- **~~Match5[26,27]~~**: Fixed (2026-06-11) — `MATCH-DELETE-CREATE` now correctly
-  emits INSERT-before-DELETE SPARQL UPDATE, removing old edges before graph traversal.
-- **Match6[14]**: Undirected fixed-length VL path with multigraph edges —
-  RDF cannot represent parallel edges between the same two nodes with the
-  same predicate (L3 permanent limit).
+**Query**: `MATCH (a:A), (b:B) MERGE (a)-[r:TYPE]->(b) RETURN count(r)` — expects `2`.
+
+**Why it cannot be fixed**: The setup inserts two parallel `:TYPE` edges between the same
+`(A)→(B)` pair. In RDF the triple `<A> <TYPE> <B>` is written once. After setup there is
+exactly one `:TYPE` triple in the store. `MERGE` matches that one triple, binds `r` once,
+and `count(r)` returns 1. The expected answer of 2 requires the engine to distinguish two
+co-existing edges that share the same subject, predicate, and object — a multigraph
+property that is structurally absent from the RDF data model and from SPARQL semantics.
 
 ---
 
-## Bucket Misc — Isolated singletons  *(8 failures)*
+### 5. Merge5[21] — DELETE+MERGE with multigraph setup  `L3 + L2`
 
-Mixed L1/L2 cases, each requiring individual work.
+**Feature**: [Merge5.feature](tests/tck/features/clauses/merge/Merge5.feature)
 
-### ReturnOrderBy2[12] — Aggregation of named paths
+**Setup**: Creates `(A)-[:T {name:'rel1'}]->(B)` and `(A)-[:T {name:'rel2'}]->(B)` — two
+parallel `:T` edges between the same pair.
 
-**L-level**: L1  
-**Feature**: [ReturnOrderBy2.feature](tests/tck/features/clauses/return-orderby/ReturnOrderBy2.feature#L243)  
-**Error**: row count mismatch — `RETURN count(p), length(p) ORDER BY length(p)`  
-**Root cause**: `count(p)` on a named path variable counts serialised strings
-not distinct paths; interaction with GROUP BY produces incorrect grouping.
+**Query**:
+```cypher
+MATCH (a)-[t:T]->(b)
+DELETE t
+MERGE (a)-[t2:T {name: 'rel3'}]->(b)
+RETURN t2.name
+```
 
-### ~~Set1[5] — Adding a list property~~  **FIXED**
+Expected: 2 rows of `'rel3'`.
 
-**L-level**: L1/L2  
-**Feature**: [Set1.feature](tests/tck/features/clauses/set/Set1.feature#L109)  
-**Fix**: L2 Continuation emitter in `lqa/sparql.rs` (`compile_output` / `try_list_comp_projection_continuation`).
-`SET n.numbers = [1, 2, 3] RETURN [i IN n.numbers | i / 2.0]` — Phase 1 SELECTs the stored
-property, Continuation evaluates the arithmetic map expression in Rust, Phase 2 returns
-result via VALUES block.
+**Why it cannot be fixed**: There are two independent obstacles, either of which is
+individually fatal:
 
-### With6[4] — Implicit grouping with single path variable
+1. **L3 — multigraph setup**: The two parallel `:T` edges collapse to a single
+   `<A> <T> <B>` triple at INSERT time. `MATCH (a)-[t:T]->(b)` sees only one match,
+   not two. `RETURN t2.name` can therefore produce at most 1 row, never 2.
 
-**L-level**: L1  
-**Feature**: [With6.feature](tests/tck/features/clauses/with/With6.feature#L95)  
-**Error**: row count mismatch — `WITH p, count(*) AS cnt` uses a named path `p`
-as the grouping key; our GROUP BY emits `GROUP BY ?p_serialised` which deduplicates
-incorrectly when paths share the same string encoding.
+2. **L2 — snapshot semantics**: Even if the multigraph were representable, the SPARQL
+   UPDATE snapshot model means the MERGE's WHERE clause sees the *pre-DELETE* graph and
+   matches the `:T` edge being deleted — making NOT EXISTS false, so MERGE does nothing.
+   Two-phase L2 execution (DELETE first, then MERGE in a second round-trip) would fix
+   this half, but the multigraph half remains.
 
-### ~~Comparison1[14] — Path equality ignoring direction~~  **FIXED**
-
-**L-level**: L2 (previously) → **FIXED** (2026-06-10)  
-**Feature**: [Comparison1.feature](tests/tck/features/expressions/comparison/Comparison1.feature#L276)  
-**Fix**: Tracked SPARQL-order (pred_var, subj_var, obj_var) for single-hop any-type directed named paths in
-`path_anon_pred_vars` (in `lqa/sparql.rs`). Path equality is now compared triple-wise: `(subj1=subj2) AND (pred1=pred2) AND (obj1=obj2)`,
-which correctly treats direction-reversed paths as equal since both refer to the same triple.
-
-### List11[3] — range() with runtime step
-
-**L-level**: L1 (const_int propagation)  
-**Feature**: [List11.feature](tests/tck/features/expressions/list/List11.feature#L101)  
-**Error**: `"complex return expression"` for `range(start, stop, step)` where `start`
-and `stop`/`step` come from a `WITH … AS step` with a non-constant expression
-(`step` is an element from a UNWINDed list, not a WITH-constant).  
-**Status**: Partially improved — `const_int_vars` now handles `WITH n AS x` for
-literal integers. The remaining case requires `step` from `UNWIND stepList AS step`
-which is a runtime binding.
-
-### ~~Temporal2[6] — Named timezone parsing~~  **FIXED**
-
-**L-level**: L1 ✓  
-**Feature**: [Temporal2.feature](tests/tck/features/expressions/temporal/Temporal2.feature#L144)  
-**Status**: **FIXED** (2026-06-11) — `chrono-tz` IANA database integration for historical
-timezone offsets. `tc_tz_suffix_ymdh()` now tries `iana_offset_secs()` first (full IANA
-database via `chrono-tz` crate), falling back to the hand-written DST table. Fixes the
-1818-07-21 Stockholm case (`+00:53:28` LMT offset).
+Fixing Merge5[21] would require both named-graph multigraph support (L3, engine change)
+and two-phase execution (L2, implementable). The L3 dependency makes it permanently out of
+reach for this transpiler.
 
 ---
 
-## Bucket SKIP — Policy-skipped scenarios  *(not counted in 44)*
+### 6. Merge1[14] — MERGE must not match deleted nodes  `L2`
 
-These scenarios are not in the 44 failures above — they are **skipped** by
-the TCK runner and thus do not count against the 3828 total. Lifting them
-requires new infrastructure.
+**Feature**: [Merge1.feature](tests/tck/features/clauses/merge/Merge1.feature)
 
-| Skip reason | Count (approx) | Mitigation | Design ref |
-|-------------|---------------:|------------|------------|
-| `And parameters are:` — Cypher query parameters | ~80 | Runtime parameter binding | [plans/l2-runtime-support.md §4.1](plans/l2-runtime-support.md) |
-| `And there exists a procedure …` — CALL stubs | ~40 | `ProcedureRegistry` trait + built-in procedures | [plans/l2-runtime-support.md §4.2](plans/l2-runtime-support.md) |
-| `And having executed:` — setup CREATE parse failures | ~28 | Improved CREATE coverage in TCK setup helper | [plans/l2-runtime-support.md §4.3](plans/l2-runtime-support.md) |
-| **Total** | **~148** | | |
+**Setup**: Two `:A` nodes with properties `{num:1}` and `{num:2}`.
 
----
+**Query**:
+```cypher
+MATCH (a:A)
+DELETE a
+MERGE (a2:A)
+RETURN a2.num
+```
 
-## Prioritised fix queue
+Expected: 2 rows of `null` (MERGE creates one fresh `:A`; the result cross-products with
+the 2-row DELETE context but `a2.num` is null since the new node has no property).
 
-Ordered by (passes unlocked) / (effort days):
+**Why it is hard**: openCypher specifies that each clause sees the graph state produced by
+the previous clause. After `DELETE a`, `a` no longer exists, and `MERGE (a2:A)` should
+search an empty `:A` set, create a new node, and bind `a2` to it. SPARQL UPDATE uses
+snapshot semantics: the WHERE clause of every INSERT in the same update batch reads the
+graph *before* any deletes in that batch. Our emitted `MERGE` INSERT therefore still sees
+the two `:A` nodes under deletion and matches them, producing wrong rows.
 
-| Priority | Bucket | Failures unlocked | Effort | Blocker |
-|----------|--------|:-----------------:|--------|---------|
-| — | **T1 / Temporal8** — duration arithmetic | ~~+7~~ Done | — | Closed |
-| — | **Misc: Comparison1[14]** — path equality | ~~+1~~ Done | — | Closed |
-| — | **O: WithOrderBy1[45]** — list comparison sort key | ~~+1~~ Done | — | Closed |
-| 1 | **Q-b** — tautology fold (non-empty guard) | +3 done; Quantifier10[2]+Quantifier11[3]×5 remain | ½ day | None |
-| 2 | **O** — heterogeneous sort key (entity mixing) | +4 remain (ReturnOrderBy1[11,12], WithOrderBy1[21,22]) | 2 days | None |
-| — | **Misc: Temporal2[6]** — chrono-tz integration | ~~+1~~ Done | — | Closed |
-| — | **VL: Match5[26,27]** — DELETE pipeline + having_executed fix | ~~+2~~ Done | — | Closed |
-| 1 | **Q-a** — quantifier on `nodes(p)` / `relationships(p)` | +8 | 1–2 weeks | L2 path decomposition |
-| 2 | **O** — heterogeneous sort key (entity mixing) | +4 remain (ReturnOrderBy1[11,12], WithOrderBy1[21,22]) | 2 days | None |
-| 3 | **LC** — list comprehension on `collect()` result | +6 | 1–2 weeks | L2 Continuation API |
-| 4 | **Mrg** — MERGE after DELETE; multi-MERGE cardinality | +3 to +5 | 3–5 days | L2 two-phase write |
-| 5 | **VL** — Match4[4]/[8], Match6[14] | +2 | 3–5 days | Path algebra / Oxigraph limit |
-| 8 | **SKIP: parameters** | +60 to +80 | 1–2 weeks | Public API change |
-| 9 | **SKIP: procedure stubs** | +30 to +40 | 1–2 weeks | `ProcedureRegistry` trait |
+**Mitigation (L2)**: Two-phase execution — emit DELETE as the first SPARQL UPDATE,
+execute it, then emit MERGE as a second update against the now-mutated store. The
+`TranspileOutput::Continuation` API supports this; it needs a write-path emitter that
+splits DELETE and subsequent MERGE into separate `Continuation` phases.
 
 ---
 
-## Legacy Fallback Inventory  *(goal: zero)*
+### 7. List12[1] — List comprehension captures pre-SET values  `L2`
 
-Every scenario that routes through the legacy translator is a blocker for
-**Phase 8.7** (delete `src/translator/`). The LQA path returns
-`Err(Unsupported)` for 570 scenario executions across three fallback
-classes. Instrument with `POLYGRAPH_TRACE_LEGACY=1 cargo test --test tck`.
+**Feature**: [List12.feature](tests/tck/features/expressions/list/List12.feature)
 
-**Recent progress** (2026-06-07):
-- `ListSlice` (15 events) → **eliminated** (compile-time fold implemented)
-- `list/map equality with null elements` (47→3) → **reduced by 44** (TriBool fold)
-- `list IN with null elements` (16→0) → **eliminated** (TriBool fold)
-- `Subscript` on WITH-bound list var (8→6) → **reduced by 2** (scalar_list_exprs lookup)
+**Setup**: One node `(:Label1 {name: 'original'})`.
 
-### Class A — LQA compile-time `Unsupported`  *(415 events)*
+**Query**:
+```cypher
+MATCH (a:Label1)
+WITH collect(a) AS nodes
+WITH nodes, [x IN nodes | x.name] AS oldNames
+UNWIND nodes AS n
+SET n.name = 'newName'
+RETURN n.name, oldNames
+```
 
-The LQA Op tree is lowered but `sparql.rs` cannot compile it to SPARQL.
-Fix track: extend `crates/polygraph/src/lqa/sparql.rs`.
+Expected: `n.name = 'newName'`, `oldNames = ['original']`.
 
-| Construct / reason | Events | L-level | Fix notes |
-|--------------------|-------:|---------|----------|
-| `Quantifier over non-constant list` | 97 | L2 | Q-a / Q-b buckets above |
-| `list comprehension [x IN list WHERE pred \| expr]` | 95 | L2 | LC bucket above |
-| `UNWIND with variable/expression list` | 35 | L2 | UNWIND-var Continuation |
-| `non-literal value (List) in UNWIND/VALUES context` | 31 | L2 | UNWIND-var Continuation |
-| `range()` | 27 | L1 | Const-int propagation (partially done); step from UNWIND |
-| `path value in projection` | 17 | L2 | Path decomposition |
-| `PatternComprehension` expression type | 15 | L2 | LC bucket |
-| `duration()` constructor | 11 | L1 | Port duration literal constructor |
-| `Exists` expression type | 9 | L1 | Port EXISTS subquery in `sparql.rs` |
-| `list concatenation with dynamic operands` | 8 | L2 | Runtime list concat |
-| `Subscript` expression type | 6 | L1 | Implement `list[idx]` subscript in `sparql.rs` (2 eliminated via scalar_list_exprs) |
-| `property access on scalar variable (var=nonMap)` | 6 | L1 | TypeError guard; return null for non-map/non-graph |
-| `property access on scalar variable (var=nonGraphElement)` | 6 | L1 | TypeError guard |
-| `collect()` aggregate | 6 | L2 | Runtime aggregate materialisation |
-| `property access on scalar variable (var=list)` | 4+6 | L1 | List element property access (TypeError) |
-| `non-literal value (Variable) in UNWIND/VALUES context` | 4 | L2 | UNWIND-var Continuation |
-| `list ordering comparison` | 4 | L1 | Extend cypher_compare in LQA |
-| `properties()` | 3 | L2 | Runtime map extraction |
-| `list/map equality with null elements` | 3 | L1 | 3 dynamic cases remain; 44 literal cases eliminated |
-| `labels()` | 3 | L2 | Runtime label extraction |
-| `Aggregate` expression type (non-standard position) | 3 | L1 | Aggregates outside RETURN |
-| `type(r)` with unknown/multiple edge types | 2 | L1 | Union-type branching |
-| `property access .offsetMinutes` (var=duration) | 2 | L1 | Duration component accessors |
-| `head()` | 2 | L1 | Implement head() in `sparql.rs` |
-| `time()` constructor | 1 | L1 | Port time() literal constructor |
-| `rand()` | 1 | L1/L3 | rand() is non-deterministic; may stay L3 |
-| Other rare constructs | ~8 | L1/L2 | See trace output |
+**Why it is hard**: `oldNames` must capture the `.name` property *before* `SET n.name =
+'newName'` executes. A single-pass SPARQL UPDATE+SELECT model cannot produce this: the
+SELECT that provides `oldNames` runs after the UPDATE mutates the store, reading
+`'newName'` instead of `'original'`. There is no SPARQL mechanism to snapshot a value
+before a mutation and return it after.
 
-### Class B — LQA write-path `Unsupported`  *(93 events)*
+**Mitigation (L2)**: Three-phase continuation — Phase 1 collects `nodes` and computes
+`oldNames` via SELECT; Phase 2 applies `SET n.name = 'newName'` as an UPDATE; Phase 3
+returns the final RETURN projection by joining the Phase 1 result with Phase 2's
+post-state. This requires the L2 Continuation API to materialise intermediate result sets
+in Rust and pass them between phases.
 
-The mutation (CREATE/MERGE/SET/DELETE) pipeline rejects. These go through
-`lqa/write.rs`.
-Fix track: extend `crates/polygraph/src/lqa/write.rs`.
+---
 
-| Construct / reason | Events | L-level | Fix notes |
-|--------------------|-------:|---------|----------|
-| `write_where_complex_op` | 32 | L1 | WHERE clause uses expression unsupported in write mode |
-| `write_delete_with_return` | 28 | L1 | DELETE + RETURN in same query |
+### 8. List12[2] — List comprehension filter captures pre-SET values  `L2`
+
+**Feature**: [List12.feature](tests/tck/features/expressions/list/List12.feature)
+
+**Query**:
+```cypher
+MATCH (a:Label1)
+WITH collect(a) AS nodes
+WITH nodes, [x IN nodes WHERE x.name = 'original'] AS noopFiltered
+UNWIND nodes AS n
+SET n.name = 'newName'
+RETURN n.name, size(noopFiltered)
+```
+
+Expected: `n.name = 'newName'`, `size(noopFiltered) = 1`.
+
+**Why it is hard**: Same pre-write state issue as List12[1]. The filter
+`WHERE x.name = 'original'` must evaluate before `SET n.name = 'newName'` is applied.
+Post-SET, no node satisfies `x.name = 'original'`, so `noopFiltered` is empty and
+`size(noopFiltered) = 0`. The fix is identical: three-phase L2 continuation.
+
+---
+
+## Legacy fallback inventory  (432 events)
+
+Every test execution that routes through the legacy translator
+(`crates/polygraph/src/translator/`) is a blocker for its deletion. Run
+`POLYGRAPH_TRACE_LEGACY=1 cargo test --test tck` to reproduce.
+
+Current breakdown by construct (May 2026):
+
+| Construct | Events | L-level | Notes |
+|-----------|-------:|---------|-------|
+| Quantifier over non-constant list | 97 | L2 | `nodes(p)`, `relationships(p)`, runtime list |
+| List comprehension on variable list | 94 | L2 | `[x IN collect(…) \| expr]` |
+| UNWIND with variable/expression list | 30 | L2 | Non-literal UNWIND source |
+| Non-literal in VALUES/UNWIND context | 28 | L2 | Variable list in VALUES |
+| `write_delete_with_return` | 23 | L1 | DELETE+RETURN in same query |
+| Path value in projection | 17 | L2 | Named path in RETURN/WITH |
+| `write_merge_with_outer_match` | 15 | L1 | MERGE inside outer MATCH scope |
+| PatternComprehension expression | 13 | L2 | `[(a)-->(b) \| b.prop]` |
+| `varlen_named_relvar` (safety pre-pass) | 13 | L1 | `[r*]` with named `r` |
 | `write_set_replace_or_merge_map` | 12 | L1 | `SET n = map` / `SET n += map` |
-| `write_merge_with_outer_match` | 10 | L2 | MERGE where outer MATCH provides binding |
-| `write_set_complex_expr` | 5 | L1 | SET property value is a complex expression |
-| `write_merge_rel_unbound_nodes` | 5 | L1 | MERGE relationship whose nodes are unbound |
-| `lqa_write_select complex return expression` | 1 | L1 | SELECT after write with complex expression in RETURN |
+| `relvar_after_with` (safety pre-pass) | 11 | L1 | Rel var referenced after WITH |
+| Exists expression | 9 | L1 | `EXISTS { pattern }` |
+| `unbounded_varlen_unlabeled` (safety pre-pass) | 9 | L1 | Bare `[*]` guard |
+| Dynamic list concatenation | 8 | L2 | `list1 + list2` with runtime operands |
+| `write_set_complex_expr` | 5 | L1 | Complex value expression in SET |
+| `write_delete_complex_expr` | 5 | L1 | Complex delete target expression |
+| `collect()` aggregate | 6 | L2 | In non-RETURN position |
+| List ordering comparison | 4 | L1 | Type-ranked ORDER BY extension |
+| Subscript expression | 4 | L1 | `list[idx]` in SPARQL context |
+| List/map equality with null | 3 | L1 | Null-aware equality |
+| Aggregate in non-standard position | 3 | L1 | Aggregates outside GROUP BY |
+| `write_merge_rel_unbound_nodes` | 2 | L1 | Partially-bound MERGE endpoints |
+| `write_delete_rel_undirected_untyped` | 2 | L1 | `DELETE` on `--` pattern |
+| `labels()` function | 2 | L2 | Runtime label extraction |
+| `head()` function | 2 | L1 | First element of list |
+| Misc (write_select_complex, UNWIND_write, …) | 7 | L1/L2 | Long-tail constructs |
 
-### Class C — `is_lqa_safe` pre-flight rejected  *(62 events)*
-
-The safety pre-pass decides the AST shape cannot be lowered by LQA at all.
-Fix track: `try_lqa_path()` in `crates/polygraph/src/lib.rs` + add LQA
-support for each gating reason.
-
-| Reason | Events | L-level | Fix notes |
-|--------|-------:|---------|----------|
-| `named_path_varlen` | 21 | L2 | Named path over varlen patterns → path decomposition |
-| `varlen_named_relvar` | 13 | L1 | Varlen pattern with named relationship variable |
-| `relvar_after_with` | 11 | L1 | Relationship variable referenced after a WITH boundary |
-| `unbounded_varlen_unlabeled` | 9 | L1 | `[*]` without label/type bound — safety limit |
-| `with_orderby_shadow_alias` | 3 | L1 | WITH item alias shadows an ORDER BY key |
-| `named_path_with_real_agg` | 3 | L1 | Named path combined with real aggregate in same WITH |
-| `varlen_rel_props` | 1 | L1 | Varlen relationship with inline property filter |
-| `clause_shape` | 1 | L1 | Unsupported clause ordering |
-
----
-
-## How to use this file
-
-- **Search by feature name**: `grep -n "Match4" FAILURES.md`
-- **Find all L2 items**: `grep "L-level.*L2" FAILURES.md`
-- **Find items with no blockers**: look for `None` in the Blocker column above
-- **Track progress**: update the failure count in the header and mark rows
-  `~~strikethrough~~` when fixed; commit with `tck: fix <FeatureName>[N]`
-
-After each fix, re-run `cargo test -p polygraph --test tck` and update the
-header counts. The diff tool `tools/tck_diff.sh` can be used to confirm no
-regressions against the baseline at `tests/tck/baseline/scenarios.jsonl`.
+**Elimination roadmap**: see [plans/legacy-removal.md](plans/legacy-removal.md).

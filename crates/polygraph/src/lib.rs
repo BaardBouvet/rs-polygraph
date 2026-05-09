@@ -228,17 +228,32 @@ fn try_lqa_path(
 
     // Check for definite semantic errors (duplicate aliases) that should be
     // raised as Translation errors, not silently swallowed by legacy.
-    if let Some(reason) = lqa_safe_reason(ast) {
-        if reason == "duplicate_alias" {
+    let safe_reason = lqa_safe_reason(ast);
+    match safe_reason {
+        None => {} // safe to proceed
+        Some("duplicate_alias") => {
             return Err(PolygraphError::Translation {
                 message: "Duplicate column name in RETURN/WITH: ColumnNameConflict".into(),
             });
         }
-        if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
-            eprintln!("[LEGACY] is_lqa_safe=false reason={reason}");
+        Some("named_path_varlen") | Some("named_path_with_real_agg") => {
+            // varlen named paths and named paths with real aggregates aren't
+            // handled by the static LQA path, but L2 emitters in compile_output
+            // can handle specific patterns (e.g. quantifier over nodes/rels(p),
+            // collect() over named paths → 1 row).
+            // Fall through to the normal LQA path; it will use compile_output.
         }
-        return Ok(None);
+        Some(reason) => {
+            if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
+                eprintln!("[LEGACY] is_lqa_safe=false reason={reason}");
+            }
+            return Ok(None);
+        }
     }
+
+    // Track whether we may only try L2 emitters (no static SPARQL generation).
+    let l2_only = safe_reason == Some("named_path_varlen")
+        || safe_reason == Some("named_path_with_real_agg");
 
     let mut lowerer = lqa::lower::AstLowerer::new();
     let op = match lowerer.lower_query(ast) {
@@ -257,6 +272,10 @@ fn try_lqa_path(
 
     // ── Write path ────────────────────────────────────────────────────────
     if lqa::write::contains_write(&op) {
+        // l2_only queries (named_path_varlen) are read-only patterns; skip writes.
+        if l2_only {
+            return Ok(None);
+        }
         let base_iri = engine.base_iri();
         let cw = match lqa::write::compile_write(&op, base_iri) {
             Ok(cw) => cw,
@@ -274,6 +293,19 @@ fn try_lqa_path(
         // When translate_skip_writes returns Unsupported, try the LQA compile_output
         // path which supports L2 Continuation (e.g. list comprehensions in RETURN).
         let select = if cw.has_return {
+            if cw.use_lqa_select {
+                // The write path used stable IRIs (from CREATE before MERGE).
+                // Use the LQA path with specific IRI bindings to avoid scanning all nodes.
+                let stripped = lqa::write::strip_writes_with_bnodes(&op, &cw.bnode_map);
+                match lqa::sparql::compile_output(&stripped, base_iri) {
+                    Ok(output) => Some(Box::new(output)),
+                    Err(PolygraphError::Unsupported { .. })
+                    | Err(PolygraphError::UnsupportedFeature { .. }) => {
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e),
+                }
+            } else {
             let legacy_result = translator::cypher::translate_skip_writes(
                 ast,
                 engine.base_iri(),
@@ -304,8 +336,13 @@ fn try_lqa_path(
                     let stripped = lqa::write::strip_writes(&op);
                     match lqa::sparql::compile_output(&stripped, base_iri) {
                         Ok(output) => Some(Box::new(output)),
-                        Err(PolygraphError::Unsupported { .. })
-                        | Err(PolygraphError::UnsupportedFeature { .. }) => {
+                        Err(PolygraphError::Unsupported { ref construct, .. })
+                        | Err(PolygraphError::UnsupportedFeature {
+                            feature: ref construct,
+                        }) => {
+                            if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
+                                eprintln!("[LEGACY] lqa_write_select_compile_output=Unsupported construct={construct}");
+                            }
                             return Ok(None); // Both paths failed; fall back to full legacy.
                         }
                         Err(e) => return Err(e),
@@ -313,6 +350,7 @@ fn try_lqa_path(
                 }
                 Err(e) => return Err(e),
             }
+            } // end else (non-use_lqa_select)
         } else {
             None
         };
@@ -323,33 +361,56 @@ fn try_lqa_path(
     }
 
     // ── Read path ─────────────────────────────────────────────────────────
-    let compiled = match lqa::sparql::compile(&op, engine.base_iri()) {
-        Ok(c) => c,
-        Err(PolygraphError::Unsupported { ref construct, .. })
-        | Err(PolygraphError::UnsupportedFeature {
-            feature: ref construct,
-        }) => {
-            if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
-                eprintln!("[LEGACY] lqa_compile=Unsupported construct={construct}");
-            }
-            return Ok(None);
+    // Use compile_output so L2 Continuation emitters (e.g. varlen-path
+    // quantifiers, list comprehensions over collected nodes) are tried before
+    // falling back to legacy.
+    //
+    // For l2_only queries (named_path_varlen), only try L2 emitters — don't
+    // let the static compile() generate wrong SPARQL for patterns it handles
+    // incorrectly (e.g. named paths with mixed varlen hops).
+    let output = if l2_only {
+        match lqa::sparql::try_l2_compile(&op, engine.base_iri()) {
+            Some(Ok(out)) => out,
+            Some(Err(e)) => return Err(e),
+            None => return Ok(None), // no L2 emitter matched → legacy
         }
-        Err(e) => return Err(e),
+    } else {
+        match lqa::sparql::compile_output(&op, engine.base_iri()) {
+            Ok(out) => out,
+            Err(PolygraphError::Unsupported { ref construct, .. })
+            | Err(PolygraphError::UnsupportedFeature {
+                feature: ref construct,
+            }) => {
+                if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
+                    eprintln!("[LEGACY] lqa_compile=Unsupported construct={construct}");
+                }
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        }
     };
 
-    let sparql = match engine.finalize(compiled.sparql) {
-        Ok(s) => s,
-        Err(PolygraphError::Unsupported { .. })
-        | Err(PolygraphError::UnsupportedFeature { .. }) => {
-            if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
-                eprintln!("[LEGACY] finalize=Unsupported");
-            }
-            return Ok(None);
+    // For Complete outputs, run through the engine finalizer.
+    // Continuation outputs are returned directly (the executor drives them).
+    let output = match output {
+        TranspileOutput::Complete { sparql, schema } => {
+            let sparql = match engine.finalize(sparql) {
+                Ok(s) => s,
+                Err(PolygraphError::Unsupported { .. })
+                | Err(PolygraphError::UnsupportedFeature { .. }) => {
+                    if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
+                        eprintln!("[LEGACY] finalize=Unsupported");
+                    }
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            };
+            TranspileOutput::Complete { sparql, schema }
         }
-        Err(e) => return Err(e),
+        other => other,
     };
 
-    Ok(Some(TranspileOutput::complete(sparql, compiled.schema)))
+    Ok(Some(output))
 }
 
 /// Returns `None` if safe for LQA, or `Some(("reason", is_error))` where

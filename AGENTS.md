@@ -24,6 +24,7 @@ See [ROADMAP.md](ROADMAP.md) for phased delivery. Design documents live in `plan
 | [parser-extraction.md](plans/parser-extraction.md) | planned | Extract parser/AST into standalone `opencypher-parser` crate (v0.9.0) |
 | [pg-extension-protocol.md](plans/pg-extension-protocol.md) | planned | Postgres triplestore custom SPARQL functions for path decomposition (v0.9.1) |
 | [test-harness-consolidation.md](plans/test-harness-consolidation.md) | planned | Extract shared Oxigraph execution code from TCK + difftest runners (low priority) |
+| [legacy-removal.md](plans/legacy-removal.md) | planned | Delete `src/translator/` (19 k lines); 4-phase plan to drive 432 legacy fallbacks to zero |
 
 ## Architecture
 

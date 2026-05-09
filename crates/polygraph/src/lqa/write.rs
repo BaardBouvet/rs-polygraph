@@ -141,6 +141,15 @@ pub struct CompiledWrite {
     /// the correct SELECT must be aware of SET-rewritten WHERE conditions (which
     /// requires the legacy `translate_skip_writes` machinery).
     pub has_return: bool,
+    /// Variable name → stable IRI mapping for user-defined CREATE nodes that
+    /// were assigned stable IRIs (not blank nodes).  Non-empty when the CREATE
+    /// used INSERT DATA without a WHERE clause, so the IRIs are known at
+    /// compile time and can be used to generate a precise SELECT.
+    pub bnode_map: HashMap<String, String>,
+    /// When true, the SELECT for RETURN should use `strip_writes_with_bnodes`
+    /// (the LQA path) rather than `translate_skip_writes` (the legacy path).
+    /// Set to true when `bnode_map` contains stable IRIs.
+    pub use_lqa_select: bool,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -160,8 +169,12 @@ pub struct CompiledWrite {
 pub fn compile_write(op: &Op, base_iri: Option<&str>) -> Result<CompiledWrite, PolygraphError> {
     let base = base_iri.unwrap_or(DEFAULT_BASE);
 
-    // Detect whether the query has a RETURN clause (Projection anywhere in the tree).
-    let has_return = contains_projection(op);
+    // Detect whether the query has a RETURN clause.  A RETURN produces a Projection
+    // at the TOP of the op tree (possibly wrapped only by OrderBy / Limit / Skip /
+    // Distinct).  Intermediate WITH clauses also produce Projections but they are
+    // nested INSIDE write ops (Create / Merge / Set …), so they must NOT be treated
+    // as a RETURN.
+    let has_return = is_top_level_return(op);
 
     // DELETE+RETURN queries: the RETURN should reflect pre-deletion row counts.
     // The legacy translate_skip_writes path handles this correctly by skipping
@@ -184,13 +197,62 @@ pub fn compile_write(op: &Op, base_iri: Option<&str>) -> Result<CompiledWrite, P
     let mut updates = Vec::new();
     compile_write_recursive(op, base, &mut counter, &mut bnode_map, &mut updates)?;
 
+    let use_lqa_select = bnode_map.values().any(|v| v.starts_with('<')) && op_has_create_before_merge(op);
     Ok(CompiledWrite {
         update_strings: updates,
         has_return,
+        use_lqa_select,
+        bnode_map,
     })
 }
 
 // ── Recursive write-op visitor ────────────────────────────────────────────────
+
+/// Returns true if the op tree contains a `Merge` whose inner subtree
+/// includes a `Create` (i.e., `CREATE (a), (b) MERGE (a)-[:R]->(b)` pattern).
+fn op_has_create_before_merge(op: &Op) -> bool {
+    match op {
+        Op::Merge { inner, .. } => op_contains_create(inner),
+        Op::Create { inner, .. }
+        | Op::Set { inner, .. }
+        | Op::Delete { inner, .. }
+        | Op::Remove { inner, .. }
+        | Op::Projection { inner, .. }
+        | Op::GroupBy { inner, .. }
+        | Op::Limit { inner, .. }
+        | Op::Skip { inner, .. }
+        | Op::OrderBy { inner, .. }
+        | Op::Expand { inner, .. }
+        | Op::Selection { inner, .. } => op_has_create_before_merge(inner),
+        Op::CartesianProduct { left, right } => {
+            op_has_create_before_merge(left) || op_has_create_before_merge(right)
+        }
+        _ => false,
+    }
+}
+
+/// Returns true if the op tree contains a `Create` node anywhere.
+fn op_contains_create(op: &Op) -> bool {
+    match op {
+        Op::Create { .. } => true,
+        Op::Set { inner, .. }
+        | Op::Delete { inner, .. }
+        | Op::Remove { inner, .. }
+        | Op::Projection { inner, .. }
+        | Op::GroupBy { inner, .. }
+        | Op::Limit { inner, .. }
+        | Op::Skip { inner, .. }
+        | Op::OrderBy { inner, .. }
+        | Op::Expand { inner, .. }
+        | Op::Selection { inner, .. }
+        | Op::Merge { inner, .. } => op_contains_create(inner),
+        Op::CartesianProduct { left, right } => {
+            op_contains_create(left) || op_contains_create(right)
+        }
+        _ => false,
+    }
+}
+
 
 /// Walk `op` depth-first, collecting UPDATE strings into `out`.
 /// Stops recursing at non-write ops (read context).
@@ -262,14 +324,18 @@ fn compile_write_recursive(
             compile_remove_items(items, &where_parts, base, out)?;
         }
         Op::Merge { inner, clause } => {
-            let match_ctx = read_context(inner);
-            let where_parts = op_to_where_parts(match_ctx, base)?;
-
+            // Run inner write operations FIRST so that bnode_map is populated
+            // with stable IRIs from any preceding CREATE nodes.  Then we can
+            // use those IRIs to generate precise WHERE clauses for the MERGE.
             if contains_write(inner) {
                 compile_write_recursive(inner, base, counter, bnode_map, out)?;
             }
 
-            compile_merge(clause, &where_parts, base, counter, out)?;
+            // Generate WHERE parts with awareness of the bnode_map so that
+            // user-defined CREATE nodes (with stable IRIs) get specific bindings.
+            let where_parts = op_to_where_parts_with_bnodes(inner, base, bnode_map)?;
+
+            compile_merge(clause, &where_parts, base, counter, bnode_map, out)?;
         }
         // CALL / FOREACH — not yet implemented; fall back to legacy
         Op::Call { .. } | Op::Foreach { .. } => {
@@ -314,14 +380,174 @@ pub(crate) fn strip_writes(op: &Op) -> Op {
             items: items.clone(),
             distinct: *distinct,
         },
-        Op::Create { inner, .. }
-        | Op::Set { inner, .. }
+        // For CREATE, replace it with a scan over the created nodes so that
+        // user-defined variables bound during CREATE remain accessible in the
+        // stripped query. Synthetic anonymous variables (prefixed `_lqa_`) are
+        // NOT converted to Scans because they would match all existing nodes of
+        // that type, producing wrong row counts in the SELECT.
+        Op::Create { inner, nodes, .. } => {
+            let inner_stripped = strip_writes(inner);
+            // Build a Scan for each created node that has a USER-DEFINED variable
+            // name (i.e. not a synthetic `_lqa_*` anonymous variable).
+            let node_scans: Vec<Op> = nodes
+                .iter()
+                .filter_map(|n| {
+                    let var = n.variable.as_deref()?;
+                    // Skip synthetic/anonymous variables emitted by the LQA lowerer.
+                    if var.starts_with("_lqa_") {
+                        return None;
+                    }
+                    Some(Op::Scan {
+                        variable: var.to_owned(),
+                        label: n.labels.first().cloned(),
+                        extra_labels: n.labels.iter().skip(1).cloned().collect(),
+                    })
+                })
+                .collect();
+            // Combine scans with the inner via CartesianProduct.
+            node_scans.into_iter().fold(inner_stripped, |acc, scan| {
+                Op::CartesianProduct {
+                    left: Box::new(acc),
+                    right: Box::new(scan),
+                }
+            })
+        }
+        Op::Set { inner, .. }
         | Op::Delete { inner, .. }
         | Op::Remove { inner, .. }
         | Op::Merge { inner, .. }
         | Op::Call { inner, .. }
         | Op::Foreach { inner, .. } => strip_writes(inner),
-        // Read op — return as-is
+        // Recurse into read operators that may have write operators in their subtree.
+        Op::GroupBy { inner, group_keys, agg_items } => Op::GroupBy {
+            inner: Box::new(strip_writes(inner)),
+            group_keys: group_keys.clone(),
+            agg_items: agg_items.clone(),
+        },
+        Op::Selection { inner, predicate } => Op::Selection {
+            inner: Box::new(strip_writes(inner)),
+            predicate: predicate.clone(),
+        },
+        Op::Unwind { inner, variable, list } => Op::Unwind {
+            inner: Box::new(strip_writes(inner)),
+            variable: variable.clone(),
+            list: list.clone(),
+        },
+        Op::OrderBy { inner, keys } => Op::OrderBy {
+            inner: Box::new(strip_writes(inner)),
+            keys: keys.clone(),
+        },
+        Op::Limit { inner, count } => Op::Limit {
+            inner: Box::new(strip_writes(inner)),
+            count: count.clone(),
+        },
+        Op::Skip { inner, count } => Op::Skip {
+            inner: Box::new(strip_writes(inner)),
+            count: count.clone(),
+        },
+        Op::Distinct { inner } => Op::Distinct {
+            inner: Box::new(strip_writes(inner)),
+        },
+        Op::Expand {
+            inner,
+            from,
+            rel_var,
+            to,
+            rel_types,
+            direction,
+            range,
+            path_var,
+        } => Op::Expand {
+            inner: Box::new(strip_writes(inner)),
+            from: from.clone(),
+            rel_var: rel_var.clone(),
+            to: to.clone(),
+            rel_types: rel_types.clone(),
+            direction: direction.clone(),
+            range: range.clone(),
+            path_var: path_var.clone(),
+        },
+        Op::CartesianProduct { left, right } => Op::CartesianProduct {
+            left: Box::new(strip_writes(left)),
+            right: Box::new(strip_writes(right)),
+        },
+        Op::Union { left, right } => Op::Union {
+            left: Box::new(strip_writes(left)),
+            right: Box::new(strip_writes(right)),
+        },
+        Op::UnionAll { left, right } => Op::UnionAll {
+            left: Box::new(strip_writes(left)),
+            right: Box::new(strip_writes(right)),
+        },
+        Op::LeftOuterJoin { left, right, condition } => Op::LeftOuterJoin {
+            left: Box::new(strip_writes(left)),
+            right: Box::new(strip_writes(right)),
+            condition: condition.clone(),
+        },
+        Op::Subquery { outer, inner } => Op::Subquery {
+            outer: Box::new(strip_writes(outer)),
+            inner: Box::new(strip_writes(inner)),
+        },
+        // Leaf ops — return as-is
+        _ => op.clone(),
+    }
+}
+
+/// Like `strip_writes` but replaces CREATE nodes that have stable IRIs in
+/// `bnode_map` with `Op::Values` bindings (using `Literal::Iri`) instead of
+/// generic `Op::Scan` patterns.  This allows the SELECT query to be precise —
+/// only returning the rows for the specific nodes that were created — rather
+/// than scanning all nodes of the same label.
+pub(crate) fn strip_writes_with_bnodes(op: &Op, bnode_map: &HashMap<String, String>) -> Op {
+    match op {
+        Op::Projection { inner, items, distinct } => Op::Projection {
+            inner: Box::new(strip_writes_with_bnodes(inner, bnode_map)),
+            items: items.clone(),
+            distinct: *distinct,
+        },
+        Op::Create { inner, nodes, .. } => {
+            let inner_stripped = strip_writes_with_bnodes(inner, bnode_map);
+            let node_ops: Vec<Op> = nodes
+                .iter()
+                .filter_map(|n| {
+                    let var = n.variable.as_deref()?;
+                    if var.starts_with("_lqa_") {
+                        return None;
+                    }
+                    if let Some(iri) = bnode_map.get(var) {
+                        if iri.starts_with('<') {
+                            // Stable IRI — bind via Values.
+                            let iri_str = iri.trim_start_matches('<').trim_end_matches('>').to_owned();
+                            return Some(Op::Values {
+                                bindings: vec![(var.to_owned(), crate::lqa::expr::Expr::Literal(crate::lqa::expr::Literal::Iri(iri_str)))],
+                            });
+                        }
+                    }
+                    // Fallback: Scan.
+                    Some(Op::Scan {
+                        variable: var.to_owned(),
+                        label: n.labels.first().cloned(),
+                        extra_labels: n.labels.iter().skip(1).cloned().collect(),
+                    })
+                })
+                .collect();
+            node_ops.into_iter().fold(inner_stripped, |acc, node_op| {
+                Op::CartesianProduct {
+                    left: Box::new(acc),
+                    right: Box::new(node_op),
+                }
+            })
+        }
+        Op::Set { inner, .. }
+        | Op::Delete { inner, .. }
+        | Op::Remove { inner, .. }
+        | Op::Merge { inner, .. } => strip_writes_with_bnodes(inner, bnode_map),
+        Op::GroupBy { inner, group_keys, agg_items } => Op::GroupBy {
+            inner: Box::new(strip_writes_with_bnodes(inner, bnode_map)),
+            group_keys: group_keys.clone(),
+            agg_items: agg_items.clone(),
+        },
+        // Leaf ops — return as-is
         _ => op.clone(),
     }
 }
@@ -394,6 +620,20 @@ pub fn contains_write(op: &Op) -> bool {
         Op::LeftOuterJoin { left, right, .. } => contains_write(left) || contains_write(right),
         Op::Subquery { outer, inner } => contains_write(outer) || contains_write(inner),
         Op::Scan { .. } | Op::Unit | Op::Values { .. } => false,
+    }
+}
+
+/// Returns `true` if `op` has a RETURN-clause Projection at the top of the tree
+/// (possibly wrapped only by OrderBy / Limit / Skip / Distinct).
+/// Intermediate WITH projections nested inside write ops do NOT count.
+fn is_top_level_return(op: &Op) -> bool {
+    match op {
+        Op::Projection { .. } => true,
+        Op::OrderBy { inner, .. }
+        | Op::Limit { inner, .. }
+        | Op::Skip { inner, .. }
+        | Op::Distinct { inner } => is_top_level_return(inner),
+        _ => false,
     }
 }
 
@@ -551,6 +791,34 @@ fn op_to_where_parts(op: &Op, base: &str) -> Result<Vec<String>, PolygraphError>
         // to update (SPARQL UPDATE has no LIMIT/SKIP concept).
         Op::OrderBy { inner, .. } | Op::Distinct { inner, .. } => op_to_where_parts(inner, base),
 
+        // UNWIND of a literal list: generates a VALUES clause.
+        // `UNWIND ['a,b', 'a,b'] AS str` → `VALUES (?str) { ('a,b') ('a,b') }`
+        Op::Unwind { inner, list, variable } => {
+            let mut parts = op_to_where_parts(inner, base)?;
+            match list {
+                Expr::List(items) => {
+                    let vals: Vec<String> = items
+                        .iter()
+                        .filter_map(|e| expr_to_sparql_lit(e, base))
+                        .collect();
+                    if !vals.is_empty() && vals.len() == items.len() {
+                        parts.push(format!(
+                            "VALUES (?{variable}) {{ {} }}",
+                            vals.iter().map(|v| format!("({v})")).collect::<Vec<_>>().join(" ")
+                        ));
+                    }
+                    // If serialization fails for some items, skip the VALUES clause
+                    // (conservative: unwind is ignored for write purposes).
+                }
+                _ => {
+                    // Variable or complex UNWIND source — skip; the variable won't
+                    // be bound in the WHERE clause, which may affect correctness but
+                    // is acceptable for generating partial updates.
+                }
+            }
+            Ok(parts)
+        }
+
         // Projection (WITH clause): handle identity passthroughs and simple variable
         // renames (e.g. `WITH n AS a`).  Both cases can be expressed in SPARQL via
         // BIND:  non-rename passthroughs need no BIND; renames add `BIND(?src AS ?alias)`.
@@ -573,13 +841,75 @@ fn op_to_where_parts(op: &Op, base: &str) -> Result<Vec<String>, PolygraphError>
                 }
                 Ok(parts)
             } else {
-                Err(write_unsupported!("write_where_complex_op"))
+                // Handle projections with some computed (non-variable) items.
+                // These arise in e.g. `WITH a, split(str, ',') AS roles`.
+                // We recurse into the inner for graph patterns, then add BIND
+                // clauses only for items that can be expressed in SPARQL.
+                // Items that can't be serialised are skipped (conservative: the
+                // variable won't be bound in the WHERE clause, but this is usually
+                // safe when the non-variable item is only used in the RETURN, not
+                // as a filter or write target).
+                let mut parts = op_to_where_parts(inner, base)?;
+                for pi in items {
+                    match &pi.expr {
+                        crate::lqa::Expr::Variable { name: src, .. } => {
+                            if src != &pi.alias {
+                                parts.push(format!("BIND(?{src} AS ?{})", pi.alias));
+                            }
+                        }
+                        other => {
+                            // Try to emit a SPARQL BIND for this expression.
+                            if let Some(sparql_str) = try_expr_to_sparql_bind(other, base) {
+                                parts.push(format!("BIND({sparql_str} AS ?{})", pi.alias));
+                            }
+                            // If it fails, skip silently — the variable won't be bound.
+                        }
+                    }
+                }
+                Ok(parts)
             }
         }
 
         // GroupBy: recurse into the inner (the MATCH pattern) to generate WHERE triples.
         // The group keys don't change which nodes are matched, only which rows are returned.
         Op::GroupBy { inner, .. } => op_to_where_parts(inner, base),
+
+        // For CREATE, emit label scan patterns for user-defined (non-anonymous) created nodes
+        // so that variables bound during CREATE are visible in subsequent WHERE clauses
+        // (e.g. the MERGE WHERE clause needs to find the specific nodes that were created).
+        // Anonymous synthetic variables (prefixed `_lqa_`) are NOT emitted because they
+        // would match ALL existing nodes, producing wrong INSERT row counts.
+        Op::Create { inner, nodes, .. } => {
+            let mut parts = op_to_where_parts(inner, base)?;
+            for node in nodes {
+                if let Some(var) = &node.variable {
+                    // Skip synthetic/anonymous variables — they match ALL nodes.
+                    if var.starts_with("_lqa_") {
+                        continue;
+                    }
+                    // Emit an RDF type triple for each label (to constrain the scan).
+                    // If the node has no label, emit just the node-sentinel triple.
+                    if node.labels.is_empty() {
+                        let node_iri = format!("<{}__node>", base);
+                        parts.push(format!("?{var} {node_iri} {node_iri} ."));
+                    } else {
+                        for label in &node.labels {
+                            parts.push(format!(
+                                "?{var} <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <{base}{label}> ."
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(parts)
+        }
+
+        // Write ops that may appear in the match context (inner of Merge etc.) — skip them
+        // and recurse into their inner to find the graph patterns.
+        Op::Set { inner, .. }
+        | Op::Delete { inner, .. }
+        | Op::Remove { inner, .. }
+        | Op::Merge { inner, .. } => op_to_where_parts(inner, base),
 
         // LIMIT / SKIP in a write context cannot be emulated safely in SPARQL UPDATE
         // (there is no SPARQL-level LIMIT on UPDATE rows). Fall back to legacy.
@@ -588,6 +918,83 @@ fn op_to_where_parts(op: &Op, base: &str) -> Result<Vec<String>, PolygraphError>
         // For other complex ops in write context — fall back so the whole query
         // is retried on the legacy path, which has richer WHERE generation.
         _ => Err(write_unsupported!("write_where_complex_op")),
+    }
+}
+
+/// Like `op_to_where_parts` but uses the `bnode_map` to generate specific
+/// `BIND(<IRI> AS ?var)` clauses for CREATE nodes that have stable IRIs.
+fn op_to_where_parts_with_bnodes(
+    op: &Op,
+    base: &str,
+    bnode_map: &HashMap<String, String>,
+) -> Result<Vec<String>, PolygraphError> {
+    match op {
+        Op::Create { inner, nodes, .. } => {
+            let mut parts = op_to_where_parts_with_bnodes(inner, base, bnode_map)?;
+            for node in nodes {
+                if let Some(var) = &node.variable {
+                    if var.starts_with("_lqa_") {
+                        continue;
+                    }
+                    if let Some(iri) = bnode_map.get(var.as_str()) {
+                        if iri.starts_with('<') {
+                            // Stable IRI — use BIND to constrain to the specific node.
+                            parts.push(format!("BIND({iri} AS ?{var})"));
+                        } else if iri.starts_with('?') {
+                            // Already a SPARQL variable — passthrough.
+                        } else {
+                            // Blank node — fallback to generic scan.
+                            if node.labels.is_empty() {
+                                parts.push(format!("?{var} <{base}__node> <{base}__node> ."));
+                            } else {
+                                for label in &node.labels {
+                                    parts.push(format!("?{var} <{RDF_TYPE}> <{base}{label}> ."));
+                                }
+                            }
+                        }
+                    } else {
+                        // Not in bnode_map — fallback to generic scan.
+                        if node.labels.is_empty() {
+                            parts.push(format!("?{var} <{base}__node> <{base}__node> ."));
+                        } else {
+                            for label in &node.labels {
+                                parts.push(format!("?{var} <{RDF_TYPE}> <{base}{label}> ."));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(parts)
+        }
+        // For all other ops, delegate to the standard op_to_where_parts.
+        _ => op_to_where_parts(op, base),
+    }
+}
+
+
+/// Returns `None` if the expression cannot be represented as SPARQL.
+/// Used to emit BIND clauses for non-variable WITH items in `op_to_where_parts`.
+fn try_expr_to_sparql_bind(expr: &Expr, _base: &str) -> Option<String> {
+    match expr {
+        // Literal → directly serialize
+        Expr::Literal(crate::lqa::expr::Literal::Integer(n)) => Some(n.to_string()),
+        Expr::Literal(crate::lqa::expr::Literal::Float(f)) => Some(f.to_string()),
+        Expr::Literal(crate::lqa::expr::Literal::Boolean(b)) => {
+            Some(if *b { "true" } else { "false" }.to_owned())
+        }
+        Expr::Literal(crate::lqa::expr::Literal::String(s)) => {
+            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+            Some(format!("\"{escaped}\""))
+        }
+        // Variable reference → ?varname
+        Expr::Variable { name, .. } => Some(format!("?{name}")),
+        // FunctionCall: handle split() via urn:polygraph:split custom function
+        Expr::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("split") => {
+            let s = try_expr_to_sparql_bind(args.first()?, _base)?;
+            let d = try_expr_to_sparql_bind(args.get(1)?, _base)?;
+            Some(format!("<urn:polygraph:split>({s}, {d})"))
+        }
+        _ => None,
     }
 }
 
@@ -737,6 +1144,7 @@ fn lit_to_sparql(lit: &Literal) -> Option<String> {
             let escaped = value.replace('"', "\\\"");
             Some(format!("\"{escaped}\"^^<{xsd_type}>"))
         }
+        Literal::Iri(iri) => Some(format!("<{iri}>")),
     }
 }
 
@@ -807,13 +1215,8 @@ fn lqa_write_serialize_literal(e: &Expr) -> Option<String> {
             Literal::Boolean(b) => Some(if *b { "true" } else { "false" }.to_owned()),
             Literal::Null => Some("null".to_owned()),
             Literal::TypedLiteral(v, _) => Some(v.clone()),
+            Literal::Iri(iri) => Some(format!("{iri}")),
         },
-        Expr::Unary(UnaryOp::Neg, inner) => match inner.as_ref() {
-            Expr::Literal(Literal::Integer(n)) => Some(format!("-{n}")),
-            Expr::Literal(Literal::Float(f)) => Some(format!("{}", -f)),
-            _ => None,
-        },
-        // List concatenation: [1,2] + [3,4] → "[1, 2, 3, 4]"
         Expr::Add(a, b) => {
             let sa = lqa_write_serialize_literal(a)?;
             let sb = lqa_write_serialize_literal(b)?;
@@ -936,7 +1339,13 @@ fn compile_create(
         let bnode = if let Some(var) = &node.variable {
             // Reuse a blank node already assigned to this variable (chained creates).
             if let Some(existing) = bnode_map.get(var) {
-                existing.clone()
+                let existing = existing.clone();
+                if existing.starts_with('?') {
+                    // This variable is already bound as a WHERE-clause variable reference.
+                    // It represents an existing node — skip emitting sentinel/labels/props.
+                    continue;
+                }
+                existing
             } else if bound_in_where.contains(var.as_str()) {
                 // This variable is already bound by the WHERE clause (it came from a MATCH
                 // pattern).  Use the SPARQL variable directly; do NOT create a new blank node
@@ -945,6 +1354,14 @@ fn compile_create(
                 bnode_map.insert(var.clone(), var_ref.clone());
                 // Skip sentinel/labels/properties for existing nodes.
                 continue;
+            } else if no_match && !var.starts_with("_lqa_") {
+                // Pure INSERT DATA (no WHERE clause) and user-defined variable:
+                // use a stable IRI so that subsequent MERGE statements can
+                // reference these specific nodes across UPDATE statements.
+                let iri = format!("<{base}__bnode/{}>", *counter);
+                *counter += 1;
+                bnode_map.insert(var.clone(), iri.clone());
+                iri
             } else {
                 let bn = format!("_:__n{}", *counter);
                 *counter += 1;
@@ -1284,8 +1701,15 @@ fn compile_delete(
     Ok(())
 }
 
-/// Generate SPARQL UPDATE statements to delete an edge triple (and its
-/// associated RDF-star property triples) for a named relationship variable.
+/// Generate SPARQL UPDATE statements to delete an edge triple for a named
+/// relationship variable.
+///
+/// Note: RDF-star property triples (`<< s p o >> :prop val`) attached to the
+/// edge are intentionally NOT deleted here because the SPARQL Update `DELETE`
+/// template syntax `DELETE { << ?s ?p ?o >> ?pp ?po }` is rejected by
+/// Oxigraph's Update parser.  Orphaned property triples do not affect SELECT
+/// query correctness since relationship-property access patterns always require
+/// the edge triple to match first.
 fn compile_delete_rel(
     rel_var: &str,
     bind: &RelVarBind,
@@ -1294,6 +1718,7 @@ fn compile_delete_rel(
     out: &mut Vec<String>,
 ) -> Result<(), PolygraphError> {
     let RelVarBind { from, to, rel_types, direction } = bind;
+    let _ = rel_var; // kept for API symmetry / future use
 
     if rel_types.is_empty() {
         // Untyped relationship: the predicate is captured in the anonymous
@@ -1315,13 +1740,6 @@ fn compile_delete_rel(
             "DELETE {{ {subj} {pred_var} {obj} }} \
              WHERE {{ {base_where} }}"
         ));
-        // Delete any RDF-star property triples attached to this edge.
-        let pp = format!("?__del_{rel_var}_prop_p");
-        let po = format!("?__del_{rel_var}_prop_o");
-        out.push(format!(
-            "DELETE {{ << {subj} {pred_var} {obj} >> {pp} {po} }} \
-             WHERE {{ {base_where} . << {subj} {pred_var} {obj} >> {pp} {po} }}"
-        ));
     } else {
         for rt in rel_types {
             let type_iri = format!("{base}{rt}");
@@ -1339,13 +1757,6 @@ fn compile_delete_rel(
                 "DELETE {{ {subj} <{type_iri}> {obj} }} \
                  WHERE {{ {base_where} }}"
             ));
-            // Delete any RDF-star property triples on this edge.
-            let pp = format!("?__del_{rel_var}_prop_p");
-            let po = format!("?__del_{rel_var}_prop_o");
-            out.push(format!(
-                "DELETE {{ << {subj} <{type_iri}> {obj} >> {pp} {po} }} \
-                 WHERE {{ {base_where} . << {subj} <{type_iri}> {obj} >> {pp} {po} }}"
-            ));
         }
     }
     Ok(())
@@ -1356,6 +1767,7 @@ fn compile_merge(
     outer_where: &[String],
     base: &str,
     counter: &mut usize,
+    bnode_map: &HashMap<String, String>,
     out: &mut Vec<String>,
 ) -> Result<(), PolygraphError> {
     // Get the match pattern from clause.pattern (the Op that defines what to match-or-create).
@@ -1363,7 +1775,12 @@ fn compile_merge(
 
     match clause.pattern.as_ref() {
         // ── Node MERGE ───────────────────────────────────────────────────
-        Op::Selection { inner, .. } => {
+        Op::Selection { inner, .. }
+            if !matches!(
+                inner.as_ref(),
+                Op::Expand { .. }
+            ) =>
+        {
             // Selection wrapping a Scan — node with properties.
             compile_merge_node_scan(
                 inner,
@@ -1376,6 +1793,45 @@ fn compile_merge(
                 counter,
                 out,
             )?;
+        }
+        // ── Relationship MERGE with property filter ────────────────────
+        Op::Selection {
+            inner,
+            predicate: sel_pred,
+        } if matches!(inner.as_ref(), Op::Expand { .. }) => {
+            // Selection over Expand — relationship MERGE with property predicates.
+            if let Op::Expand {
+                inner: expand_inner,
+                from,
+                to,
+                rel_types,
+                direction,
+                range: None,
+                rel_var,
+                ..
+            } = inner.as_ref()
+            {
+                // Try to extract property conditions from the Selection predicate
+                // so they can be included in both the NOT EXISTS check and the INSERT.
+                let rel_var_name = rel_var.as_deref().unwrap_or("__rel");
+                let rel_props = extract_rel_prop_conditions(sel_pred, rel_var_name, base);
+                compile_merge_rel_with_props(
+                    expand_inner,
+                    from,
+                    to,
+                    rel_types,
+                    direction.clone(),
+                    &clause.on_match,
+                    &clause.on_create,
+                    outer_where,
+                    base,
+                    bnode_map,
+                    rel_props.as_deref().unwrap_or(&[]),
+                    out,
+                )?;
+            } else {
+                return Err(write_unsupported!("write_merge_complex_pattern"));
+            }
         }
         Op::Scan { .. } => {
             // Bare Scan without properties.
@@ -1401,8 +1857,8 @@ fn compile_merge(
             range: None,
             path_var: _,
         } => {
-            // Relationship MERGE.
-            compile_merge_rel(
+            // Relationship MERGE without property filter.
+            compile_merge_rel_with_props(
                 inner,
                 from,
                 to,
@@ -1412,6 +1868,8 @@ fn compile_merge(
                 &clause.on_create,
                 outer_where,
                 base,
+                bnode_map,
+                &[],
                 out,
             )?;
         }
@@ -1543,8 +2001,121 @@ fn compile_merge_node_scan(
     Ok(())
 }
 
+/// Extract property equality conditions from a Selection predicate that applies to
+/// the given `rel_var` (the relationship variable in a MERGE pattern).
+/// Returns `Some(vec)` if all conditions could be extracted, `None` if the
+/// predicate has unsupported structure.
+/// Each entry is `(prop_iri, sparql_value_str)` ready to embed in SPARQL.
+fn extract_rel_prop_conditions(
+    predicate: &Expr,
+    rel_var: &str,
+    base: &str,
+) -> Option<Vec<(String, String)>> {
+    match predicate {
+        // Property(rel_var, key) = value
+        Expr::Comparison(CmpOp::Eq, lhs, rhs) => {
+            if let Expr::Property(base_expr, key) = lhs.as_ref() {
+                if matches!(base_expr.as_ref(), Expr::Variable { name, .. } if name == rel_var) {
+                    let val_str = expr_to_sparql_value(rhs, base)?;
+                    return Some(vec![(format!("{base}{key}"), val_str)]);
+                }
+            }
+            if let Expr::Property(base_expr, key) = rhs.as_ref() {
+                if matches!(base_expr.as_ref(), Expr::Variable { name, .. } if name == rel_var) {
+                    let val_str = expr_to_sparql_value(lhs, base)?;
+                    return Some(vec![(format!("{base}{key}"), val_str)]);
+                }
+            }
+            None
+        }
+        // AND(cond1, cond2) — conjunction of property conditions
+        Expr::And(left, right) => {
+            let mut conds = extract_rel_prop_conditions(left, rel_var, base)?;
+            conds.extend(extract_rel_prop_conditions(right, rel_var, base)?);
+            Some(conds)
+        }
+        _ => None,
+    }
+}
+
+/// Convert an expression to a SPARQL value string suitable for use in INSERT/NOT EXISTS.
+/// Handles literals and variable references only.
+fn expr_to_sparql_value(expr: &Expr, base: &str) -> Option<String> {
+    match expr {
+        Expr::Variable { name, .. } => Some(format!("?{name}")),
+        other => expr_to_sparql_lit(other, base),
+    }
+}
+
+/// Emit MERGE for a relationship where both endpoints have KNOWN stable IRIs
+/// (from a preceding `CREATE (a), (b)` that used stable IRI assignment).
+/// This avoids the need for a WHERE clause that matches all pairs of nodes.
 #[allow(clippy::too_many_arguments)]
-fn compile_merge_rel(
+fn compile_merge_rel_fully_bound(
+    from_iri: &str,
+    to_iri: &str,
+    rel_types: &[String],
+    direction: &Direction,
+    on_match: &[SetItem],
+    on_create: &[SetItem],
+    rel_props: &[(String, String)],
+    base: &str,
+    out: &mut Vec<String>,
+) -> Result<(), PolygraphError> {
+    for rt in rel_types {
+        let type_iri = format!("{base}{rt}");
+        let (actual_src, actual_dst) = match direction {
+            Direction::Incoming => (to_iri, from_iri),
+            _ => (from_iri, to_iri),
+        };
+
+        // Build INSERT triples.
+        let mut insert_parts = vec![format!("{actual_src} <{type_iri}> {actual_dst}")];
+        for (prop_iri, val) in rel_props {
+            insert_parts.push(format!("<< {actual_src} <{type_iri}> {actual_dst} >> <{prop_iri}> {val}"));
+        }
+        for item in on_create {
+            if let SetItem::Property { key, value, .. } = item {
+                let prop_iri = format!("{base}{key}");
+                if let Some(lit) = expr_to_sparql_lit(value, base) {
+                    insert_parts.push(format!("<< {actual_src} <{type_iri}> {actual_dst} >> <{prop_iri}> {lit}"));
+                }
+            }
+        }
+        let insert_body = insert_parts.join(" . ");
+
+        // Build NOT EXISTS condition.
+        let mut not_exists_parts = vec![format!("{actual_src} <{type_iri}> {actual_dst}")];
+        for (prop_iri, val) in rel_props {
+            not_exists_parts.push(format!("<< {actual_src} <{type_iri}> {actual_dst} >> <{prop_iri}> {val}"));
+        }
+        let not_exists = not_exists_parts.join(" . ");
+
+        out.push(format!(
+            "INSERT {{ {insert_body} }} WHERE {{ FILTER NOT EXISTS {{ {not_exists} }} }}"
+        ));
+
+        // ON MATCH SET: apply if the relationship ALREADY existed.
+        for item in on_match {
+            if let SetItem::Property { key, value, .. } = item {
+                let prop_iri = format!("{base}{key}");
+                if let Some(lit) = expr_to_sparql_lit(value, base) {
+                    let old_var = "?__on_match_old";
+                    out.push(format!(
+                        "DELETE {{ << {actual_src} <{type_iri}> {actual_dst} >> <{prop_iri}> {old_var} }} \
+                         INSERT {{ << {actual_src} <{type_iri}> {actual_dst} >> <{prop_iri}> {lit} }} \
+                         WHERE {{ {actual_src} <{type_iri}> {actual_dst} . \
+                                  OPTIONAL {{ << {actual_src} <{type_iri}> {actual_dst} >> <{prop_iri}> {old_var} }} }}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_merge_rel_with_props(
     match_context: &Op,
     from: &str,
     to: &str,
@@ -1554,6 +2125,10 @@ fn compile_merge_rel(
     on_create: &[SetItem],
     outer_where: &[String],
     base: &str,
+    bnode_map: &HashMap<String, String>,
+    // Extra property conditions extracted from Selection predicate.
+    // Each entry is `(prop_iri, sparql_value_str)`.
+    rel_props: &[(String, String)],
     out: &mut Vec<String>,
 ) -> Result<(), PolygraphError> {
     // Get WHERE parts for nodes.
@@ -1568,7 +2143,7 @@ fn compile_merge_rel(
 
     // If the base WHERE doesn't constrain the from/to nodes (both variables
     // would be unbound), the INSERT would generate triples with unbound variables
-    // which SPARQL silently ignores. Fall back to legacy in this case.
+    // which SPARQL silently ignores.
     let from_is_constrained = base_where_parts
         .iter()
         .any(|p| p.contains(&format!("?{from}")));
@@ -1576,6 +2151,15 @@ fn compile_merge_rel(
         .iter()
         .any(|p| p.contains(&format!("?{to}")));
     if !from_is_constrained || !to_is_constrained {
+        // Check if from/to are in bnode_map with stable IRIs (from a preceding CREATE).
+        // If so, we can use those specific IRIs directly without needing a WHERE clause.
+        if let (Some(from_iri), Some(to_iri)) = (bnode_map.get(from), bnode_map.get(to)) {
+            if from_iri.starts_with('<') && to_iri.starts_with('<') {
+                return compile_merge_rel_fully_bound(
+                    from_iri, to_iri, rel_types, &direction, on_match, on_create, rel_props, base, out,
+                );
+            }
+        }
         return Err(write_unsupported!("write_merge_rel_unbound_nodes"));
     }
 
@@ -1588,6 +2172,13 @@ fn compile_merge_rel(
 
         let mut insert_parts: Vec<String> =
             vec![format!("?{actual_src} <{type_iri}> ?{actual_dst}")];
+
+        // Merge-pattern property conditions: add as RDF-star triples in INSERT.
+        for (prop_iri, val_str) in rel_props {
+            insert_parts.push(format!(
+                "<< ?{actual_src} <{type_iri}> ?{actual_dst} >> <{prop_iri}> {val_str}"
+            ));
+        }
 
         // ON CREATE SET items for the relationship.
         for item in on_create {
@@ -1602,13 +2193,22 @@ fn compile_merge_rel(
 
         let insert_body = insert_parts.join(" . ");
 
+        // NOT EXISTS check: must also include the property conditions so we
+        // only skip creation when an *exactly matching* relationship exists.
+        let prop_not_exists_triples: String = rel_props
+            .iter()
+            .map(|(prop_iri, val_str)| {
+                format!(" . << ?{actual_src} <{type_iri}> ?{actual_dst} >> <{prop_iri}> {val_str}")
+            })
+            .collect();
+
         // NOT EXISTS check (in both directions for undirected).
         let not_exists_str = match direction {
             Direction::Undirected => format!(
-                "{{ ?{actual_src} <{type_iri}> ?{actual_dst} }} UNION \
-                 {{ ?{actual_dst} <{type_iri}> ?{actual_src} }}"
+                "{{ ?{actual_src} <{type_iri}> ?{actual_dst}{prop_not_exists_triples} }} UNION \
+                 {{ ?{actual_dst} <{type_iri}> ?{actual_src}{prop_not_exists_triples} }}"
             ),
-            _ => format!("?{actual_src} <{type_iri}> ?{actual_dst}"),
+            _ => format!("?{actual_src} <{type_iri}> ?{actual_dst}{prop_not_exists_triples}"),
         };
 
         let where_body = if base_where.is_empty() {

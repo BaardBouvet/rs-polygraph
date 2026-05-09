@@ -182,6 +182,9 @@ pub enum Literal {
     /// Used to represent temporal values (date, datetime, duration, etc.) that
     /// were constant-folded during AST→LQA lowering.
     TypedLiteral(std::string::String, std::string::String),
+    /// An RDF IRI used as a ground term in VALUES bindings.
+    /// Serialized as `<iri>` in SPARQL.
+    Iri(std::string::String),
 }
 
 impl Literal {
@@ -194,6 +197,7 @@ impl Literal {
             Literal::Boolean(_) => Type::Boolean,
             Literal::Null => Type::Null,
             Literal::TypedLiteral(_, _) => Type::String, // temporal → closest Cypher type
+            Literal::Iri(_) => Type::String, // IRI → treat as string type
         }
     }
 }

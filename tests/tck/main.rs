@@ -290,6 +290,30 @@ fn make_evaluator() -> SparqlEvaluator {
                 ))
             },
         )
+        .with_custom_function(
+            oxigraph::model::NamedNode::new_unchecked("urn:polygraph:split"),
+            |args| {
+                use oxigraph::model::Term as OxTerm;
+                let s = match args.first()? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                let delim = match args.get(1)? {
+                    OxTerm::Literal(l) => l.value().to_owned(),
+                    _ => return None,
+                };
+                // Split the string and serialize as a Cypher list of quoted strings.
+                let parts: Vec<String> = if delim.is_empty() {
+                    s.chars().map(|c| format!("'{c}'")).collect()
+                } else {
+                    s.split(&*delim).map(|p| format!("'{p}'")).collect()
+                };
+                let serialized = format!("[{}]", parts.join(", "));
+                Some(OxTerm::Literal(
+                    oxigraph::model::Literal::new_simple_literal(serialized),
+                ))
+            },
+        )
 }
 
 /// Per-scenario shared state.
@@ -2171,6 +2195,14 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
     let mut triples: Vec<String> = Vec::new();
     let mut counter: usize = 0;
     let mut node_map: HashMap<String, String> = HashMap::new();
+    // Persistent node map for nodes created before loops (not cleared per iteration).
+    let mut persistent_node_map: HashMap<String, String> = HashMap::new();
+    // Accumulates all IRIs created for each variable across loop iterations.
+    let mut loop_accumulated: HashMap<String, Vec<String>> = HashMap::new();
+    // Named lists: variable name → ordered list of node IRIs (for chain creation patterns).
+    let mut named_lists: HashMap<String, Vec<String>> = HashMap::new();
+    // Named variable aliases for list-indexed elements (e.g., nodeList[i] AS n1).
+    let mut list_index_aliases: HashMap<String, (String, Expression)> = HashMap::new(); // alias → (list_name, index_expr)
 
     // Track UNWIND variable and values for loop expansion in CREATE setup.
     // A stack supports nested UNWINDs: subsequent CREATEs iterate over the
@@ -2181,25 +2213,50 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
         match clause {
             Clause::Unwind(u) => {
                 // Expand UNWIND range(start, end) AS var or UNWIND [v1, v2, ...] AS var.
+                // Also handle UNWIND range(start, size(listVar) - 1, step) AS var.
                 match &u.expression {
                     Expression::FunctionCall { name, args, .. }
                         if name.eq_ignore_ascii_case("range") && args.len() >= 2 =>
                     {
-                        if let (
-                            Expression::Literal(Literal::Integer(start)),
-                            Expression::Literal(Literal::Integer(end)),
-                        ) = (&args[0], &args[1])
-                        {
-                            let step = if let Some(Expression::Literal(Literal::Integer(s))) =
-                                args.get(2)
-                            {
-                                *s
+                        // Try to evaluate start and end as integers (possibly using
+                        // size(namedList) - constant arithmetic).
+                        let eval_int = |expr: &Expression| -> Option<i64> {
+                            match expr {
+                                Expression::Literal(Literal::Integer(n)) => Some(*n),
+                                Expression::Subtract(a, b) => {
+                                    let av = match a.as_ref() {
+                                        Expression::FunctionCall { name: fn_name, args: fn_args, .. }
+                                            if fn_name.eq_ignore_ascii_case("size")
+                                                && fn_args.len() == 1 =>
+                                        {
+                                            if let Expression::Variable(list_name) = &fn_args[0] {
+                                                named_lists.get(list_name.as_str()).map(|l| l.len() as i64)
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        Expression::Literal(Literal::Integer(n)) => Some(*n),
+                                        _ => None,
+                                    }?;
+                                    let bv = match b.as_ref() {
+                                        Expression::Literal(Literal::Integer(n)) => Some(*n),
+                                        _ => None,
+                                    }?;
+                                    Some(av - bv)
+                                }
+                                _ => None,
+                            }
+                        };
+
+                        if let (Some(start), Some(end)) = (eval_int(&args[0]), eval_int(&args[1])) {
+                            let step = if let Some(s_expr) = args.get(2) {
+                                eval_int(s_expr).unwrap_or(1)
                             } else {
                                 1
                             };
                             let mut vals = Vec::new();
-                            let mut i = *start;
-                            while (step > 0 && i <= *end) || (step < 0 && i >= *end) {
+                            let mut i = start;
+                            while (step > 0 && i <= end) || (step < 0 && i >= end) {
                                 vals.push(Expression::Literal(Literal::Integer(i)));
                                 i += step;
                             }
@@ -2212,18 +2269,102 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                     _ => {}
                 }
             }
+            Clause::With(w) => {
+                // Handle WITH clauses that construct named lists for chain creation.
+                // Specifically: WITH x, [listVar][i] AS alias or [a] + collect(n) + [b] AS listName
+                use polygraph::ast::cypher::ReturnItems;
+                if let ReturnItems::Explicit(items) = &w.items {
+                    for item in items {
+                        if let Some(alias) = &item.alias {
+                            // Detect [a] + collect(n) + [b] AS nodeList pattern.
+                            // This constructs a list combining singleton nodes with collected nodes.
+                            if let Some(combined) =
+                                try_extract_combined_list(&item.expression, &persistent_node_map, &loop_accumulated)
+                            {
+                                named_lists.insert(alias.clone(), combined);
+                                continue;
+                            }
+                            // Detect nodeList[i] AS n1 pattern (list indexing).
+                            if let Expression::Subscript(list_expr, idx_expr) = &item.expression {
+                                if let Expression::Variable(list_name) = list_expr.as_ref() {
+                                    if named_lists.contains_key(list_name.as_str()) {
+                                        list_index_aliases.insert(
+                                            alias.clone(),
+                                            (list_name.clone(), *idx_expr.clone()),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Clause::Create(c) => {
-                // Compute total Cartesian product size across all stacked UNWINDs.
+                // Check if we're in a list-index-alias mode (chain creation).
+                // If any patterns reference aliases from list_index_aliases, emit chain edges.
+                let patterns_use_list_aliases = c.pattern.0.iter().any(|pat| {
+                    pat.elements.iter().any(|elem| {
+                        matches!(elem, PatternElement::Node(n) if n.variable.as_deref().map(|v| list_index_aliases.contains_key(v)).unwrap_or(false))
+                    })
+                });
+
+                if patterns_use_list_aliases {
+                    // Chain creation: emit edges between consecutive list elements.
+                    // Find the loop variable from unwind_stack (should be a single index var).
+                    let loop_vals: Vec<i64> = if let Some((_, vals)) = unwind_stack.first() {
+                        vals.iter().filter_map(|v| {
+                            if let Expression::Literal(Literal::Integer(n)) = v { Some(*n) } else { None }
+                        }).collect()
+                    } else {
+                        vec![0i64]
+                    };
+
+                    for idx_val in &loop_vals {
+                        // Resolve list-index aliases for this iteration.
+                        let mut iter_node_map = persistent_node_map.clone();
+                        for (alias, (list_name, idx_expr)) in &list_index_aliases {
+                            let idx = eval_index_expr(idx_expr, *idx_val);
+                            if let Some(list) = named_lists.get(list_name) {
+                                if idx < list.len() {
+                                    iter_node_map.insert(alias.clone(), list[idx].clone());
+                                }
+                            }
+                        }
+                        // Emit patterns using the resolved node_map for this iteration.
+                        let bindings: HashMap<String, &Expression> = HashMap::new();
+                        let node_literal_props: HashMap<String, HashMap<String, Expression>> = HashMap::new();
+                        let mut iter_triples: Vec<String> = Vec::new();
+                        for pattern in &c.pattern.0 {
+                            emit_create_pattern_with_bindings(
+                                pattern,
+                                &mut iter_triples,
+                                &mut iter_node_map,
+                                &mut counter,
+                                &bindings,
+                                &node_literal_props,
+                            );
+                        }
+                        triples.extend(iter_triples);
+                    }
+                    unwind_stack.clear();
+                    list_index_aliases.clear();
+                    continue;
+                }
+
+                // Normal CREATE: Compute total Cartesian product size across all stacked UNWINDs.
                 let loop_count: usize = if unwind_stack.is_empty() {
                     1
                 } else {
                     unwind_stack.iter().map(|(_, v)| v.len()).product()
                 };
+                // Reset per-loop accumulator for variables created in this batch.
+                let mut new_loop_accumulated: HashMap<String, Vec<String>> = HashMap::new();
+
                 for iter in 0..loop_count {
-                    // Reset the named-variable map for each loop iteration so
-                    // each iteration creates fresh nodes.
+                    // For loop iterations, use a fresh node_map per iteration but preserve
+                    // nodes created before the loop (in persistent_node_map).
                     if loop_count > 1 {
-                        node_map.clear();
+                        node_map = persistent_node_map.clone();
                     }
                     // Build bindings for the current Cartesian iteration.
                     let mut bindings: HashMap<String, &Expression> = HashMap::new();
@@ -2253,6 +2394,8 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                             }
                         }
                     }
+                    let prev_node_map_keys: std::collections::HashSet<String> =
+                        node_map.keys().cloned().collect();
                     for pattern in &c.pattern.0 {
                         emit_create_pattern_with_bindings(
                             pattern,
@@ -2263,8 +2406,23 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                             &node_literal_props,
                         );
                     }
+                    // Track newly created node IRIs (variables added in this iteration).
+                    for (var, iri) in &node_map {
+                        if !prev_node_map_keys.contains(var.as_str()) {
+                            new_loop_accumulated.entry(var.clone()).or_default().push(iri.clone());
+                        }
+                    }
                 }
-                // Reset loop state after each CREATE.
+                // After the loop: merge accumulated IRIs into loop_accumulated,
+                // update persistent_node_map with any non-loop vars, and clear stack.
+                if loop_count > 1 {
+                    loop_accumulated.extend(new_loop_accumulated);
+                } else {
+                    // No loop: these are persistent nodes.
+                    for (var, iri) in &node_map {
+                        persistent_node_map.insert(var.clone(), iri.clone());
+                    }
+                }
                 unwind_stack.clear();
             }
             _ => {}
@@ -2274,7 +2432,82 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
     if triples.is_empty() {
         return Ok("INSERT DATA {}".to_owned());
     }
+
     Ok(format!("INSERT DATA {{\n  {}\n}}", triples.join("\n  ")))
+}
+
+/// Try to extract a combined node IRI list from an expression like `[a] + collect(n) + [b]`.
+/// Returns `Some(Vec<iri_string>)` if the pattern is recognized, `None` otherwise.
+/// Evaluate an index expression (e.g. `i`, `i+1`) using the current loop variable value.
+/// `loop_val` is the current value of the unwind loop variable.
+fn eval_index_expr(expr: &Expression, loop_val: i64) -> usize {
+    use polygraph::ast::cypher::Literal;
+    match expr {
+        Expression::Variable(_) => loop_val as usize,
+        Expression::Literal(Literal::Integer(n)) => *n as usize,
+        Expression::Add(a, b) => {
+            let av = eval_index_expr(a, loop_val) as i64;
+            let bv = eval_index_expr(b, loop_val) as i64;
+            (av + bv).max(0) as usize
+        }
+        Expression::Subtract(a, b) => {
+            let av = eval_index_expr(a, loop_val) as i64;
+            let bv = eval_index_expr(b, loop_val) as i64;
+            (av - bv).max(0) as usize
+        }
+        _ => loop_val as usize, // fallback: treat as loop var
+    }
+}
+
+fn try_extract_combined_list(
+    expr: &Expression,
+    persistent_map: &HashMap<String, String>,
+    loop_accumulated: &HashMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    // Detect: [singleton_a] + collect(var) + [singleton_b]
+    // This is represented as Add(Add([a], FunctionCall(collect, [var])), [b])
+    // or similar nested Add expressions.
+    match expr {
+        Expression::Add(left, right) => {
+            let left_list = try_extract_combined_list(left, persistent_map, loop_accumulated)?;
+            let right_list = try_extract_combined_list(right, persistent_map, loop_accumulated)?;
+            let mut combined = left_list;
+            combined.extend(right_list);
+            Some(combined)
+        }
+        Expression::List(items) => {
+            // Singleton list [var] → look up var in persistent_map.
+            if items.len() == 1 {
+                if let Expression::Variable(var) = &items[0] {
+                    if let Some(iri) = persistent_map.get(var.as_str()) {
+                        return Some(vec![iri.clone()]);
+                    }
+                }
+            }
+            None
+        }
+        Expression::FunctionCall { name, args, .. }
+            if name.eq_ignore_ascii_case("collect") && args.len() == 1 =>
+        {
+            // collect(var) → return all IRIs accumulated for `var` across loop iterations.
+            if let Expression::Variable(var) = &args[0] {
+                if let Some(iris) = loop_accumulated.get(var.as_str()) {
+                    return Some(iris.clone());
+                }
+            }
+            None
+        }
+        Expression::Aggregate(polygraph::ast::cypher::AggregateExpr::Collect { expr, .. }) => {
+            // collect(var) as an aggregate expression.
+            if let Expression::Variable(var) = expr.as_ref() {
+                if let Some(iris) = loop_accumulated.get(var.as_str()) {
+                    return Some(iris.clone());
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Reset world state and initialise a fresh Oxigraph store.
@@ -2535,6 +2768,12 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
         {
             // Write clause: execute updates first, then translate as read-only SELECT.
             let updates = write_clauses_to_updates(cypher);
+            if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
+                eprintln!("[TCK write_clauses_to_updates] updates for {:?}:", &cypher[..50.min(cypher.len())]);
+                for (i, u) in updates.iter().enumerate() {
+                    eprintln!("  [{}] {}", i, &u[..200.min(u.len())]);
+                }
+            }
             let store = world
                 .store
                 .get_or_insert_with(|| OxStore(Store::new().unwrap()));
