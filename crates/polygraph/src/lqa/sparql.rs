@@ -9334,7 +9334,7 @@ fn extract_prop_eq_from_expr(
     iter_var: &str,
     base: &str,
 ) -> Option<(String, String)> {
-    use crate::lqa::expr::{CmpOp, Expr, Literal};
+    use crate::lqa::expr::{CmpOp, Expr};
 
     if let Expr::Comparison(CmpOp::Eq, lhs, rhs) = expr {
         // Pattern: iter_var.key = literal
