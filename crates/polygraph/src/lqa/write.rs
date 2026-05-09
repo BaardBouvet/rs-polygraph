@@ -1562,6 +1562,17 @@ fn compile_set_items(
                          WHERE {{ {where_with_old} . {bind_clause} . \
                                   FILTER(BOUND({new_var})) }}"
                     ));
+                } else if matches!(value, Expr::Literal(Literal::Null)) {
+                    // SET n.prop = null → remove the property triple entirely.
+                    // In Cypher, assigning null to a property deletes it.
+                    let where_clause = if base_where.is_empty() {
+                        format!("{n_var} <{base}__node> <{base}__node> . OPTIONAL {{ {n_var} <{prop_iri}> {old_var} }}")
+                    } else {
+                        format!("{base_where} . OPTIONAL {{ {n_var} <{prop_iri}> {old_var} }}")
+                    };
+                    out.push(format!(
+                        "DELETE {{ {n_var} <{prop_iri}> {old_var} }} WHERE {{ {where_clause} }}"
+                    ));
                 } else {
                     // Expression not supported; fall back.
                     return Err(write_unsupported!("write_set_complex_expr"));
