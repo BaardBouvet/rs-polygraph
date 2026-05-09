@@ -799,3 +799,4 @@ fn expr_has_real_aggregate(expr: &ast::cypher::Expression) -> bool {
         _ => false,
     }
 }
+

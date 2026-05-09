@@ -1991,10 +1991,8 @@ impl Compiler {
                         if range.is_none() && !matches!(direction, Direction::Undirected) {
                             let sparql_pair_opt: Option<(Variable, Variable)> = match direction {
                                 Direction::Outgoing => {
-                                    if let (
-                                        TermPattern::Variable(sv),
-                                        TermPattern::Variable(ov),
-                                    ) = (&from_tp, &to_tp)
+                                    if let (TermPattern::Variable(sv), TermPattern::Variable(ov)) =
+                                        (&from_tp, &to_tp)
                                     {
                                         Some((sv.clone(), ov.clone()))
                                     } else {
@@ -2002,10 +2000,8 @@ impl Compiler {
                                     }
                                 }
                                 Direction::Incoming => {
-                                    if let (
-                                        TermPattern::Variable(sv),
-                                        TermPattern::Variable(ov),
-                                    ) = (&to_tp, &from_tp)
+                                    if let (TermPattern::Variable(sv), TermPattern::Variable(ov)) =
+                                        (&to_tp, &from_tp)
                                     {
                                         Some((sv.clone(), ov.clone()))
                                     } else {
@@ -2015,9 +2011,11 @@ impl Compiler {
                                 _ => None,
                             };
                             if let Some((s, o)) = sparql_pair_opt {
-                                self.path_anon_pred_vars
-                                    .entry(pvar.to_string())
-                                    .or_insert((pred_var.clone(), s, o));
+                                self.path_anon_pred_vars.entry(pvar.to_string()).or_insert((
+                                    pred_var.clone(),
+                                    s,
+                                    o,
+                                ));
                             }
                         }
                     }
@@ -5434,9 +5432,11 @@ impl Compiler {
                 // Subscript resolution: type(list[i]) where list is in scalar_list_exprs.
                 // e.g. `WITH [r, 1] AS list RETURN type(list[0])` → type(r)
                 if let Some(Expr::Subscript(list_base, idx)) = args.first() {
-                    if let Expr::Variable { name: list_name, .. } = list_base.as_ref() {
-                        if let Some(items) =
-                            self.scalar_list_exprs.get(list_name.as_str()).cloned()
+                    if let Expr::Variable {
+                        name: list_name, ..
+                    } = list_base.as_ref()
+                    {
+                        if let Some(items) = self.scalar_list_exprs.get(list_name.as_str()).cloned()
                         {
                             let idx_val = lqa_eval_int_expr(idx.as_ref()).or_else(|| {
                                 if let Expr::Variable { name, .. } = idx.as_ref() {
@@ -6093,18 +6093,20 @@ impl Compiler {
                         // scalar_list_exprs.  e.g. `WITH [a, 1] AS list RETURN
                         // labels(list[0])` → labels(a) where a is a scan_var.
                         if let Expr::Subscript(list_base, idx) = arg {
-                            if let Expr::Variable { name: list_name, .. } = list_base.as_ref() {
+                            if let Expr::Variable {
+                                name: list_name, ..
+                            } = list_base.as_ref()
+                            {
                                 if let Some(items) =
                                     self.scalar_list_exprs.get(list_name.as_str()).cloned()
                                 {
-                                    let idx_val =
-                                        lqa_eval_int_expr(idx.as_ref()).or_else(|| {
-                                            if let Expr::Variable { name, .. } = idx.as_ref() {
-                                                self.const_int_vars.get(name.as_str()).copied()
-                                            } else {
-                                                None
-                                            }
-                                        });
+                                    let idx_val = lqa_eval_int_expr(idx.as_ref()).or_else(|| {
+                                        if let Expr::Variable { name, .. } = idx.as_ref() {
+                                            self.const_int_vars.get(name.as_str()).copied()
+                                        } else {
+                                            None
+                                        }
+                                    });
                                     if let Some(idx_i) = idx_val {
                                         let len = items.len() as i64;
                                         let i = if idx_i < 0 { len + idx_i } else { idx_i };
@@ -6119,9 +6121,7 @@ impl Compiler {
                                                 ..
                                             } = resolved
                                             {
-                                                if !self
-                                                    .scan_vars
-                                                    .contains(resolved_name.as_str())
+                                                if !self.scan_vars.contains(resolved_name.as_str())
                                                     && !self
                                                         .edge_vars
                                                         .contains_key(resolved_name.as_str())
@@ -6132,13 +6132,10 @@ impl Compiler {
                                                     self.scan_vars.insert(resolved_name.clone());
                                                 }
                                             }
-                                            return self
-                                                .lower_function_call("labels", &[resolved]);
+                                            return self.lower_function_call("labels", &[resolved]);
                                         }
                                         // Out of bounds → null; labels(null) → null
-                                        return Ok(SparExpr::Variable(
-                                            self.fresh("_labels_null"),
-                                        ));
+                                        return Ok(SparExpr::Variable(self.fresh("_labels_null")));
                                     }
                                 }
                             }
@@ -6146,8 +6143,7 @@ impl Compiler {
                         Err(PolygraphError::Unsupported {
                             construct: "labels()".into(),
                             spec_ref: "openCypher 9 §6.3.5".into(),
-                            reason: "labels() on non-variable argument requires legacy path"
-                                .into(),
+                            reason: "labels() on non-variable argument requires legacy path".into(),
                         })
                     }
                 }
@@ -6573,18 +6569,14 @@ impl Compiler {
         if prop == "epochSeconds" || prop == "epochMillis" {
             // Helper closures for SPARQL string functions.
             let slit = |s: &str| SE::Literal(SparLit::new_simple_literal(s.to_owned()));
-            let contains_s = |s: SE, sub: &str| {
-                SE::FunctionCall(Function::Contains, vec![s, slit(sub)])
-            };
-            let strafter_s = |s: SE, delim: &str| {
-                SE::FunctionCall(Function::StrAfter, vec![s, slit(delim)])
-            };
-            let strbefore_s = |s: SE, delim: &str| {
-                SE::FunctionCall(Function::StrBefore, vec![s, slit(delim)])
-            };
-            let strends_s = |s: SE, end: &str| {
-                SE::FunctionCall(Function::StrEnds, vec![s, slit(end)])
-            };
+            let contains_s =
+                |s: SE, sub: &str| SE::FunctionCall(Function::Contains, vec![s, slit(sub)]);
+            let strafter_s =
+                |s: SE, delim: &str| SE::FunctionCall(Function::StrAfter, vec![s, slit(delim)]);
+            let strbefore_s =
+                |s: SE, delim: &str| SE::FunctionCall(Function::StrBefore, vec![s, slit(delim)]);
+            let strends_s =
+                |s: SE, end: &str| SE::FunctionCall(Function::StrEnds, vec![s, slit(end)]);
             let substr3 = |s: SE, start: i64, len: i64| {
                 SE::FunctionCall(Function::SubStr, vec![s, dim!(start), dim!(len)])
             };
@@ -6619,18 +6611,9 @@ impl Compiler {
                     Box::new(v_t_str.clone()),
                 )
             );
-            let v_ends_z = bind!(
-                "endz",
-                strends_s(v_base_t.clone(), "Z")
-            );
-            let v_has_plus = bind!(
-                "hpls",
-                contains_s(v_base_t.clone(), "+")
-            );
-            let v_has_minus = bind!(
-                "hmin",
-                contains_s(v_base_t.clone(), "-")
-            );
+            let v_ends_z = bind!("endz", strends_s(v_base_t.clone(), "Z"));
+            let v_has_plus = bind!("hpls", contains_s(v_base_t.clone(), "+"));
+            let v_has_minus = bind!("hmin", contains_s(v_base_t.clone(), "-"));
             // offset_abs: the "HH:MM" part after +/-
             let v_offset_abs = bind!(
                 "ofabs",
@@ -6677,10 +6660,7 @@ impl Compiler {
                 sub!(
                     add!(
                         add!(
-                            add!(
-                                mul!(v_epoch_d, ddm!("86400")),
-                                mul!(v_H, ddm!("3600"))
-                            ),
+                            add!(mul!(v_epoch_d, ddm!("86400")), mul!(v_H, ddm!("3600"))),
                             mul!(v_Mi, ddm!("60"))
                         ),
                         v_S
@@ -6707,10 +6687,7 @@ impl Compiler {
             let v_frac9 = bind!(
                 "fr9",
                 substr3(
-                    SE::FunctionCall(
-                        Function::Concat,
-                        vec![v_frac_raw, slit("000000000")],
-                    ),
+                    SE::FunctionCall(Function::Concat, vec![v_frac_raw, slit("000000000")],),
                     1,
                     9,
                 )
@@ -7424,8 +7401,9 @@ fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr>
         |s: SparExpr, sub: &str| SparExpr::FunctionCall(Function::Contains, vec![s, slit(sub)]);
     let strafter_f =
         |s: SparExpr, delim: &str| SparExpr::FunctionCall(Function::StrAfter, vec![s, slit(delim)]);
-    let strbefore_f =
-        |s: SparExpr, delim: &str| SparExpr::FunctionCall(Function::StrBefore, vec![s, slit(delim)]);
+    let strbefore_f = |s: SparExpr, delim: &str| {
+        SparExpr::FunctionCall(Function::StrBefore, vec![s, slit(delim)])
+    };
     let strends_f =
         |s: SparExpr, end: &str| SparExpr::FunctionCall(Function::StrEnds, vec![s, slit(end)]);
     let _floor_f = |e: SparExpr| SparExpr::FunctionCall(Function::Floor, vec![e]);
@@ -7625,26 +7603,21 @@ fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr>
         // intentionally omitted from this arm — they are already handled correctly by the
         // datetime substring-based arms above, which happen to produce the right result for
         // duration values too (since duration time parts use the same fractional format).
-        "years" | "months" | "quarters" | "weeks" | "days"
-        | "hours" | "minutes" | "seconds" | "milliseconds" | "microseconds" | "nanoseconds"
-        | "quartersOfYear" | "monthsOfQuarter" | "monthsOfYear" | "daysOfWeek"
-        | "minutesOfHour" | "secondsOfMinute" => {
+        "years" | "months" | "quarters" | "weeks" | "days" | "hours" | "minutes" | "seconds"
+        | "milliseconds" | "microseconds" | "nanoseconds" | "quartersOfYear"
+        | "monthsOfQuarter" | "monthsOfYear" | "daysOfWeek" | "minutesOfHour"
+        | "secondsOfMinute" => {
             // Helper closures that build fresh sub-expressions from str_e.
             // Called lazily so only the components needed for a given arm are built.
-            let dur_add =
-                |a: SparExpr, b: SparExpr| SparExpr::Add(Box::new(a), Box::new(b));
-            let dur_mul =
-                |a: SparExpr, b: SparExpr| SparExpr::Multiply(Box::new(a), Box::new(b));
-            let dur_dec = |e: SparExpr| {
-                SparExpr::FunctionCall(Function::Custom(xsd_dec.clone()), vec![e])
-            };
+            let dur_add = |a: SparExpr, b: SparExpr| SparExpr::Add(Box::new(a), Box::new(b));
+            let dur_mul = |a: SparExpr, b: SparExpr| SparExpr::Multiply(Box::new(a), Box::new(b));
+            let dur_dec =
+                |e: SparExpr| SparExpr::FunctionCall(Function::Custom(xsd_dec.clone()), vec![e]);
             let dur_floor = |e: SparExpr| SparExpr::FunctionCall(Function::Floor, vec![e]);
             // integer division: INT(FLOOR(DEC(a) / DEC_LIT(b)))
             let dur_idiv = |a: SparExpr, b: i64| {
-                let b_dec = SparExpr::Literal(SparLit::new_typed_literal(
-                    b.to_string(),
-                    xsd_dec.clone(),
-                ));
+                let b_dec =
+                    SparExpr::Literal(SparLit::new_typed_literal(b.to_string(), xsd_dec.clone()));
                 int_cast(dur_floor(SparExpr::Divide(
                     Box::new(dur_dec(a)),
                     Box::new(b_dec),
@@ -7791,18 +7764,14 @@ fn lqa_temporal_component_fn(component: &str, arg: SparExpr) -> Option<SparExpr>
                     Box::new(slit("")),
                 );
                 int_cast(substr2(
-                    SparExpr::FunctionCall(
-                        Function::Concat,
-                        vec![frac_raw, slit("000000000")],
-                    ),
+                    SparExpr::FunctionCall(Function::Concat, vec![frac_raw, slit("000000000")]),
                     1,
                     9,
                 ))
             };
 
             // total_months = y_f * 12 + mo_f
-            let mk_total_months =
-                || dur_add(dur_mul(mk_y_f(), dim(12)), mk_mo_f());
+            let mk_total_months = || dur_add(dur_mul(mk_y_f(), dim(12)), mk_mo_f());
             // total_seconds = h_f * 3600 + mi_f * 60 + s_int_f
             // NOTE: We deliberately avoid (h_f*60 + mi_f) * 60 + s_int_f because
             // spargebra's Display for Multiply does NOT add parentheses, so
@@ -8542,9 +8511,7 @@ fn parse_one_cypher_value(s: &str) -> Result<(CypherRtVal, usize), PolygraphErro
     }
 
     // Number: read until ',', ']', or end of string.
-    let end = s
-        .find([',', ']'])
-        .unwrap_or(s.len());
+    let end = s.find([',', ']']).unwrap_or(s.len());
     let num_str = s[..end].trim();
 
     if let Ok(n) = num_str.parse::<i64>() {
@@ -8787,10 +8754,7 @@ fn try_list_comp_projection_continuation(
                 // Only handle list source = Property(Variable, key).
                 match list.as_ref() {
                     Expr::Property(inner_expr, _key)
-                        if matches!(
-                            inner_expr.as_ref(),
-                            Expr::Variable { .. }
-                        ) =>
+                        if matches!(inner_expr.as_ref(), Expr::Variable { .. }) =>
                     {
                         let src_alias = format!("__lc_src_{}", item.alias);
                         specs.push(LcSpec {
@@ -8853,8 +8817,10 @@ fn try_list_comp_projection_continuation(
 
             for row in &phase1_rows {
                 let mut tuple_vals: Vec<String> = Vec::new();
-                for ((src_alias, var_name), map_expr) in
-                    src_aliases.iter().zip(var_names.iter()).zip(map_exprs.iter())
+                for ((src_alias, var_name), map_expr) in src_aliases
+                    .iter()
+                    .zip(var_names.iter())
+                    .zip(map_exprs.iter())
                 {
                     // Look up the source property value in this row.
                     let list_str_opt = row
@@ -8960,9 +8926,7 @@ fn extract_prop_eq_from_expr(
 
     if let Expr::Comparison(CmpOp::Eq, lhs, rhs) = expr {
         // Pattern: iter_var.key = literal
-        if let (Expr::Property(base_expr, key), Expr::Literal(lit)) =
-            (lhs.as_ref(), rhs.as_ref())
-        {
+        if let (Expr::Property(base_expr, key), Expr::Literal(lit)) = (lhs.as_ref(), rhs.as_ref()) {
             if let Expr::Variable { name, .. } = base_expr.as_ref() {
                 if name == iter_var {
                     return Some((key.clone(), literal_to_sparql_value(lit, base)));
@@ -8970,9 +8934,7 @@ fn extract_prop_eq_from_expr(
             }
         }
         // Pattern: literal = iter_var.key
-        if let (Expr::Literal(lit), Expr::Property(base_expr, key)) =
-            (lhs.as_ref(), rhs.as_ref())
-        {
+        if let (Expr::Literal(lit), Expr::Property(base_expr, key)) = (lhs.as_ref(), rhs.as_ref()) {
             if let Expr::Variable { name, .. } = base_expr.as_ref() {
                 if name == iter_var {
                     return Some((key.clone(), literal_to_sparql_value(lit, base)));
@@ -9062,12 +9024,8 @@ fn build_varlen_union_branch(
                 ],
             }
         } else {
-            let type_iris: Vec<String> =
-                rel_types.iter().map(|t| format!("<{base}{t}>")).collect();
-            let values_block = format!(
-                "    VALUES ?{prefix}_p{i} {{ {} }}",
-                type_iris.join(" ")
-            );
+            let type_iris: Vec<String> = rel_types.iter().map(|t| format!("<{base}{t}>")).collect();
+            let values_block = format!("    VALUES ?{prefix}_p{i} {{ {} }}", type_iris.join(" "));
             let hop_line = match direction {
                 Direction::Outgoing => format!("    {prev} ?{prefix}_p{i} {next} ."),
                 Direction::Incoming => format!("    {next} ?{prefix}_p{i} {prev} ."),
@@ -9080,9 +9038,7 @@ fn build_varlen_union_branch(
         for p in hop_patterns {
             lines.push(p);
         }
-        lines.push(format!(
-            "    {next} <{node_sentinel}> <{node_sentinel}> ."
-        ));
+        lines.push(format!("    {next} <{node_sentinel}> <{node_sentinel}> ."));
     }
 
     // Build list BIND.
@@ -9163,7 +9119,11 @@ fn build_quantifier_result_bind(
     let elem_count: usize = if use_nodes {
         hop_count
     } else {
-        if hop_count <= 1 { 0 } else { hop_count - 1 }
+        if hop_count <= 1 {
+            0
+        } else {
+            hop_count - 1
+        }
     };
 
     let n = elem_count;
@@ -9217,9 +9177,7 @@ fn build_quantifier_result_bind(
             let start = if use_nodes { 1 } else { 1 };
             let end = if use_nodes { hop_count } else { hop_count - 1 };
             let exists_parts: Vec<String> = (start..=end)
-                .map(|i| {
-                    make_exists(i, matches!(quant_kind, QuantKind::All))
-                })
+                .map(|i| make_exists(i, matches!(quant_kind, QuantKind::All)))
                 .collect();
             let any_match = exists_parts.join(" || ");
             format!("    BIND(IF({any_match}, false, true) AS ?{result_alias})")
@@ -9228,9 +9186,7 @@ fn build_quantifier_result_bind(
             // any: true iff at least one element matches
             let start = if use_nodes { 1 } else { 1 };
             let end = if use_nodes { hop_count } else { hop_count - 1 };
-            let exists_parts: Vec<String> = (start..=end)
-                .map(|i| make_exists(i, false))
-                .collect();
+            let exists_parts: Vec<String> = (start..=end).map(|i| make_exists(i, false)).collect();
             let any_match = exists_parts.join(" || ");
             format!("    BIND(IF({any_match}, true, false) AS ?{result_alias})")
         }
@@ -9253,10 +9209,7 @@ fn build_list_concat_bind(alias: &str, items: &[String]) -> String {
         return format!("    BIND(\"[]\" AS ?{alias})");
     }
     if items.len() == 1 {
-        return format!(
-            "    BIND(CONCAT(\"[\", {}, \"]\") AS ?{alias})",
-            items[0]
-        );
+        return format!("    BIND(CONCAT(\"[\", {}, \"]\") AS ?{alias})", items[0]);
     }
     // Multiple items: "[", item0, ", ", item1, ..., "]"
     let mut parts: Vec<String> = vec!["\"[\"".to_string()];
@@ -9267,10 +9220,7 @@ fn build_list_concat_bind(alias: &str, items: &[String]) -> String {
         parts.push(item.clone());
     }
     parts.push("\"]\"".to_string());
-    format!(
-        "    BIND(CONCAT({}) AS ?{alias})",
-        parts.join(", ")
-    )
+    format!("    BIND(CONCAT({}) AS ?{alias})", parts.join(", "))
 }
 
 /// L2 emitter for `MATCH p = (:Label)-[*lower..upper]->(x)` followed by
@@ -9410,9 +9360,8 @@ fn try_varlen_path_quantifier_continuation(
     }
 
     let union_body = union_parts.join("\n  UNION\n  ");
-    let sparql = format!(
-        "SELECT DISTINCT ?{list_var_name} ?{result_alias} WHERE {{\n  {union_body}\n}}"
-    );
+    let sparql =
+        format!("SELECT DISTINCT ?{list_var_name} ?{result_alias} WHERE {{\n  {union_body}\n}}");
 
     if std::env::var("POLYGRAPH_DEBUG_L2").is_ok() {
         eprintln!("[L2-VARLEN] Generated SPARQL:\n{sparql}");
@@ -9465,14 +9414,22 @@ fn try_complex_listcomp_continuation(
 
     // ── 1. Outer Projection with at least one complex item ────────────────────
     let (outer_items, inner) = match op {
-        Op::Projection { items, inner, distinct: false } => (items.as_slice(), inner.as_ref()),
+        Op::Projection {
+            items,
+            inner,
+            distinct: false,
+        } => (items.as_slice(), inner.as_ref()),
         _ => return None,
     };
 
     // Must have at least one ListComprehension item whose projection contains
     // a PatternComprehension (the unhandleable part).
     let has_listcomp_over_patcomp = outer_items.iter().any(|item| {
-        if let Expr::ListComprehension { projection: Some(proj), .. } = &item.expr {
+        if let Expr::ListComprehension {
+            projection: Some(proj),
+            ..
+        } = &item.expr
+        {
             expr_contains_pattern_comp(proj)
         } else {
             false
@@ -9508,7 +9465,11 @@ fn try_complex_listcomp_continuation(
             };
 
             if row_count == 0 {
-                let var_list = out_vars_c.iter().map(|v| format!("?{v}")).collect::<Vec<_>>().join(" ");
+                let var_list = out_vars_c
+                    .iter()
+                    .map(|v| format!("?{v}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let sparql = format!("SELECT {var_list} WHERE {{ FILTER(false) }}");
                 return Ok(TranspileOutput::complete(sparql, schema));
             }
@@ -9517,7 +9478,10 @@ fn try_complex_listcomp_continuation(
                 let v = &out_vars_c[0];
                 (format!("?{v}"), format!("?{v}"), "UNDEF".to_string())
             } else {
-                let var_list = out_vars_c.iter().map(|v| format!("?{v}")).collect::<Vec<_>>();
+                let var_list = out_vars_c
+                    .iter()
+                    .map(|v| format!("?{v}"))
+                    .collect::<Vec<_>>();
                 let undef_vals = out_vars_c.iter().map(|_| "UNDEF").collect::<Vec<_>>();
                 (
                     var_list.join(" "),
@@ -9530,9 +9494,8 @@ fn try_complex_listcomp_continuation(
                 .take(row_count)
                 .collect::<Vec<_>>()
                 .join(" ");
-            let sparql = format!(
-                "SELECT {select_vars} WHERE {{ VALUES {values_header} {{ {rows_str} }} }}"
-            );
+            let sparql =
+                format!("SELECT {select_vars} WHERE {{ VALUES {values_header} {{ {rows_str} }} }}");
             Ok(TranspileOutput::complete(sparql, schema))
         }),
     };
@@ -9544,10 +9507,19 @@ fn try_complex_listcomp_continuation(
 fn expr_contains_pattern_comp(e: &Expr) -> bool {
     match e {
         Expr::PatternComprehension { .. } => true,
-        Expr::ListComprehension { list, predicate, projection, .. } => {
+        Expr::ListComprehension {
+            list,
+            predicate,
+            projection,
+            ..
+        } => {
             expr_contains_pattern_comp(list)
-                || predicate.as_ref().is_some_and(|p| expr_contains_pattern_comp(p))
-                || projection.as_ref().is_some_and(|p| expr_contains_pattern_comp(p))
+                || predicate
+                    .as_ref()
+                    .is_some_and(|p| expr_contains_pattern_comp(p))
+                || projection
+                    .as_ref()
+                    .is_some_and(|p| expr_contains_pattern_comp(p))
         }
         Expr::FunctionCall { args, .. } => args.iter().any(expr_contains_pattern_comp),
         Expr::Add(a, b)
@@ -9589,19 +9561,29 @@ fn try_pattern_comp_group_continuation(
 
     // ── 1. Outer RETURN Projection ────────────────────────────────────────────
     let (outer_items, after_return) = match op {
-        Op::Projection { items, inner, distinct: false } => (items.as_slice(), inner.as_ref()),
+        Op::Projection {
+            items,
+            inner,
+            distinct: false,
+        } => (items.as_slice(), inner.as_ref()),
         _ => return None,
     };
 
     // ── 2. WITH Projection ────────────────────────────────────────────────────
     let (with_items, after_with) = match after_return {
-        Op::Projection { items, inner, distinct: false } => (items.as_slice(), inner.as_ref()),
+        Op::Projection {
+            items,
+            inner,
+            distinct: false,
+        } => (items.as_slice(), inner.as_ref()),
         _ => return None,
     };
 
     // ── 3. GroupBy ────────────────────────────────────────────────────────────
     let (group_keys, group_inner) = match after_with {
-        Op::GroupBy { group_keys, inner, .. } => (group_keys.as_slice(), inner.as_ref()),
+        Op::GroupBy {
+            group_keys, inner, ..
+        } => (group_keys.as_slice(), inner.as_ref()),
         _ => return None,
     };
 
@@ -9680,7 +9662,11 @@ fn try_pattern_comp_group_continuation(
             };
 
             if row_count == 0 {
-                let var_list = out_vars_c.iter().map(|v| format!("?{v}")).collect::<Vec<_>>().join(" ");
+                let var_list = out_vars_c
+                    .iter()
+                    .map(|v| format!("?{v}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let sparql = format!("SELECT {var_list} WHERE {{ FILTER(false) }}");
                 return Ok(TranspileOutput::complete(sparql, schema));
             }
@@ -9689,7 +9675,10 @@ fn try_pattern_comp_group_continuation(
                 let v = &out_vars_c[0];
                 (format!("?{v}"), format!("?{v}"), "UNDEF".to_string())
             } else {
-                let var_list = out_vars_c.iter().map(|v| format!("?{v}")).collect::<Vec<_>>();
+                let var_list = out_vars_c
+                    .iter()
+                    .map(|v| format!("?{v}"))
+                    .collect::<Vec<_>>();
                 let undef_vals = out_vars_c.iter().map(|_| "UNDEF").collect::<Vec<_>>();
                 (
                     var_list.join(" "),
@@ -9702,9 +9691,8 @@ fn try_pattern_comp_group_continuation(
                 .take(row_count)
                 .collect::<Vec<_>>()
                 .join(" ");
-            let sparql = format!(
-                "SELECT {select_vars} WHERE {{ VALUES {values_header} {{ {rows_str} }} }}"
-            );
+            let sparql =
+                format!("SELECT {select_vars} WHERE {{ VALUES {values_header} {{ {rows_str} }} }}");
             Ok(TranspileOutput::complete(sparql, schema))
         }),
     };
@@ -9739,7 +9727,11 @@ fn try_global_collect_continuation(
 
     // ── Peel outer Projection(s) to find the GroupBy ──────────────────────────
     let (outer_items, after_outer) = match op {
-        Op::Projection { items, inner, distinct: false } => (items.as_slice(), inner.as_ref()),
+        Op::Projection {
+            items,
+            inner,
+            distinct: false,
+        } => (items.as_slice(), inner.as_ref()),
         _ => return None,
     };
 
@@ -9754,9 +9746,12 @@ fn try_global_collect_continuation(
 
     // ── GroupBy must have no group keys (global aggregate) ────────────────────
     let (group_keys, group_agg_items, group_inner) = match group_node {
-        Op::GroupBy { group_keys, agg_items, inner, .. } => {
-            (group_keys.as_slice(), agg_items.as_slice(), inner.as_ref())
-        }
+        Op::GroupBy {
+            group_keys,
+            agg_items,
+            inner,
+            ..
+        } => (group_keys.as_slice(), agg_items.as_slice(), inner.as_ref()),
         _ => return None,
     };
 
@@ -9767,7 +9762,13 @@ fn try_global_collect_continuation(
     // ── Must have a collect(Variable) agg item ────────────────────────────────
     use crate::lqa::expr::AggKind;
     let has_collect = group_agg_items.iter().any(|ai| {
-        matches!(&ai.expr, Expr::Aggregate { kind: AggKind::Collect, .. })
+        matches!(
+            &ai.expr,
+            Expr::Aggregate {
+                kind: AggKind::Collect,
+                ..
+            }
+        )
     });
     if !has_collect {
         return None;
@@ -9795,9 +9796,8 @@ fn try_global_collect_continuation(
         )
     };
 
-    let sparql = format!(
-        "SELECT {select_vars} WHERE {{ VALUES {values_header} {{ {undef_row} }} }}"
-    );
+    let sparql =
+        format!("SELECT {select_vars} WHERE {{ VALUES {values_header} {{ {undef_row} }} }}");
     let schema = ProjectionSchema {
         columns: out_vars_c.iter().map(|v| scalar_col(v.clone())).collect(),
         distinct: false,
@@ -9812,10 +9812,12 @@ fn try_global_collect_continuation(
 /// Returns the path variable name if found.
 fn find_expand_path_var(op: &Op) -> Option<&str> {
     match op {
-        Op::Expand { path_var: Some(pv), .. } => Some(pv.as_str()),
-        Op::Expand { inner, .. }
-        | Op::Selection { inner, .. }
-        | Op::Projection { inner, .. } => find_expand_path_var(inner),
+        Op::Expand {
+            path_var: Some(pv), ..
+        } => Some(pv.as_str()),
+        Op::Expand { inner, .. } | Op::Selection { inner, .. } | Op::Projection { inner, .. } => {
+            find_expand_path_var(inner)
+        }
         _ => None,
     }
 }
@@ -9859,7 +9861,11 @@ fn try_varlen_path_group_continuation(
 
     // ── 2. Outer RETURN Projection ────────────────────────────────────────────
     let (outer_items, after_return) = match current {
-        Op::Projection { items, inner, distinct: false } => (items.as_slice(), inner.as_ref()),
+        Op::Projection {
+            items,
+            inner,
+            distinct: false,
+        } => (items.as_slice(), inner.as_ref()),
         _ => return None,
     };
 
@@ -9868,9 +9874,11 @@ fn try_varlen_path_group_continuation(
     // Pattern B (ReturnOrderBy2[12]):         [RETURN Proj] -> GroupBy -> Expand
     let (opt_with_items, group_node): (Option<&[_]>, &Op) = match after_return {
         // If this Projection is directly followed by GroupBy, treat it as WITH.
-        Op::Projection { items: with_items, inner, distinct: false }
-            if matches!(inner.as_ref(), Op::GroupBy { .. }) =>
-        {
+        Op::Projection {
+            items: with_items,
+            inner,
+            distinct: false,
+        } if matches!(inner.as_ref(), Op::GroupBy { .. }) => {
             (Some(with_items.as_slice()), inner.as_ref())
         }
         // GroupBy directly after RETURN Projection (no WITH Projection).
@@ -9880,7 +9888,9 @@ fn try_varlen_path_group_continuation(
 
     // ── 4. GroupBy ────────────────────────────────────────────────────────────
     let (group_keys, group_inner) = match group_node {
-        Op::GroupBy { group_keys, inner, .. } => (group_keys.as_slice(), inner.as_ref()),
+        Op::GroupBy {
+            group_keys, inner, ..
+        } => (group_keys.as_slice(), inner.as_ref()),
         _ => return None,
     };
 
@@ -9901,7 +9911,10 @@ fn try_varlen_path_group_continuation(
     // ByLength: group_keys = [some_alias] where alias maps to length(path_var) in
     //           the WITH projection items (Pattern A) or outer RETURN items (Pattern B).
     #[derive(Clone, Copy)]
-    enum GroupMode { ByPath, ByLength }
+    enum GroupMode {
+        ByPath,
+        ByLength,
+    }
 
     let candidate_items = opt_with_items.unwrap_or(outer_items);
     let group_mode: GroupMode = if group_keys.len() == 1 && group_keys[0] == path_var {
@@ -9973,9 +9986,7 @@ fn try_varlen_path_group_continuation(
                     format!("    {dst} ?__p{i} {src} .")
                 }
                 crate::lqa::op::Direction::Undirected => {
-                    format!(
-                        "    {{ {src} ?__p{i} {dst} }} UNION {{ {dst} ?__p{i} {src} }}"
-                    )
+                    format!("    {{ {src} ?__p{i} {dst} }} UNION {{ {dst} ?__p{i} {src} }}")
                 }
             };
             lines.push(hop_triple);
@@ -9987,7 +9998,9 @@ fn try_varlen_path_group_continuation(
             }
 
             if i < hop - 1 {
-                lines.push(format!("    ?__mid{i} <{node_sentinel}> <{node_sentinel}> ."));
+                lines.push(format!(
+                    "    ?__mid{i} <{node_sentinel}> <{node_sentinel}> ."
+                ));
             }
         }
         lines.push(format!("    ?__to <{node_sentinel}> <{node_sentinel}> ."));
@@ -10008,11 +10021,18 @@ fn try_varlen_path_group_continuation(
     let phase1_col_names: Vec<String> = match group_mode {
         GroupMode::ByLength => vec!["__len".to_string()],
         GroupMode::ByPath => {
-            vec!["__from".to_string(), "__to".to_string(), "__len".to_string()]
+            vec![
+                "__from".to_string(),
+                "__to".to_string(),
+                "__len".to_string(),
+            ]
         }
     };
     let phase1_schema = ProjectionSchema {
-        columns: phase1_col_names.iter().map(|c| scalar_col(c.clone())).collect(),
+        columns: phase1_col_names
+            .iter()
+            .map(|c| scalar_col(c.clone()))
+            .collect(),
         distinct: true,
         base_iri: base.to_owned(),
         rdf_star: false,
@@ -10049,10 +10069,11 @@ fn try_varlen_path_group_continuation(
                 let v = &out_vars_c[0];
                 (format!("?{v}"), format!("?{v}"), "UNDEF".to_string())
             } else {
-                let var_list =
-                    out_vars_c.iter().map(|v| format!("?{v}")).collect::<Vec<_>>();
-                let undef_vals =
-                    out_vars_c.iter().map(|_| "UNDEF").collect::<Vec<_>>();
+                let var_list = out_vars_c
+                    .iter()
+                    .map(|v| format!("?{v}"))
+                    .collect::<Vec<_>>();
+                let undef_vals = out_vars_c.iter().map(|_| "UNDEF").collect::<Vec<_>>();
                 (
                     var_list.join(" "),
                     format!("({})", var_list.join(" ")),
@@ -10064,9 +10085,8 @@ fn try_varlen_path_group_continuation(
                 .take(row_count)
                 .collect::<Vec<_>>()
                 .join(" ");
-            let sparql = format!(
-                "SELECT {select_vars} WHERE {{ VALUES {values_header} {{ {rows_str} }} }}"
-            );
+            let sparql =
+                format!("SELECT {select_vars} WHERE {{ VALUES {values_header} {{ {rows_str} }} }}");
             Ok(TranspileOutput::complete(sparql, schema))
         }),
     };
@@ -10076,7 +10096,11 @@ fn try_varlen_path_group_continuation(
 
 /// Cypher type kind used to assign sort-rank for ORDER BY on mixed-type lists.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CypherVarKind { Node, Rel, Path }
+enum CypherVarKind {
+    Node,
+    Rel,
+    Path,
+}
 
 /// Walk the Op tree and record whether each variable is a Node, Rel, or Path.
 fn collect_cypher_var_kinds(op: &Op) -> std::collections::HashMap<String, CypherVarKind> {
@@ -10090,7 +10114,12 @@ fn cypher_var_kinds_rec(op: &Op, out: &mut std::collections::HashMap<String, Cyp
         Op::Scan { variable, .. } => {
             out.entry(variable.clone()).or_insert(CypherVarKind::Node);
         }
-        Op::Expand { rel_var, path_var, inner, .. } => {
+        Op::Expand {
+            rel_var,
+            path_var,
+            inner,
+            ..
+        } => {
             if let Some(rv) = rel_var {
                 out.insert(rv.clone(), CypherVarKind::Rel);
             }
@@ -10119,10 +10148,7 @@ fn cypher_var_kinds_rec(op: &Op, out: &mut std::collections::HashMap<String, Cyp
 ///   String(5) < Boolean(6) < Number(7) < NaN(8) < Null(9)
 ///
 /// Source: openCypher TCK ReturnOrderBy1 / WithOrderBy1 expected values.
-fn cypher_type_rank(
-    e: &Expr,
-    var_kinds: &std::collections::HashMap<String, CypherVarKind>,
-) -> u8 {
+fn cypher_type_rank(e: &Expr, var_kinds: &std::collections::HashMap<String, CypherVarKind>) -> u8 {
     use crate::lqa::expr::Literal;
     match e {
         Expr::Map(_) => 0,
@@ -10139,7 +10165,10 @@ fn cypher_type_rank(
         Expr::Div(a, b)
             if matches!(
                 (a.as_ref(), b.as_ref()),
-                (Expr::Literal(Literal::Float(_)), Expr::Literal(Literal::Float(_)))
+                (
+                    Expr::Literal(Literal::Float(_)),
+                    Expr::Literal(Literal::Float(_))
+                )
             ) =>
         {
             8 // 0.0/0.0 → NaN
@@ -10174,7 +10203,10 @@ fn list_elem_to_value(
         Expr::Div(a, b)
             if matches!(
                 (a.as_ref(), b.as_ref()),
-                (Expr::Literal(Literal::Float(_)), Expr::Literal(Literal::Float(_)))
+                (
+                    Expr::Literal(Literal::Float(_)),
+                    Expr::Literal(Literal::Float(_))
+                )
             ) =>
         {
             Some("NaN".to_string())
@@ -10188,9 +10220,9 @@ fn list_elem_to_value(
             // For node/rel/path variables, fall back to a placeholder if unbound;
             // exact value doesn't matter (any_complex=true in the test table).
             match var_kinds.get(name) {
-                Some(CypherVarKind::Node) | Some(CypherVarKind::Rel) | Some(CypherVarKind::Path) => {
-                    phase1_val.or(Some("__complex__".to_string()))
-                }
+                Some(CypherVarKind::Node)
+                | Some(CypherVarKind::Rel)
+                | Some(CypherVarKind::Path) => phase1_val.or(Some("__complex__".to_string())),
                 None => phase1_val,
             }
         }
@@ -10234,7 +10266,12 @@ fn try_unwind_mixed_list_continuation(
     let mut current = op;
 
     // Outer RETURN Projection
-    if let Op::Projection { items, inner, distinct: false } = current {
+    if let Op::Projection {
+        items,
+        inner,
+        distinct: false,
+    } = current
+    {
         if items.len() == 1 {
             outer_alias = Some(items[0].alias.clone());
         }
@@ -10267,7 +10304,11 @@ fn try_unwind_mixed_list_continuation(
 
     // ── 2. Check for Unwind with a List containing at least one Variable ─────
     let (unwind_inner, list_items, unwind_var) = match current {
-        Op::Unwind { inner, list: Expr::List(items), variable } => {
+        Op::Unwind {
+            inner,
+            list: Expr::List(items),
+            variable,
+        } => {
             if !items.iter().any(|e| matches!(e, Expr::Variable { .. })) {
                 return None; // all literals — handled by the normal SPARQL path
             }
@@ -10342,8 +10383,7 @@ fn try_unwind_mixed_list_continuation(
             };
 
             if values_entries.is_empty() {
-                let sparql =
-                    format!("SELECT ?{} WHERE {{ FILTER(false) }}", out_alias_c);
+                let sparql = format!("SELECT ?{} WHERE {{ FILTER(false) }}", out_alias_c);
                 return Ok(TranspileOutput::complete(sparql, schema));
             }
 
@@ -10402,9 +10442,7 @@ fn exprs_structurally_equal(a: &Expr, b: &Expr) -> bool {
         (Expr::Variable { name: n1, .. }, Expr::Variable { name: n2, .. }) => n1 == n2,
         (Expr::Literal(l1), Expr::Literal(l2)) => l1 == l2,
         (Expr::Comparison(op1, l1, r1), Expr::Comparison(op2, l2, r2)) => {
-            op1 == op2
-                && exprs_structurally_equal(l1, l2)
-                && exprs_structurally_equal(r1, r2)
+            op1 == op2 && exprs_structurally_equal(l1, l2) && exprs_structurally_equal(r1, r2)
         }
         (Expr::Add(l1, r1), Expr::Add(l2, r2))
         | (Expr::Sub(l1, r1), Expr::Sub(l2, r2))
@@ -10442,7 +10480,10 @@ fn exprs_structurally_equal(a: &Expr, b: &Expr) -> bool {
             n1.eq_ignore_ascii_case(n2)
                 && d1 == d2
                 && a1.len() == a2.len()
-                && a1.iter().zip(a2.iter()).all(|(x, y)| exprs_structurally_equal(x, y))
+                && a1
+                    .iter()
+                    .zip(a2.iter())
+                    .all(|(x, y)| exprs_structurally_equal(x, y))
         }
         _ => false,
     }
@@ -10570,7 +10611,9 @@ fn try_constant_invariant_continuation(
             match &item.expr {
                 Expr::Variable { name, .. } => (
                     name.clone(),
-                    item.display_name.clone().unwrap_or_else(|| item.alias.clone()),
+                    item.display_name
+                        .clone()
+                        .unwrap_or_else(|| item.alias.clone()),
                     inner.as_ref(),
                 ),
                 _ => return None,
@@ -10582,7 +10625,11 @@ fn try_constant_invariant_continuation(
     // Inner Projection must have a Quantifier item bound to result_var,
     // wrapping a GroupBy whose inner is a Selection.
     let (quant_kind, quant_var, quant_list_var, quant_pred, sel_pred) = match inner1 {
-        Op::Projection { items, inner: proj_inner, .. } => {
+        Op::Projection {
+            items,
+            inner: proj_inner,
+            ..
+        } => {
             let quant_item = items.iter().find(|it| it.alias == result_var)?;
             match &quant_item.expr {
                 Expr::Quantifier {
@@ -10597,7 +10644,10 @@ fn try_constant_invariant_continuation(
                     };
                     // GroupBy must wrap a Selection.
                     match proj_inner.as_ref() {
-                        Op::GroupBy { inner: groupby_inner, .. } => match groupby_inner.as_ref() {
+                        Op::GroupBy {
+                            inner: groupby_inner,
+                            ..
+                        } => match groupby_inner.as_ref() {
                             Op::Selection { predicate: sel, .. } => (
                                 kind.clone(),
                                 variable.clone(),
@@ -10640,12 +10690,7 @@ fn try_constant_invariant_continuation(
                 }
                 // Pattern 4: any(x IN list WHERE pred) with Or(single(pred), all(pred)) → true
                 pred => {
-                    if !selection_has_single_or_all(
-                        sel_pred,
-                        &quant_var,
-                        &quant_list_var,
-                        pred,
-                    ) {
+                    if !selection_has_single_or_all(sel_pred, &quant_var, &quant_list_var, pred) {
                         return None;
                     }
                     true

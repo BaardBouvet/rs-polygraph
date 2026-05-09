@@ -197,7 +197,8 @@ pub fn compile_write(op: &Op, base_iri: Option<&str>) -> Result<CompiledWrite, P
     let mut updates = Vec::new();
     compile_write_recursive(op, base, &mut counter, &mut bnode_map, &mut updates)?;
 
-    let use_lqa_select = bnode_map.values().any(|v| v.starts_with('<')) && op_has_create_before_merge(op);
+    let use_lqa_select =
+        bnode_map.values().any(|v| v.starts_with('<')) && op_has_create_before_merge(op);
     Ok(CompiledWrite {
         update_strings: updates,
         has_return,
@@ -252,7 +253,6 @@ fn op_contains_create(op: &Op) -> bool {
         _ => false,
     }
 }
-
 
 /// Walk `op` depth-first, collecting UPDATE strings into `out`.
 /// Stops recursing at non-write ops (read context).
@@ -405,12 +405,12 @@ pub(crate) fn strip_writes(op: &Op) -> Op {
                 })
                 .collect();
             // Combine scans with the inner via CartesianProduct.
-            node_scans.into_iter().fold(inner_stripped, |acc, scan| {
-                Op::CartesianProduct {
+            node_scans
+                .into_iter()
+                .fold(inner_stripped, |acc, scan| Op::CartesianProduct {
                     left: Box::new(acc),
                     right: Box::new(scan),
-                }
-            })
+                })
         }
         Op::Set { inner, .. }
         | Op::Delete { inner, .. }
@@ -419,7 +419,11 @@ pub(crate) fn strip_writes(op: &Op) -> Op {
         | Op::Call { inner, .. }
         | Op::Foreach { inner, .. } => strip_writes(inner),
         // Recurse into read operators that may have write operators in their subtree.
-        Op::GroupBy { inner, group_keys, agg_items } => Op::GroupBy {
+        Op::GroupBy {
+            inner,
+            group_keys,
+            agg_items,
+        } => Op::GroupBy {
             inner: Box::new(strip_writes(inner)),
             group_keys: group_keys.clone(),
             agg_items: agg_items.clone(),
@@ -428,7 +432,11 @@ pub(crate) fn strip_writes(op: &Op) -> Op {
             inner: Box::new(strip_writes(inner)),
             predicate: predicate.clone(),
         },
-        Op::Unwind { inner, variable, list } => Op::Unwind {
+        Op::Unwind {
+            inner,
+            variable,
+            list,
+        } => Op::Unwind {
             inner: Box::new(strip_writes(inner)),
             variable: variable.clone(),
             list: list.clone(),
@@ -479,7 +487,11 @@ pub(crate) fn strip_writes(op: &Op) -> Op {
             left: Box::new(strip_writes(left)),
             right: Box::new(strip_writes(right)),
         },
-        Op::LeftOuterJoin { left, right, condition } => Op::LeftOuterJoin {
+        Op::LeftOuterJoin {
+            left,
+            right,
+            condition,
+        } => Op::LeftOuterJoin {
             left: Box::new(strip_writes(left)),
             right: Box::new(strip_writes(right)),
             condition: condition.clone(),
@@ -500,7 +512,11 @@ pub(crate) fn strip_writes(op: &Op) -> Op {
 /// than scanning all nodes of the same label.
 pub(crate) fn strip_writes_with_bnodes(op: &Op, bnode_map: &HashMap<String, String>) -> Op {
     match op {
-        Op::Projection { inner, items, distinct } => Op::Projection {
+        Op::Projection {
+            inner,
+            items,
+            distinct,
+        } => Op::Projection {
             inner: Box::new(strip_writes_with_bnodes(inner, bnode_map)),
             items: items.clone(),
             distinct: *distinct,
@@ -517,9 +533,15 @@ pub(crate) fn strip_writes_with_bnodes(op: &Op, bnode_map: &HashMap<String, Stri
                     if let Some(iri) = bnode_map.get(var) {
                         if iri.starts_with('<') {
                             // Stable IRI — bind via Values.
-                            let iri_str = iri.trim_start_matches('<').trim_end_matches('>').to_owned();
+                            let iri_str =
+                                iri.trim_start_matches('<').trim_end_matches('>').to_owned();
                             return Some(Op::Values {
-                                bindings: vec![(var.to_owned(), crate::lqa::expr::Expr::Literal(crate::lqa::expr::Literal::Iri(iri_str)))],
+                                bindings: vec![(
+                                    var.to_owned(),
+                                    crate::lqa::expr::Expr::Literal(
+                                        crate::lqa::expr::Literal::Iri(iri_str),
+                                    ),
+                                )],
                             });
                         }
                     }
@@ -531,18 +553,22 @@ pub(crate) fn strip_writes_with_bnodes(op: &Op, bnode_map: &HashMap<String, Stri
                     })
                 })
                 .collect();
-            node_ops.into_iter().fold(inner_stripped, |acc, node_op| {
-                Op::CartesianProduct {
+            node_ops
+                .into_iter()
+                .fold(inner_stripped, |acc, node_op| Op::CartesianProduct {
                     left: Box::new(acc),
                     right: Box::new(node_op),
-                }
-            })
+                })
         }
         Op::Set { inner, .. }
         | Op::Delete { inner, .. }
         | Op::Remove { inner, .. }
         | Op::Merge { inner, .. } => strip_writes_with_bnodes(inner, bnode_map),
-        Op::GroupBy { inner, group_keys, agg_items } => Op::GroupBy {
+        Op::GroupBy {
+            inner,
+            group_keys,
+            agg_items,
+        } => Op::GroupBy {
             inner: Box::new(strip_writes_with_bnodes(inner, bnode_map)),
             group_keys: group_keys.clone(),
             agg_items: agg_items.clone(),
@@ -793,7 +819,11 @@ fn op_to_where_parts(op: &Op, base: &str) -> Result<Vec<String>, PolygraphError>
 
         // UNWIND of a literal list: generates a VALUES clause.
         // `UNWIND ['a,b', 'a,b'] AS str` → `VALUES (?str) { ('a,b') ('a,b') }`
-        Op::Unwind { inner, list, variable } => {
+        Op::Unwind {
+            inner,
+            list,
+            variable,
+        } => {
             let mut parts = op_to_where_parts(inner, base)?;
             match list {
                 Expr::List(items) => {
@@ -804,7 +834,10 @@ fn op_to_where_parts(op: &Op, base: &str) -> Result<Vec<String>, PolygraphError>
                     if !vals.is_empty() && vals.len() == items.len() {
                         parts.push(format!(
                             "VALUES (?{variable}) {{ {} }}",
-                            vals.iter().map(|v| format!("({v})")).collect::<Vec<_>>().join(" ")
+                            vals.iter()
+                                .map(|v| format!("({v})"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
                         ));
                     }
                     // If serialization fails for some items, skip the VALUES clause
@@ -971,7 +1004,6 @@ fn op_to_where_parts_with_bnodes(
     }
 }
 
-
 /// Returns `None` if the expression cannot be represented as SPARQL.
 /// Used to emit BIND clauses for non-variable WITH items in `op_to_where_parts`.
 fn try_expr_to_sparql_bind(expr: &Expr, _base: &str) -> Option<String> {
@@ -1112,6 +1144,13 @@ fn expr_to_filter_expr(expr: &Expr, base: &str, parts: &mut Vec<String>) -> Opti
 }
 
 // ── Literal helpers ───────────────────────────────────────────────────────────
+
+/// Returns `true` if any where part references the given property key IRI.
+/// Used to detect when a SET map key overlaps with MATCH filter conditions.
+fn map_key_in_where(key: &str, base: &str, where_parts: &[String]) -> bool {
+    let prop_iri = format!("<{base}{key}>");
+    where_parts.iter().any(|p| p.contains(&prop_iri))
+}
 
 /// Convert a [`Literal`] to its SPARQL serialisation.
 ///
@@ -1534,12 +1573,99 @@ fn compile_set_items(
                 }
             }
 
-            SetItem::MergeMap { .. } | SetItem::Replace { .. } => {
-                // SET n += {map} or SET n = {map}: fall back to legacy.
-                // Correct implementation requires running SELECT before updates (so that
-                // MATCH filters still hold for the RETURN clause after SET removes properties).
-                // The legacy translator handles these correctly via skip_writes mode.
-                return Err(write_unsupported!("write_set_replace_or_merge_map"));
+            SetItem::MergeMap { variable, map } => {
+                // SET n += {map}: upsert individual properties from the map.
+                match map {
+                    Expr::Map(pairs) => {
+                        let n_var = format!("?{variable}");
+                        for (key, value_expr) in pairs {
+                            let prop_iri = format!("{base}{key}");
+                            // If this property key appears in the WHERE conditions
+                            // (e.g. MATCH (n:X {name: 'A'}) with key="name"), the
+                            // DELETE or SELECT would break: after deleting/inserting
+                            // the old WHERE condition would no longer match.  Fall back.
+                            if map_key_in_where(key, base, where_parts) {
+                                return Err(write_unsupported!("write_set_replace_or_merge_map"));
+                            }
+                            let old_var = format!("?__{variable}_{key}_old");
+                            if matches!(value_expr, Expr::Literal(Literal::Null)) {
+                                // null → delete that property only
+                                let del_where = if base_where.is_empty() {
+                                    format!("{n_var} <{base}__node> <{base}__node> . \
+                                             {n_var} <{prop_iri}> {old_var}")
+                                } else {
+                                    format!("{base_where} . {n_var} <{prop_iri}> {old_var}")
+                                };
+                                out.push(format!(
+                                    "DELETE {{ {n_var} <{prop_iri}> {old_var} }} \
+                                     WHERE {{ {del_where} }}"
+                                ));
+                            } else if let Some(lit_str) = expr_to_sparql_lit(value_expr, base) {
+                                // literal value → upsert
+                                if base_where.is_empty() {
+                                    out.push(format!(
+                                        "DELETE {{ {n_var} <{prop_iri}> {old_var} }} \
+                                         INSERT {{ {n_var} <{prop_iri}> {lit_str} }} \
+                                         WHERE {{ {n_var} <{base}__node> <{base}__node> . \
+                                                  OPTIONAL {{ {n_var} <{prop_iri}> {old_var} }} }}"
+                                    ));
+                                } else {
+                                    out.push(format!(
+                                        "DELETE {{ {n_var} <{prop_iri}> {old_var} }} \
+                                         INSERT {{ {n_var} <{prop_iri}> {lit_str} }} \
+                                         WHERE {{ {base_where} . \
+                                                  OPTIONAL {{ {n_var} <{prop_iri}> {old_var} }} }}"
+                                    ));
+                                }
+                            } else {
+                                return Err(write_unsupported!("write_set_complex_map_expr"));
+                            }
+                        }
+                    }
+                    _ => return Err(write_unsupported!("write_set_replace_or_merge_map")),
+                }
+            }
+
+            SetItem::Replace { variable, value } => {
+                // SET n = {map}: delete all properties then insert map entries.
+                // If the WHERE has property conditions (literal values), the SELECT
+                // would fail after deletion.  Fall back for those cases.
+                if base_where.contains('"') || base_where.contains("FILTER") {
+                    return Err(write_unsupported!("write_set_replace_or_merge_map"));
+                }
+                match value {
+                    Expr::Map(pairs) => {
+                        let n_var = format!("?{variable}");
+                        let p_var = format!("?__{variable}_p");
+                        let v_var = format!("?__{variable}_v");
+                        // Combined DELETE+INSERT: delete all property triples and insert
+                        // the new ones in a single atomic SPARQL UPDATE statement.
+                        let insert_triples = pairs
+                            .iter()
+                            .filter(|(_, v)| !matches!(v, Expr::Literal(Literal::Null)))
+                            .filter_map(|(key, val_expr)| {
+                                let prop_iri = format!("{base}{key}");
+                                let lit_str = expr_to_sparql_lit(val_expr, base)?;
+                                Some(format!("{n_var} <{prop_iri}> {lit_str}"))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" . ");
+                        let opt_where = if base_where.is_empty() {
+                            format!("{n_var} <{base}__node> <{base}__node>")
+                        } else {
+                            base_where.clone()
+                        };
+                        out.push(format!(
+                            "DELETE {{ {n_var} {p_var} {v_var} }} \
+                             INSERT {{ {insert_triples} }} \
+                             WHERE {{ {opt_where} . \
+                                      OPTIONAL {{ {n_var} {p_var} {v_var} . \
+                                                  FILTER({p_var} != <{RDF_TYPE}> && \
+                                                         {p_var} != <{base}__node>) }} }}"
+                        ));
+                    }
+                    _ => return Err(write_unsupported!("write_set_replace_or_merge_map")),
+                }
             }
         }
     }
@@ -1717,7 +1843,12 @@ fn compile_delete_rel(
     base: &str,
     out: &mut Vec<String>,
 ) -> Result<(), PolygraphError> {
-    let RelVarBind { from, to, rel_types, direction } = bind;
+    let RelVarBind {
+        from,
+        to,
+        rel_types,
+        direction,
+    } = bind;
     let _ = rel_var; // kept for API symmetry / future use
 
     if rel_types.is_empty() {
@@ -1775,12 +1906,7 @@ fn compile_merge(
 
     match clause.pattern.as_ref() {
         // ── Node MERGE ───────────────────────────────────────────────────
-        Op::Selection { inner, .. }
-            if !matches!(
-                inner.as_ref(),
-                Op::Expand { .. }
-            ) =>
-        {
+        Op::Selection { inner, .. } if !matches!(inner.as_ref(), Op::Expand { .. }) => {
             // Selection wrapping a Scan — node with properties.
             compile_merge_node_scan(
                 inner,
@@ -2072,13 +2198,17 @@ fn compile_merge_rel_fully_bound(
         // Build INSERT triples.
         let mut insert_parts = vec![format!("{actual_src} <{type_iri}> {actual_dst}")];
         for (prop_iri, val) in rel_props {
-            insert_parts.push(format!("<< {actual_src} <{type_iri}> {actual_dst} >> <{prop_iri}> {val}"));
+            insert_parts.push(format!(
+                "<< {actual_src} <{type_iri}> {actual_dst} >> <{prop_iri}> {val}"
+            ));
         }
         for item in on_create {
             if let SetItem::Property { key, value, .. } = item {
                 let prop_iri = format!("{base}{key}");
                 if let Some(lit) = expr_to_sparql_lit(value, base) {
-                    insert_parts.push(format!("<< {actual_src} <{type_iri}> {actual_dst} >> <{prop_iri}> {lit}"));
+                    insert_parts.push(format!(
+                        "<< {actual_src} <{type_iri}> {actual_dst} >> <{prop_iri}> {lit}"
+                    ));
                 }
             }
         }
@@ -2087,7 +2217,9 @@ fn compile_merge_rel_fully_bound(
         // Build NOT EXISTS condition.
         let mut not_exists_parts = vec![format!("{actual_src} <{type_iri}> {actual_dst}")];
         for (prop_iri, val) in rel_props {
-            not_exists_parts.push(format!("<< {actual_src} <{type_iri}> {actual_dst} >> <{prop_iri}> {val}"));
+            not_exists_parts.push(format!(
+                "<< {actual_src} <{type_iri}> {actual_dst} >> <{prop_iri}> {val}"
+            ));
         }
         let not_exists = not_exists_parts.join(" . ");
 
@@ -2156,7 +2288,8 @@ fn compile_merge_rel_with_props(
         if let (Some(from_iri), Some(to_iri)) = (bnode_map.get(from), bnode_map.get(to)) {
             if from_iri.starts_with('<') && to_iri.starts_with('<') {
                 return compile_merge_rel_fully_bound(
-                    from_iri, to_iri, rel_types, &direction, on_match, on_create, rel_props, base, out,
+                    from_iri, to_iri, rel_types, &direction, on_match, on_create, rel_props, base,
+                    out,
                 );
             }
         }

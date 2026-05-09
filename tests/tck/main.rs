@@ -2225,12 +2225,17 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                                 Expression::Literal(Literal::Integer(n)) => Some(*n),
                                 Expression::Subtract(a, b) => {
                                     let av = match a.as_ref() {
-                                        Expression::FunctionCall { name: fn_name, args: fn_args, .. }
-                                            if fn_name.eq_ignore_ascii_case("size")
-                                                && fn_args.len() == 1 =>
+                                        Expression::FunctionCall {
+                                            name: fn_name,
+                                            args: fn_args,
+                                            ..
+                                        } if fn_name.eq_ignore_ascii_case("size")
+                                            && fn_args.len() == 1 =>
                                         {
                                             if let Expression::Variable(list_name) = &fn_args[0] {
-                                                named_lists.get(list_name.as_str()).map(|l| l.len() as i64)
+                                                named_lists
+                                                    .get(list_name.as_str())
+                                                    .map(|l| l.len() as i64)
                                             } else {
                                                 None
                                             }
@@ -2278,9 +2283,11 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                         if let Some(alias) = &item.alias {
                             // Detect [a] + collect(n) + [b] AS nodeList pattern.
                             // This constructs a list combining singleton nodes with collected nodes.
-                            if let Some(combined) =
-                                try_extract_combined_list(&item.expression, &persistent_node_map, &loop_accumulated)
-                            {
+                            if let Some(combined) = try_extract_combined_list(
+                                &item.expression,
+                                &persistent_node_map,
+                                &loop_accumulated,
+                            ) {
                                 named_lists.insert(alias.clone(), combined);
                                 continue;
                             }
@@ -2312,9 +2319,15 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                     // Chain creation: emit edges between consecutive list elements.
                     // Find the loop variable from unwind_stack (should be a single index var).
                     let loop_vals: Vec<i64> = if let Some((_, vals)) = unwind_stack.first() {
-                        vals.iter().filter_map(|v| {
-                            if let Expression::Literal(Literal::Integer(n)) = v { Some(*n) } else { None }
-                        }).collect()
+                        vals.iter()
+                            .filter_map(|v| {
+                                if let Expression::Literal(Literal::Integer(n)) = v {
+                                    Some(*n)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
                     } else {
                         vec![0i64]
                     };
@@ -2332,7 +2345,8 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                         }
                         // Emit patterns using the resolved node_map for this iteration.
                         let bindings: HashMap<String, &Expression> = HashMap::new();
-                        let node_literal_props: HashMap<String, HashMap<String, Expression>> = HashMap::new();
+                        let node_literal_props: HashMap<String, HashMap<String, Expression>> =
+                            HashMap::new();
                         let mut iter_triples: Vec<String> = Vec::new();
                         for pattern in &c.pattern.0 {
                             emit_create_pattern_with_bindings(
@@ -2409,7 +2423,10 @@ fn create_to_insert_data(cypher: &str) -> Result<String, String> {
                     // Track newly created node IRIs (variables added in this iteration).
                     for (var, iri) in &node_map {
                         if !prev_node_map_keys.contains(var.as_str()) {
-                            new_loop_accumulated.entry(var.clone()).or_default().push(iri.clone());
+                            new_loop_accumulated
+                                .entry(var.clone())
+                                .or_default()
+                                .push(iri.clone());
                         }
                     }
                 }
@@ -2769,7 +2786,10 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
             // Write clause: execute updates first, then translate as read-only SELECT.
             let updates = write_clauses_to_updates(cypher);
             if std::env::var("POLYGRAPH_TRACE_LEGACY").is_ok() {
-                eprintln!("[TCK write_clauses_to_updates] updates for {:?}:", &cypher[..50.min(cypher.len())]);
+                eprintln!(
+                    "[TCK write_clauses_to_updates] updates for {:?}:",
+                    &cypher[..50.min(cypher.len())]
+                );
                 for (i, u) in updates.iter().enumerate() {
                     eprintln!("  [{}] {}", i, &u[..200.min(u.len())]);
                 }
@@ -2898,7 +2918,10 @@ async fn executing_query_inner(world: &mut TckWorld, step: &Step) {
                     }
                     Some(sel) => match *sel {
                         polygraph::TranspileOutput::Complete { sparql, .. } => sparql,
-                        polygraph::TranspileOutput::Continuation { phase1, continue_fn } => {
+                        polygraph::TranspileOutput::Continuation {
+                            phase1,
+                            continue_fn,
+                        } => {
                             // The SELECT phase is itself a Continuation (e.g. list
                             // comprehension over a SET-assigned property).  Drive it
                             // using the same executor that handles read-only queries.
