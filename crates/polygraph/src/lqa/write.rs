@@ -1145,6 +1145,14 @@ fn expr_to_filter_expr(expr: &Expr, base: &str, parts: &mut Vec<String>) -> Opti
 
 // ── Literal helpers ───────────────────────────────────────────────────────────
 
+/// Returns `true` if a WHERE clause part is a scalar BIND or VALUES clause
+/// (not a node/edge triple pattern).  Used to determine whether node MERGE
+/// with outer context is safe (scalar bindings don't multiply node creation).
+fn is_scalar_bind_clause(part: &str) -> bool {
+    let trimmed = part.trim();
+    trimmed.starts_with("BIND(") || trimmed.starts_with("VALUES ")
+}
+
 /// Returns `true` if any where part references the given property key IRI.
 /// Used to detect when a SET map key overlaps with MATCH filter conditions.
 fn map_key_in_where(key: &str, base: &str, where_parts: &[String]) -> bool {

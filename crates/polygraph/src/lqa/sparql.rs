@@ -4849,7 +4849,9 @@ impl Compiler {
             Expr::Exists(inner_op) => {
                 // Do not handle variable-length path predicates in LQA — the VL path
                 // semantics inside EXISTS (pattern predicates like `WHERE (n)-[:REL*2]-()`)
-                // only work correctly via the legacy translator.
+                // only work correctly via the legacy translator.  Cypher enforces
+                // relationship-uniqueness (isomorphism) inside EXISTS patterns; SPARQL
+                // property paths do not have this constraint, producing spurious matches.
                 if op_has_varlen(inner_op) {
                     return Err(PolygraphError::Unsupported {
                         construct: "expression type Exists in LQA SPARQL lowering".into(),
