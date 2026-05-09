@@ -4385,10 +4385,39 @@ impl Compiler {
             Expr::Comparison(op, a, b) => {
                 // Guard: list ordering via string comparison gives semantically wrong results
                 // (Cypher list ordering is element-wise and typed, not lexicographic on the
-                // serialised string).  Return Err so legacy handles these cases.
+                // serialised string).  Try constant-fold when both sides are literal lists;
+                // fall back to legacy for runtime-dynamic lists.
                 if matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge)
                     && (matches!(a.as_ref(), Expr::List(_)) || matches!(b.as_ref(), Expr::List(_)))
                 {
+                    // Both sides literal lists: attempt element-wise constant fold.
+                    if matches!(a.as_ref(), Expr::List(_)) && matches!(b.as_ref(), Expr::List(_)) {
+                        if let Some(result) = try_eval_list_order_cmp(op, a, b) {
+                            return Ok(SparExpr::Literal(SparLit::new_typed_literal(
+                                result.to_string(),
+                                NamedNode::new_unchecked(XSD_BOOLEAN),
+                            )));
+                        }
+                    }
+                    // One side is a list, other is a statically-typed non-list expression
+                    // (Comparison/boolean): Cypher returns null (TypeError).
+                    let is_bool_expr = |e: &Expr| {
+                        matches!(
+                            e,
+                            Expr::Comparison(..)
+                                | Expr::And(..)
+                                | Expr::Or(..)
+                                | Expr::Not(..)
+                                | Expr::Literal(Literal::Boolean(_))
+                                | Expr::Literal(Literal::Null)
+                        )
+                    };
+                    if (matches!(a.as_ref(), Expr::List(_)) && is_bool_expr(b))
+                        || (matches!(b.as_ref(), Expr::List(_)) && is_bool_expr(a))
+                    {
+                        let null_var = self.fresh("_null");
+                        return Ok(SparExpr::Variable(null_var));
+                    }
                     return Err(PolygraphError::Unsupported {
                         construct: "list ordering comparison in LQA SPARQL lowering".into(),
                         spec_ref: "openCypher 9 §7.3".into(),
@@ -8283,6 +8312,55 @@ fn range_arg_is_static(expr: &Expr) -> bool {
         // Variables and all other nodes are NOT static (might be runtime).
         _ => false,
     }
+}
+
+/// Try to evaluate `a <op> b` where both are literal lists with numeric/string elements,
+/// using Cypher's lexicographic element-wise ordering.  Returns `Some(bool)` if the
+/// result is statically determined, `None` otherwise.
+fn try_eval_list_order_cmp(op: &CmpOp, a: &Expr, b: &Expr) -> Option<bool> {
+    let items_a = match a {
+        Expr::List(items) => items,
+        _ => return None,
+    };
+    let items_b = match b {
+        Expr::List(items) => items,
+        _ => return None,
+    };
+    let min_len = items_a.len().min(items_b.len());
+    for i in 0..min_len {
+        let ea = &items_a[i];
+        let eb = &items_b[i];
+        // Try numeric comparison first.
+        if let (Some(na), Some(nb)) = (try_eval_numeric_lqa(ea), try_eval_numeric_lqa(eb)) {
+            #[allow(clippy::float_cmp)]
+            if na < nb {
+                return Some(matches!(op, CmpOp::Lt | CmpOp::Le));
+            } else if na > nb {
+                return Some(matches!(op, CmpOp::Gt | CmpOp::Ge));
+            }
+            // equal — continue to next element
+        } else if let (Expr::Literal(Literal::String(sa)), Expr::Literal(Literal::String(sb))) =
+            (ea, eb)
+        {
+            match sa.cmp(sb) {
+                std::cmp::Ordering::Less => return Some(matches!(op, CmpOp::Lt | CmpOp::Le)),
+                std::cmp::Ordering::Greater => return Some(matches!(op, CmpOp::Gt | CmpOp::Ge)),
+                std::cmp::Ordering::Equal => {}
+            }
+        } else {
+            // Can't compare this element statically.
+            return None;
+        }
+    }
+    // All compared elements are equal; shorter list is "less".
+    Some(match (items_a.len().cmp(&items_b.len()), op) {
+        (std::cmp::Ordering::Less, CmpOp::Lt | CmpOp::Le) => true,
+        (std::cmp::Ordering::Less, _) => false,
+        (std::cmp::Ordering::Greater, CmpOp::Gt | CmpOp::Ge) => true,
+        (std::cmp::Ordering::Greater, _) => false,
+        (std::cmp::Ordering::Equal, CmpOp::Le | CmpOp::Ge) => true,
+        (std::cmp::Ordering::Equal, _) => false,
+    })
 }
 
 /// Evaluate a constant numeric `Expr` to an `f64`.  Returns `None` if the
