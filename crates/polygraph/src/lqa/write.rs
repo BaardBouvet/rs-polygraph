@@ -1884,9 +1884,15 @@ fn compile_delete_rel(
             Direction::Outgoing => (format!("?{from}"), format!("?{to}")),
             Direction::Incoming => (format!("?{to}"), format!("?{from}")),
             Direction::Undirected => {
-                // For undirected patterns op_to_where_parts emits a UNION which
-                // makes it hard to target the right direction.  Fall back.
-                return Err(write_unsupported!("write_delete_rel_undirected_untyped"));
+                // For undirected patterns op_to_where_parts emits a UNION
+                // { ?from ?pred ?to } UNION { ?to ?pred ?from }.
+                // Delete both directions — SPARQL silently ignores deletes of
+                // non-existing triples, so only the matching direction gets removed.
+                out.push(format!(
+                    "DELETE {{ ?{from} {pred_var} ?{to} . ?{to} {pred_var} ?{from} }} \
+                     WHERE {{ {base_where} }}"
+                ));
+                return Ok(());
             }
         };
 
@@ -1903,7 +1909,12 @@ fn compile_delete_rel(
                 Direction::Outgoing => (format!("?{from}"), format!("?{to}")),
                 Direction::Incoming => (format!("?{to}"), format!("?{from}")),
                 Direction::Undirected => {
-                    return Err(write_unsupported!("write_delete_rel_undirected_typed"));
+                    // Delete both directions — SPARQL ignores deletes of non-existing triples.
+                    out.push(format!(
+                        "DELETE {{ ?{from} <{type_iri}> ?{to} . ?{to} <{type_iri}> ?{from} }} \
+                         WHERE {{ {base_where} }}"
+                    ));
+                    continue;
                 }
             };
 
