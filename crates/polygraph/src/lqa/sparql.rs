@@ -5382,6 +5382,153 @@ impl Compiler {
                         }
                     }
                 }
+                // Special case: size([(anchor)-[?type]->(anon) | 1]) where
+                // `anchor` is a scan var and projection is the constant 1.
+                // Emit a COUNT(*) GROUP BY subquery via pending_optional_patterns so
+                // that every outer row gets the correct edge count.
+                if let Expr::PatternComprehension {
+                    predicate: None,
+                    projection,
+                    pattern_op,
+                    ..
+                } = arg
+                {
+                    if matches!(projection.as_ref(), Expr::Literal(Literal::Integer(1))) {
+                        // Peel any top-level Selection wrappers (e.g., from label
+                        // constraints on the target node like `(:Y)`) to reach the Expand.
+                        let mut inner_op = pattern_op.as_ref();
+                        while let Op::Selection { inner, .. } = inner_op {
+                            inner_op = inner.as_ref();
+                        }
+                        if let Op::Expand {
+                            from: anchor,
+                            to: anon_to,
+                            rel_types,
+                            direction,
+                            range: None,
+                            rel_var: None,
+                            inner: expand_inner,
+                            ..
+                        } = inner_op
+                        {
+                            // Only handle directed expansions (Outgoing/Incoming);
+                            // undirected requires deduplication logic not yet supported.
+                            // The inner op is Op::Unit (bound anchor) or Op::Scan/Selection
+                            // (anchor bound in the pattern comprehension's own scope).
+                            let is_safe_inner = matches!(
+                                expand_inner.as_ref(),
+                                Op::Unit | Op::Scan { .. } | Op::Selection { .. }
+                            );
+                            if matches!(direction, Direction::Outgoing | Direction::Incoming)
+                                && self.scan_vars.contains(anchor.as_str())
+                                && is_safe_inner
+                            {
+                                let anchor_var = Self::var(anchor.as_str());
+                                let to_var = self.fresh(&format!("_pcs_{anon_to}"));
+                                let count_var = self.fresh(&format!("_pc_cnt_{anchor}"));
+
+                                // Build the edge BGP.
+                                let sentinel_iri = NamedNode::new_unchecked(format!(
+                                    "{}__node", self.base_iri
+                                ));
+                                let to_tp = TermPattern::Variable(to_var.clone());
+                                let anchor_tp = TermPattern::Variable(anchor_var.clone());
+
+                                let edge_bgp: GraphPattern = if rel_types.is_empty() {
+                                    // Any-type: use predicate variable + endpoint sentinel.
+                                    let pred_var = self.fresh(&format!("_pc_pred_{anchor}"));
+                                    let (subj, obj) = match direction {
+                                        Direction::Outgoing => {
+                                            (anchor_tp.clone(), to_tp.clone())
+                                        }
+                                        _ => (to_tp.clone(), anchor_tp.clone()),
+                                    };
+                                    let edge_triple = GraphPattern::Bgp {
+                                        patterns: vec![TriplePattern {
+                                            subject: subj,
+                                            predicate: NamedNodePattern::Variable(pred_var),
+                                            object: obj,
+                                        }],
+                                    };
+                                    let sentinel_bgp = GraphPattern::Bgp {
+                                        patterns: vec![TriplePattern {
+                                            subject: to_tp.clone(),
+                                            predicate: NamedNodePattern::NamedNode(
+                                                sentinel_iri.clone(),
+                                            ),
+                                            object: TermPattern::NamedNode(sentinel_iri),
+                                        }],
+                                    };
+                                    join(edge_triple, sentinel_bgp)
+                                } else if rel_types.len() == 1 {
+                                    let type_iri = NamedNode::new_unchecked(format!(
+                                        "{}{}",
+                                        self.base_iri, rel_types[0]
+                                    ));
+                                    let (subj, obj) = match direction {
+                                        Direction::Outgoing => {
+                                            (anchor_tp.clone(), to_tp.clone())
+                                        }
+                                        _ => (to_tp.clone(), anchor_tp.clone()),
+                                    };
+                                    GraphPattern::Bgp {
+                                        patterns: vec![TriplePattern {
+                                            subject: subj,
+                                            predicate: NamedNodePattern::NamedNode(type_iri),
+                                            object: obj,
+                                        }],
+                                    }
+                                } else {
+                                    // Multi-type: UNION.
+                                    let pats: Vec<GraphPattern> = rel_types
+                                        .iter()
+                                        .map(|rt| {
+                                            let type_iri = NamedNode::new_unchecked(format!(
+                                                "{}{}",
+                                                self.base_iri, rt
+                                            ));
+                                            let (subj, obj) = match direction {
+                                                Direction::Outgoing => {
+                                                    (anchor_tp.clone(), to_tp.clone())
+                                                }
+                                                _ => (to_tp.clone(), anchor_tp.clone()),
+                                            };
+                                            GraphPattern::Bgp {
+                                                patterns: vec![TriplePattern {
+                                                    subject: subj,
+                                                    predicate: NamedNodePattern::NamedNode(
+                                                        type_iri,
+                                                    ),
+                                                    object: obj,
+                                                }],
+                                            }
+                                        })
+                                        .collect();
+                                    pats.into_iter().reduce(|a, b| GraphPattern::Union {
+                                        left: Box::new(a),
+                                        right: Box::new(b),
+                                    }).unwrap()
+                                };
+
+                                // COUNT(*) aggregation grouped by anchor.
+                                let cnt_agg = AggregateExpression::CountSolutions {
+                                    distinct: false,
+                                };
+                                let group_pat = GraphPattern::Group {
+                                    inner: Box::new(edge_bgp),
+                                    variables: vec![anchor_var],
+                                    aggregates: vec![(count_var.clone(), cnt_agg)],
+                                };
+                                self.pending_optional_patterns.push(group_pat);
+                                // COALESCE(count, 0) — zero when no edges match.
+                                return Ok(SparExpr::Coalesce(vec![
+                                    SparExpr::Variable(count_var),
+                                    Self::lit_integer(0),
+                                ]));
+                            }
+                        }
+                    }
+                }
                 let a = self.lower_expr(arg)?;
                 Ok(SparExpr::FunctionCall(Function::StrLen, vec![a]))
             }
